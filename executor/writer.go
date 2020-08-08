@@ -280,9 +280,6 @@ func WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) (err error) {
 			cs.Remove("Nanoseconds")
 			alignData = false
 		}
-		rs := cs.ToRowSeries(tbk, alignData)
-		rowdata := rs.GetData()
-
 		tbi, err := cDir.GetLatestTimeBucketInfoFromKey(&tbk)
 		if err != nil {
 			/*
@@ -328,8 +325,22 @@ func WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) (err error) {
 			return fmt.Errorf(columnMismatchError, csDSV, dbDSV)
 		}
 		missing, coercion := GetMissingAndTypeCoercionColumns(dbDSV, csDSV)
-		if missing != nil || coercion != nil {
+		if missing != nil {
 			return fmt.Errorf(columnMismatchError, csDSV, dbDSV)
+		} else if coercion != nil {
+			for _, dbDS := range coercion {
+				if err := cs.CoerceColumnType(dbDS); err != nil {
+					var csDS DataShape
+					for i := range csDSV {
+						csDS = csDSV[i]
+						if csDS.Name == dbDS.Name {
+							break
+						}
+					}
+					log.Error("[%s] error coercing %s from %s to %s", tbk.GetItemKey(), csDS.Name, csDS.Type.String(), dbDS.Type.String())
+					return err
+				}
+			}
 		}
 
 		/*
@@ -340,7 +351,8 @@ func WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) (err error) {
 			return err
 		}
 
-		w.WriteRecords(times, rowdata)
+		rowData := cs.ToRowSeries(tbk, alignData).GetData()
+		w.WriteRecords(times, rowData)
 	}
 	wal := ThisInstance.WALFile
 	wal.RequestFlush()
