@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/alpacahq/marketstore/v4/catalog"
+	"github.com/alpacahq/marketstore/v4/executor/wal"
 	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	. "github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
+
 	"github.com/klauspost/compress/snappy"
 )
 
@@ -50,12 +52,30 @@ func (w *Writer) AddNewYearFile(year int16) (err error) {
 	return nil
 }
 
+func formatRecord(buf, row []byte, t time.Time, index, intervalsPerDay int64, isVariable bool) []byte {
+	/*
+		Incoming data records ALWAYS have the 8-byte Epoch column first
+	*/
+	row = row[8:] // Chop off the Epoch column
+	if !isVariable {
+		return row
+	}
+	/*
+		[VariableLength record] append IntervalTicks since bucket time instead of Epoch
+	*/
+	var outBuf []byte
+	outBuf = append(buf, row...)
+	outBuf = AppendIntervalTicks(outBuf, t, index, intervalsPerDay)
+	return outBuf
+
+}
+
 // WriteRecords creates a WriteCommand from the supplied timestamp and data buffer,
 // and sends it over the write channel to be flushed to disk in the WAL sync subroutine.
 // The caller should assume that by calling WriteRecords directly, the data will be written
 // to the file regardless if it satisfies the on-disk data shape, possible corrupting
 // the data files. It is recommended to call WriteCSM() for any writes as it is safer.
-func (w *Writer) WriteRecords(ts []time.Time, data []byte) {
+func (w *Writer) WriteRecords(ts []time.Time, data []byte, ds []DataShape) {
 	/*
 		[]data contains a number of records, each including the epoch in the first 8 bytes
 	*/
@@ -67,26 +87,10 @@ func (w *Writer) WriteRecords(ts []time.Time, data []byte) {
 	var (
 		prevIndex int64
 		prevYear  int16
-		cc        *WriteCommand
+		cc        *wal.WriteCommand
 		outBuf    []byte
 		rowLen    = len(data) / numRows
 	)
-
-	formatRecord := func(buf, record []byte, t time.Time, index, intervalsPerDay int64) (outBuf []byte) {
-		/*
-			Incoming data records ALWAYS have the 8-byte Epoch column first
-		*/
-		record = record[8:] // Chop off the Epoch column
-		if w.tbi.GetRecordType() == VARIABLE {
-			/*
-				Trim the Epoch column off and replace it with ticks since bucket time
-			*/
-			outBuf = append(buf, record...)
-			outBuf = AppendIntervalTicks(outBuf, t, index, intervalsPerDay)
-			return outBuf
-		}
-		return record
-	}
 
 	wkp := FullPathToWALKey(ThisInstance.WALFile.RootPath, w.tbi.Path)
 	vrl := w.tbi.GetVariableRecordLength()
@@ -108,22 +112,24 @@ func (w *Writer) WriteRecords(ts []time.Time, data []byte) {
 		if i == 0 {
 			prevIndex = index
 			prevYear = year
-			cc = &WriteCommand{
+			cc = &wal.WriteCommand{
 				RecordType: rt,
 				WALKeyPath: wkp,
-				VarRecLen:  vrl,
+				VarRecLen:  int(vrl),
 				Offset:     offset,
 				Index:      index,
-				Data:       nil}
+				Data:       nil,
+				DataShapes: ds,
+			}
 		}
-		// Because index is relative time from the beginning of the year
+		// Because index is relative time from the beginning of the year,
 		// To confirm that the next data is a different data, both index and year should be checked.
 		// (ex. when writing "2017-02-03 04:05:06" and "2018-02-03 04:05:06", index (02-03 04:05:06) is the same)
 		if index == prevIndex && year == prevYear {
 			/*
 				This is the interior of a multi-row write buffer
 			*/
-			outBuf = formatRecord(outBuf, record, t, index, w.tbi.GetIntervals())
+			outBuf = formatRecord(outBuf, record, t, index, w.tbi.GetIntervals(), w.tbi.GetRecordType() == VARIABLE)
 			cc.Data = outBuf
 		}
 		if index != prevIndex || year != prevYear {
@@ -133,25 +139,21 @@ func (w *Writer) WriteRecords(ts []time.Time, data []byte) {
 			w.tgc.writeChannel <- cc
 			// Setup next command
 			prevIndex = index
-			outBuf = formatRecord([]byte{}, record, t, index, w.tbi.GetIntervals())
-			cc = &WriteCommand{
+			outBuf = formatRecord([]byte{}, record, t, index, w.tbi.GetIntervals(), w.tbi.GetRecordType() == VARIABLE)
+			cc = &wal.WriteCommand{
 				RecordType: w.tbi.GetRecordType(),
 				WALKeyPath: FullPathToWALKey(ThisInstance.WALFile.RootPath, w.tbi.Path),
-				VarRecLen:  w.tbi.GetVariableRecordLength(),
+				VarRecLen:  int(w.tbi.GetVariableRecordLength()),
 				Offset:     offset,
 				Index:      index,
-				Data:       outBuf}
+				Data:       outBuf,
+				DataShapes: ds,
+			}
 		}
-		if i == (numRows - 1) {
-			/*
-				The last iteration must output it's command buffer
-			*/
-			w.tgc.writeChannel <- cc
-		}
-		// if cc != nil {
-		// 	log.Info(cc.toString())
-		// }
 	}
+
+	// output to WAL
+	w.tgc.writeChannel <- cc
 }
 
 func AppendIntervalTicks(buf []byte, t time.Time, index, intervalsPerDay int64) (outBuf []byte) {
@@ -161,7 +163,7 @@ func AppendIntervalTicks(buf []byte, t time.Time, index, intervalsPerDay int64) 
 	return outBuf
 }
 
-func WriteBufferToFile(fp stdio.WriterAt, buffer offsetIndexBuffer) error {
+func WriteBufferToFile(fp stdio.WriterAt, buffer wal.OffsetIndexBuffer) error {
 	offset := buffer.Offset()
 	data := buffer.IndexAndPayload()
 	_, err := fp.WriteAt(data, offset)
@@ -172,7 +174,7 @@ type IndirectRecordInfo struct {
 	Index, Offset, Len int64
 }
 
-func WriteBufferToFileIndirect(fp *os.File, buffer offsetIndexBuffer, varRecLen int32) (err error) {
+func WriteBufferToFileIndirect(fp *os.File, buffer wal.OffsetIndexBuffer, varRecLen int) (err error) {
 	/*
 		Here we write the data payload of the buffer to the end of the data file
 		Prior to writing the new data, we fetch any previously written data and
@@ -224,7 +226,7 @@ func WriteBufferToFileIndirect(fp *os.File, buffer offsetIndexBuffer, varRecLen 
 	/*
 		Sort the data by the timestamp to maintain on-disk sorted order
 	*/
-	sort.Stable(NewByIntervalTicks(dataToBeWritten, int(dataLen)/int(varRecLen), int(varRecLen)))
+	sort.Stable(NewByIntervalTicks(dataToBeWritten, int(dataLen)/varRecLen, varRecLen))
 
 	/*
 		Write the data at the end of the file
@@ -340,7 +342,7 @@ func WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) (err error) {
 			return err
 		}
 
-		w.WriteRecords(times, rowdata)
+		w.WriteRecords(times, rowdata, dbDSV)
 	}
 	wal := ThisInstance.WALFile
 	wal.RequestFlush()

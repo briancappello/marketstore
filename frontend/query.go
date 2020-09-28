@@ -7,7 +7,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
+	"github.com/alpacahq/marketstore/v4/catalog"
+	"github.com/alpacahq/marketstore/v4/contrib/ondiskagg/aggtrigger"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/planner"
 	"github.com/alpacahq/marketstore/v4/sqlparser"
@@ -242,16 +243,31 @@ type ListSymbolsResponse struct {
 	Results []string
 }
 
-type ListSymbolsArgs struct{}
+type ListSymbolsRequest struct {
+	// "symbol", or "tbk"
+	Format string `msgpack:"format,omitempty"`
+}
 
-func (s *DataService) ListSymbols(r *http.Request, args *ListSymbolsArgs, response *ListSymbolsResponse) (err error) {
+func (s *DataService) ListSymbols(r *http.Request, req *ListSymbolsRequest, response *ListSymbolsResponse) (err error) {
 	if atomic.LoadUint32(&Queryable) == 0 {
 		return queryableError
 	}
-	for symbol := range executor.ThisInstance.CatalogDir.GatherCategoriesAndItems()["Symbol"] {
-		response.Results = append(response.Results, symbol)
+
+	// TBK format (e.g. ["AMZN/1Min/TICK", "AAPL/1Sec/OHLCV", ...])
+	if req != nil && req.Format == "tbk" {
+		response.Results = catalog.ListTimeBucketKeyNames(executor.ThisInstance.CatalogDir)
+		return nil
 	}
-	return err
+
+	// Symbol format (e.g. ["AMZN", "AAPL", ...])
+	symbols := executor.ThisInstance.CatalogDir.GatherCategoriesAndItems()["Symbol"]
+	response.Results = make([]string, len(symbols))
+	cnt := 0
+	for symbol := range symbols {
+		response.Results[cnt] = symbol
+		cnt++
+	}
+	return nil
 }
 
 /*
@@ -261,43 +277,57 @@ Utility functions
 func executeQuery(tbk *io.TimeBucketKey, start, end time.Time, LimitRecordCount int,
 	LimitFromStart bool, columns []string) (io.ColumnSeriesMap, error) {
 	query := planner.NewQuery(executor.ThisInstance.CatalogDir)
-
-	/*
-		Alter timeframe inside key to ensure it matches a queryable TF
-	*/
+	queriedTbk := io.NewTimeBucketKeyFromString(tbk.Key)
 
 	tf := tbk.GetItemInCategory("Timeframe")
 	cd := utils.CandleDurationFromString(tf)
-	queryableTimeframe := cd.QueryableTimeframe()
-	tbk.SetItemInCategory("Timeframe", queryableTimeframe)
-	query.AddTargetKey(tbk)
+	queryableTimeframes := cd.QueryableTimeframes()
 
-	if LimitRecordCount != 0 {
-		direction := io.LAST
-		if LimitFromStart {
-			direction = io.FIRST
+	/*
+		search for the lowest-frequency timeframe with data able to satisfy the request
+	*/
+	var parseResult *planner.ParseResult
+	for i, timeframe := range queryableTimeframes {
+		queriedTbk.SetItemInCategory("Timeframe", timeframe)
+		query.Reset()
+		query.AddTargetKey(queriedTbk)
+		query.SetRange(start, end)
+
+		if LimitRecordCount != 0 {
+			direction := io.LAST
+			if LimitFromStart {
+				direction = io.FIRST
+			}
+			query.SetRowLimit(
+				direction,
+				cd.QueryableNrecords(timeframe, LimitRecordCount),
+			)
 		}
-		query.SetRowLimit(
-			direction,
-			cd.QueryableNrecords(
-				queryableTimeframe,
-				LimitRecordCount,
-			),
-		)
-	}
 
-	query.SetRange(start, end)
-	parseResult, err := query.Parse()
-	if err != nil {
-		// No results from query
+		result, err := query.Parse()
+		if err == nil {
+			parseResult = result
+			break
+		}
 		if err.Error() == "No files returned from query parse" {
-			log.Info("No results returned from query: Target: %v, start, end: %v,%v LimitRecordCount: %v",
+			// continue checking higher-frequency timeframes if there are any left in the list
+			if i+1 < len(queryableTimeframes) {
+				continue
+			}
+			// otherwise add contextual details to the error and return early
+			err = fmt.Errorf(
+				"No results returned from query: Target: %v, start, end: %v,%v LimitRecordCount: %v",
 				tbk.String(), start, end, LimitRecordCount)
+			log.Error("Error: %s\n", err)
 		} else {
 			log.Error("Parsing query: %s\n", err)
 		}
 		return nil, err
 	}
+
+	/*
+		read in the query parse data
+	 */
 	scanner, err := executor.NewReader(parseResult)
 	if err != nil {
 		log.Error("Unable to create scanner: %s\n", err)
@@ -308,8 +338,21 @@ func executeQuery(tbk *io.TimeBucketKey, start, end time.Time, LimitRecordCount 
 		log.Error("Error returned from query scanner: %s\n", err)
 		return nil, err
 	}
-
 	csm.FilterColumns(columns)
+
+	/*
+		check if we need to aggregate the queried data to the requested timeframe
+	*/
+	if tf != queriedTbk.GetItemInCategory("Timeframe") {
+		aggCsm := io.NewColumnSeriesMap()
+		for _, symbol := range tbk.GetMultiItemInCategory("Symbol") {
+			queriedTbk.SetItemInCategory("Symbol", symbol)
+			tbk.SetItemInCategory("Symbol", symbol)
+			cs := aggtrigger.Aggregate(csm[*queriedTbk], tbk)
+			aggCsm[*tbk] = cs
+		}
+		return aggCsm, err
+	}
 
 	return csm, err
 }
