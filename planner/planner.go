@@ -182,6 +182,12 @@ func NewQuery(d *Directory) *query {
 	return q
 }
 
+func (q *query) Reset() {
+	q.Restriction = NewRestrictionList()
+	q.Range = NewDateRange()
+	q.Limit = NewRowLimit()
+}
+
 func (q *query) SetRowLimit(direction DirectionEnum, rowLimit int) {
 	q.Limit = NewRowLimit()
 	q.Limit.Number = int32(rowLimit)
