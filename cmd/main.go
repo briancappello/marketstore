@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/alpacahq/marketstore/v4/cmd/backfill"
 	"github.com/alpacahq/marketstore/v4/cmd/connect"
 	"github.com/alpacahq/marketstore/v4/cmd/create"
 	"github.com/alpacahq/marketstore/v4/cmd/estimate"
@@ -35,6 +36,7 @@ func Execute() error {
 	}
 
 	// Adds subcommands and version flag.
+	c.AddCommand(backfill.Cmd)
 	c.AddCommand(create.Cmd)
 	c.AddCommand(estimate.Cmd)
 	c.AddCommand(start.Cmd)
