@@ -27,7 +27,7 @@ bgworkers:
   - module: polygon.so
     config:
       api_key: your_api_key
-      ws_servers: wss://alpaca.socket.polygon.io
+      ws_servers: wss://socket.polygon.io
       data_types: ["bars"]
       symbols:
         - AAPL
