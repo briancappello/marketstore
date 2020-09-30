@@ -18,6 +18,11 @@ func init() {
 	InstanceConfig.Timezone = time.UTC
 }
 
+type Credentials struct {
+	APIKey    string
+	APISecret string
+}
+
 type TriggerSetting struct {
 	Module string
 	On     string
@@ -51,6 +56,7 @@ type MktsConfig struct {
 	WALBypass                  bool
 	ClusterMode                bool
 	StartTime                  time.Time
+	Alpaca                     *Credentials
 	Triggers                   []*TriggerSetting
 	BgWorkers                  []*BgWorkerSetting
 }
@@ -80,7 +86,11 @@ func (m *MktsConfig) Parse(data []byte) error {
 			BackgroundSync             string `yaml:"background_sync"`
 			WALBypass                  string `yaml:"wal_bypass"`
 			ClusterMode                string `yaml:"cluster_mode"`
-			Triggers                   []struct {
+			Alpaca                     struct {
+				APIKey    string `yaml:"api_key"`
+				APISecret string `yaml:"api_secret"`
+			} `yaml:"alpaca"`
+			Triggers []struct {
 				Module string                 `yaml:"module"`
 				On     string                 `yaml:"on"`
 				Config map[string]interface{} `yaml:"config"`
@@ -253,6 +263,11 @@ func (m *MktsConfig) Parse(data []byte) error {
 		m.GRPCListenURL = fmt.Sprintf("%v:%v", aux.ListenHost, aux.GRPCListenPort)
 	}
 	m.UtilitiesURL = fmt.Sprintf("%v", aux.UtilitiesURL)
+
+	m.Alpaca = &Credentials{
+		APIKey:    aux.Alpaca.APIKey,
+		APISecret: aux.Alpaca.APISecret,
+	}
 
 	for _, trig := range aux.Triggers {
 		triggerSetting := &TriggerSetting{
