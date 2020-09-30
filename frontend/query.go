@@ -2,11 +2,6 @@ package frontend
 
 import (
 	"fmt"
-	"math"
-	"net/http"
-	"strings"
-	"sync/atomic"
-	"time"
 	"github.com/alpacahq/marketstore/v4/catalog"
 	"github.com/alpacahq/marketstore/v4/contrib/ondiskagg/aggtrigger"
 	"github.com/alpacahq/marketstore/v4/executor"
@@ -15,6 +10,11 @@ import (
 	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
+	"math"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // This is the parameter interface for DataService.Query method.
@@ -327,7 +327,7 @@ func executeQuery(tbk *io.TimeBucketKey, start, end time.Time, LimitRecordCount 
 
 	/*
 		read in the query parse data
-	 */
+	*/
 	scanner, err := executor.NewReader(parseResult)
 	if err != nil {
 		log.Error("Unable to create scanner: %s\n", err)
