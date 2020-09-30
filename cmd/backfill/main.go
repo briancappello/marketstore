@@ -2,8 +2,9 @@ package backfill
 
 import (
 	"encoding/json"
-	"io/ioutil"
-	"os"
+	"errors"
+	"fmt"
+	"github.com/alpacahq/marketstore/v4/utils/io"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -37,12 +38,13 @@ var (
 		Example: example,
 		RunE:    executeStart,
 	}
-	ConfigFilePath     string
-	Config             polygon_config.FetcherConfig
-	StartDate          string
-	EndDate            string
-	Parallelism        int
-	Symbols            string
+	ConfigFilePath string
+	Config         polygon_config.FetcherConfig
+	StartDate      string
+	EndDate        string
+	Parallelism    int
+	Symbols        string
+	Timeframe      string
 
 	startTime, endTime time.Time
 	symbolList         []string
@@ -59,10 +61,14 @@ func init() {
 		"Parallelism (default NumCPU)")
 	Cmd.Flags().StringVar(&Symbols, "symbols", "*",
 		"Comma-separated list of symbols to backfill (default all in DB)")
+	Cmd.Flags().StringVar(&Timeframe, "timeframe", "1Min",
+		"The timeframe to backfill (eg 1Min or 1D)")
 }
 
 func executeStart(cmd *cobra.Command, args []string) error {
-	initConfig()
+	if err := initConfig(); err != nil {
+		return err
+	}
 	initWriter()
 
 	if Symbols == "*" {
@@ -98,28 +104,52 @@ func executeStart(cmd *cobra.Command, args []string) error {
 
 	sem := make(chan struct{}, Parallelism)
 
-	log.Info("[polygon] backfilling bars from %v to %v", startTime.Format(format), endTime.Format(format))
+	log.Info("[backfill] backfilling bars from %v to %v", startTime.Format(format), endTime.Format(format))
 
-	for _, sym := range symbolList {
-		s := startTime
-		e := endTime
-
-		log.Info("[polygon] backfilling bars for %v", sym)
+	backfillMinuteBars := func(tbk *io.TimeBucketKey, s, e time.Time) {
+		symbol := tbk.GetItemInCategory("Symbol")
+		cd, err := tbk.GetCandleDuration()
+		if err != nil {
+			log.Error("[backfill] error creating TBK Candle Duration")
+			return
+		}
 
 		for e.After(s) {
 			if calendar.Nasdaq.IsMarketDay(s) {
-				log.Info("[polygon] backfilling bars for %v on %v", sym, s.Format(format))
+				log.Info("[backfill] backfilling bars for %v on %v", symbol, s.Format(format))
 
 				sem <- struct{}{}
 				go func(t time.Time) {
 					defer func() { <-sem }()
 
-					if err := backfill.Bars(sym, t, t.Add(24*time.Hour)); err != nil {
-						log.Warn("[polygon] failed to backfill bars for %v on %v (%v)", sym, t.Format(format), err)
+					if err := backfill.Bars(symbol, t, t.Add(24*time.Hour), cd.String); err != nil {
+						log.Warn("[backfill] failed to backfill minutely bars for %v on %v (%v)", symbol, t.Format(format), err)
 					}
 				}(s)
 			}
 			s = s.Add(24 * time.Hour)
+		}
+	}
+
+	for _, sym := range symbolList {
+		tbk := io.NewTimeBucketKeyFromString(sym + "/" + Timeframe + "/OHLCV")
+		cd, err := tbk.GetCandleDuration()
+		if err != nil {
+			log.Error("[backfill] error creating TBK Candle Duration: %v", err)
+		}
+
+		log.Info("[backfill] backfilling %v bars for %v", cd.String, sym)
+		if cd.Suffix() == "Min" || cd.Suffix() == "T" {
+			backfillMinuteBars(tbk, startTime, endTime)
+		} else if cd.Suffix() == "D" {
+			sem <- struct{}{}
+			go func() {
+				defer func() { <-sem }()
+
+				if err := backfill.Bars(sym, startTime, endTime, cd.String); err != nil {
+					log.Warn("[backfill] failed to backfill daily bars for %v (%v)", sym, err)
+				}
+			}()
 		}
 	}
 
@@ -128,29 +158,22 @@ func executeStart(cmd *cobra.Command, args []string) error {
 		sem <- struct{}{}
 	}
 
-	log.Info("[polygon] backfilling complete")
+	log.Info("[backfill] backfilling complete")
 
 	if len(executor.ThisInstance.TriggerMatchers) > 0 {
-		log.Info("[polygon] waiting for 10 more seconds for ondiskagg triggers to complete")
+		log.Info("[backfill] waiting for 10 more seconds for ondiskagg triggers to complete")
 		time.Sleep(10 * time.Second)
 	}
 
 	return nil
 }
 
-func initConfig() {
-	// Attempt to read mkts.yml config file
-	data, err := ioutil.ReadFile(ConfigFilePath)
-	if err != nil {
-		log.Fatal("failed to read configuration file error: %s", err.Error())
-		os.Exit(1)
-	}
-
+func initConfig() error {
 	// Attempt to set configuration
-	err = utils.InstanceConfig.Parse(data)
-	if err != nil {
-		log.Fatal("failed to parse configuration file error: %v", err.Error())
-		os.Exit(1)
+	var err error
+
+	if err = utils.InstanceConfig.Load(ConfigFilePath); err != nil {
+		return err
 	}
 
 	// Attempt to set the polygon plugin config settings
@@ -158,22 +181,19 @@ func initConfig() {
 	for _, bgConfig := range utils.InstanceConfig.BgWorkers {
 		if bgConfig.Module == "polygon.so" {
 			data, _ := json.Marshal(bgConfig.Config)
-			if err = json.Unmarshal(data, &Config); err != nil {
-				log.Fatal("failed to parse configuration file error: %v", err.Error())
-				os.Exit(1)
+			if err := json.Unmarshal(data, &Config); err != nil {
+				return err
 			}
 			foundPolygonConfig = true
 			break
 		}
 	}
 	if !foundPolygonConfig {
-		log.Fatal("polygon background worker is not configured in %s", ConfigFilePath)
-		os.Exit(1)
+		return fmt.Errorf("polygon background worker is not configured in %s", ConfigFilePath)
 	}
 
 	if Config.APIKey == "" {
-		log.Fatal("[polygon] api key is required")
-		os.Exit(1)
+		return errors.New("[backfill] api key is required")
 	}
 	api.SetAPIKey(Config.APIKey)
 
@@ -184,21 +204,21 @@ func initConfig() {
 	}
 
 	if err != nil {
-		log.Fatal("[backfill] failed to parse start date from timestamp (%v)", err)
-		os.Exit(1)
+		return fmt.Errorf("[backfill] failed to parse start date from timestamp (%v)", err)
 	}
 
 	if EndDate != "" {
 		endTime, err = time.Parse(format, EndDate)
 
 		if err != nil {
-			log.Fatal("[backfill] failed to parse end date from timestamp (%v)", err)
-			os.Exit(1)
+			return fmt.Errorf("[backfill] failed to parse end date from timestamp (%v)", err)
 		}
 	} else {
-		t := time.Now()
+		t := time.Now().AddDate(0, 0, 1)
 		endTime = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).Round(time.Minute)
 	}
+
+	return nil
 }
 
 func initWriter() {

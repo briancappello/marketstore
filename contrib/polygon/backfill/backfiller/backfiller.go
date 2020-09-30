@@ -140,7 +140,7 @@ func main() {
 						defer func() { <-sem }()
 
 						if len(exchangeIDs) == 0 {
-							if err = backfill.Bars(sym, t, t.Add(24*time.Hour)); err != nil {
+							if err = backfill.Bars(sym, t, t.Add(24*time.Hour), "1Min"); err != nil {
 								log.Warn("[polygon] failed to backfill bars for %v (%v)", sym, err)
 							}
 						} else {

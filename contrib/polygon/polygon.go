@@ -192,7 +192,7 @@ func (pf *PolygonFetcher) backfillBars(symbol string, end time.Time) {
 	}
 
 	// request & write the missing bars
-	if err = backfill.Bars(symbol, from, time.Time{}); err != nil {
+	if err = backfill.Bars(symbol, from, time.Time{}, tbk.GetItemInCategory("Timeframe")); err != nil {
 		log.Error("[polygon] bars backfill failure for key: [%v] (%v)", tbk.String(), err)
 	}
 }

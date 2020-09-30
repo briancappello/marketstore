@@ -88,7 +88,7 @@ var (
 	BackfillM *sync.Map
 )
 
-func Bars(symbol string, from, to time.Time) (err error) {
+func Bars(symbol string, from, to time.Time, timeframe string) (err error) {
 	if from.IsZero() {
 		from = time.Date(2014, 1, 1, 0, 0, 0, 0, NY)
 	}
@@ -97,7 +97,31 @@ func Bars(symbol string, from, to time.Time) (err error) {
 		to = time.Now()
 	}
 
-	resp, err := api.GetHistoricAggregates(symbol, "minute", 1, from, to, nil)
+	tbk := io.NewTimeBucketKeyFromString(symbol + "/" + timeframe + "/OHLCV")
+	cd, err := tbk.GetCandleDuration()
+	if err != nil {
+		return err
+	}
+
+	var timespan = ""
+	switch cd.Suffix() {
+	case "T":
+		fallthrough
+	case "Min":
+		timespan = "minute"
+	case "H":
+		timespan = "hour"
+	case "D":
+		timespan = "day"
+	case "W":
+		timespan = "week"
+	case "Y":
+		timespan = "year"
+	default:
+		return fmt.Errorf("unsupported timeframe: %v", cd.String)
+	}
+
+	resp, err := api.GetHistoricAggregates(symbol, timespan, cd.Multiplier(), from, to, nil)
 	if err != nil {
 		return err
 	}
@@ -106,7 +130,6 @@ func Bars(symbol string, from, to time.Time) (err error) {
 		return
 	}
 
-	tbk := io.NewTimeBucketKeyFromString(symbol + "/1Min/OHLCV")
 	csm := io.NewColumnSeriesMap()
 
 	epoch := make([]int64, len(resp.Results))
