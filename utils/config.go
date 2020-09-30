@@ -3,6 +3,7 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"strconv"
 	"strings"
 	"time"
@@ -272,4 +273,23 @@ func (m *MktsConfig) Parse(data []byte) error {
 	}
 
 	return err
+}
+
+func (m *MktsConfig) Load(configFilePath string) error {
+	// Attempt to read config file.
+	data, err := ioutil.ReadFile(configFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read configuration file error: %s", err.Error())
+	}
+
+	// Attempt to set configuration.
+	err = InstanceConfig.Parse(data)
+	if err != nil {
+		return fmt.Errorf("failed to parse configuration file error: %v", err.Error())
+	}
+
+	// Log config location.
+	log.Info("using %v for configuration", configFilePath)
+
+	return nil
 }

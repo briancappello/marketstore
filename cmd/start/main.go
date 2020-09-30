@@ -2,7 +2,6 @@ package start
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -54,20 +53,8 @@ func init() {
 
 // executeStart implements the start command.
 func executeStart(cmd *cobra.Command, args []string) error {
-
-	// Attempt to read config file.
-	data, err := ioutil.ReadFile(configFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to read configuration file error: %s", err.Error())
-	}
-
-	// Log config location.
-	log.Info("using %v for configuration", configFilePath)
-
-	// Attempt to set configuration.
-	err = utils.InstanceConfig.Parse(data)
-	if err != nil {
-		return fmt.Errorf("failed to parse configuration file error: %v", err.Error())
+	if err := utils.InstanceConfig.Load(configFilePath); err != nil {
+		return err
 	}
 
 	// New grpc server.
