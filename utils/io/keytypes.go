@@ -133,6 +133,19 @@ func (mk *TimeBucketKey) GetTimeFrame() (tf *utils.Timeframe, err error) {
 	return tf, err
 }
 
+func (mk *TimeBucketKey) GetCandleDuration() (cd *utils.CandleDuration, err error) {
+	tfs := mk.GetItemInCategory("Timeframe")
+	if len(tfs) == 0 {
+		return &utils.CandleDuration{}, fmt.Errorf("Error: Unable to get timeframe from key")
+	}
+
+	if cd = utils.CandleDurationFromString(tfs); cd == nil {
+		err = fmt.Errorf("Error: Unable to get candle duration from key")
+	}
+
+	return cd, err
+}
+
 func (mk *TimeBucketKey) GetPathToYearFiles(rootDir string) string {
 	return filepath.Join(rootDir, mk.GetItemKey())
 }
