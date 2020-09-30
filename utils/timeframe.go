@@ -228,6 +228,14 @@ func (cd *CandleDuration) Duration() time.Duration {
 	return cd.duration
 }
 
+func (cd *CandleDuration) Suffix() string {
+	return cd.suffix
+}
+
+func (cd *CandleDuration) Multiplier() int {
+	return cd.multiplier
+}
+
 func CandleDurationFromString(tf string) (cd *CandleDuration) {
 	re := regexp.MustCompile("([0-9]+)(Sec|Min|H|D|W|M|Y)")
 	groups := re.FindStringSubmatch(tf)
