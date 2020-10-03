@@ -1,8 +1,6 @@
 package backfill
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"runtime"
@@ -15,7 +13,6 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/api"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/backfill"
-	"github.com/alpacahq/marketstore/v4/contrib/polygon/polygon_config"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/log"
@@ -26,8 +23,9 @@ const (
 	usage   = "backfill"
 	short   = "Backfill 1Min bars"
 	long    = short
-	example = "marketstore backfill --start 2020-01-01 --symbols AMD,NVDA"
+	example = "marketstore backfill --timeframe 1D --symbols AMD,NVDA --start 2010-01-01"
 	format  = "2006-01-02"
+	defaultStartDate = "2010-01-01"
 )
 
 var (
@@ -39,7 +37,6 @@ var (
 		RunE:    executeStart,
 	}
 	ConfigFilePath string
-	Config         polygon_config.FetcherConfig
 	StartDate      string
 	EndDate        string
 	Parallelism    int
@@ -71,16 +68,14 @@ func executeStart(cmd *cobra.Command, args []string) error {
 	}
 	initWriter()
 
-	if Symbols == "*" {
+	if Symbols != "" && Symbols != "*" {
+		symbolList = strings.Split(Symbols, ",")
+	} else {
 		for symbol := range executor.ThisInstance.CatalogDir.GatherCategoriesAndItems()["Symbol"] {
 			symbolList = append(symbolList, symbol)
 		}
-	} else if Symbols != "" {
-		symbolList = strings.Split(Symbols, ",")
-	} else {
-		symbolList = Config.Symbols
 	}
-	// FIXME verify symbols exist on polygon?
+	// FIXME verify symbols exist on polygon
 
 	// free memory in the background every 1 minute for long running backfills with very high parallelism
 	go func() {
@@ -176,31 +171,12 @@ func initConfig() error {
 		return err
 	}
 
-	// Attempt to set the polygon plugin config settings
-	foundPolygonConfig := false
-	for _, bgConfig := range utils.InstanceConfig.BgWorkers {
-		if bgConfig.Module == "polygon.so" {
-			data, _ := json.Marshal(bgConfig.Config)
-			if err := json.Unmarshal(data, &Config); err != nil {
-				return err
-			}
-			foundPolygonConfig = true
-			break
-		}
-	}
-	if !foundPolygonConfig {
-		return fmt.Errorf("polygon background worker is not configured in %s", ConfigFilePath)
-	}
-
-	if Config.APIKey == "" {
-		return errors.New("[backfill] api key is required")
-	}
-	api.SetAPIKey(Config.APIKey)
+	api.SetAPIKey(utils.InstanceConfig.Alpaca.APIKey)
 
 	if StartDate != "" {
 		startTime, err = time.Parse(format, StartDate)
 	} else {
-		startTime, err = time.Parse(format, Config.QueryStart)
+		startTime, err = time.Parse(format, defaultStartDate)
 	}
 
 	if err != nil {
