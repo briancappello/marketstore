@@ -95,3 +95,22 @@ func executeInit(*cobra.Command, []string) error {
 	}
 	return nil
 }
+
+func create(tbk *io.TimeBucketKey, dataShapes []io.DataShape) error {
+	tf, err := tbk.GetTimeFrame()
+	if err != nil {
+		return err
+	}
+	dir := tbk.GetPathToYearFiles(executor.ThisInstance.RootDir)
+	year := int16(time.Now().Year())
+	rt := io.EnumRecordTypeByName("fixed")
+
+	tbinfo := io.NewTimeBucketInfo(*tf, dir, "Default", year, dataShapes, rt)
+
+	err = executor.ThisInstance.CatalogDir.AddTimeBucket(tbk, tbinfo)
+	if err != nil && !strings.Contains(err.Error(), "Can not overwrite file") {
+		return fmt.Errorf("creation of new catalog entry failed: %s", err.Error())
+	}
+
+	return nil
+}
