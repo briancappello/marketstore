@@ -37,7 +37,15 @@ var (
 		Example:    example,
 		RunE:       executeInit,
 	}
+	Symbols			string
+	symbolsList		[]string
+	validSymbols 	map[string]int
 )
+
+func init() {
+	Cmd.Flags().StringVar(&Symbols, "symbols", "",
+		"Optional comma-separated list of symbols to initialize")
+}
 
 // executeInit implements the init command.
 func executeInit(*cobra.Command, []string) error {
@@ -47,7 +55,7 @@ func executeInit(*cobra.Command, []string) error {
 		return err
 	}
 
-	// write to current directory.
+	// write to current directory (if no mkts.yml file exists yet)
 	_, err = os.Stat(configFilePath)
 	if os.IsNotExist(err) {
 		err = ioutil.WriteFile(configFilePath, data, 0644)
@@ -61,14 +69,35 @@ func executeInit(*cobra.Command, []string) error {
 	}
 	executor.NewInstanceSetup(utils.InstanceConfig.RootDirectory, true, true, true, true)
 
+	// fetch valid symbols from Alpaca API
 	api.SetCredentials(
 		utils.InstanceConfig.Alpaca.APIKey,
 		utils.InstanceConfig.Alpaca.APISecret,
 	)
-
 	assets, err := api.ListAssets()
 	if err != nil {
 		return err
+	}
+	validSymbols = make(map[string]int)
+	for _, asset := range assets {
+		if strings.Contains(asset.Symbol, "-") || len(asset.Symbol) > 4 {
+			continue
+		}
+		validSymbols[asset.Symbol] = 0
+	}
+
+	if Symbols != "" {
+		for _, symbol := range strings.Split(Symbols, ",") {
+			if _, valid := validSymbols[symbol]; valid {
+				symbolsList = append(symbolsList, symbol)
+			} else {
+				log.Warn("invalid symbol passed: %v", symbol)
+			}
+		}
+	} else {
+		for symbol := range validSymbols {
+			symbolsList = append(symbolsList, symbol)
+		}
 	}
 
 	ohlcvDataShapes := []io.DataShape{
@@ -80,26 +109,37 @@ func executeInit(*cobra.Command, []string) error {
 		{Name: "Volume", Type: io.INT32},
 	}
 
-	for _, asset := range assets {
-		if strings.Contains(asset.Symbol, "-") || len(asset.Symbol) > 4 {
-			continue
+	for _, symbol := range symbolsList {
+		if created, err := create(io.NewTimeBucketKey(symbol + "/1Min/OHLCV"), ohlcvDataShapes); err != nil {
+			log.Warn("%v", err)
+		} else if created {
+			log.Info("Created 1Min timebucket for %v", symbol)
 		}
 
-		log.Info("Creating timebuckets for %v", asset.Symbol)
-		if err := create(io.NewTimeBucketKey(asset.Symbol + "/1Min/OHLCV"), ohlcvDataShapes); err != nil {
+		if created, err := create(io.NewTimeBucketKey(symbol + "/1D/OHLCV"), ohlcvDataShapes); err != nil {
 			log.Warn("%v", err)
+		} else if created {
+			log.Info("Created 1D timebucket for %v", symbol)
 		}
-		if err := create(io.NewTimeBucketKey(asset.Symbol + "/1D/OHLCV"), ohlcvDataShapes); err != nil {
-			log.Warn("%v", err)
+
+		latestExisting, err := findLatestExisting(symbol, "1Min")
+		if err != nil {
+			log.Warn("%v: %v", err, symbol)
+		} else if !latestExisting.IsZero() {
+			log.Info("%v latest 1Min: %v", symbol, latestExisting)
 		}
 	}
 	return nil
 }
 
-func create(tbk *io.TimeBucketKey, dataShapes []io.DataShape) error {
+func create(tbk *io.TimeBucketKey, dataShapes []io.DataShape) (bool, error) {
+	/*
+		Create a new time bucket with the given datashape
+		returns (created, error)
+	 */
 	tf, err := tbk.GetTimeFrame()
 	if err != nil {
-		return err
+		return false, err
 	}
 	dir := tbk.GetPathToYearFiles(executor.ThisInstance.RootDir)
 	year := int16(time.Now().Year())
@@ -108,9 +148,13 @@ func create(tbk *io.TimeBucketKey, dataShapes []io.DataShape) error {
 	tbinfo := io.NewTimeBucketInfo(*tf, dir, "Default", year, dataShapes, rt)
 
 	err = executor.ThisInstance.CatalogDir.AddTimeBucket(tbk, tbinfo)
-	if err != nil && !strings.Contains(err.Error(), "Can not overwrite file") {
-		return fmt.Errorf("creation of new catalog entry failed: %s", err.Error())
+	if err != nil {
+		if strings.Contains(err.Error(), "Can not overwrite file") {
+			return false, nil
+		} else {
+			return false, fmt.Errorf("creation of new catalog entry failed: %s", err.Error())
+		}
 	}
 
-	return nil
+	return true, nil
 }
