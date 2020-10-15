@@ -110,24 +110,20 @@ func executeInit(*cobra.Command, []string) error {
 	}
 
 	for _, symbol := range symbolsList {
-		if created, err := create(io.NewTimeBucketKey(symbol + "/1Min/OHLCV"), ohlcvDataShapes); err != nil {
+		if _, err := create(io.NewTimeBucketKey(symbol + "/1Min/OHLCV"), ohlcvDataShapes); err != nil {
 			log.Warn("%v", err)
-		} else if created {
-			log.Info("Created 1Min timebucket for %v", symbol)
 		}
 
-		if created, err := create(io.NewTimeBucketKey(symbol + "/1D/OHLCV"), ohlcvDataShapes); err != nil {
+		if _, err := create(io.NewTimeBucketKey(symbol + "/1D/OHLCV"), ohlcvDataShapes); err != nil {
 			log.Warn("%v", err)
-		} else if created {
-			log.Info("Created 1D timebucket for %v", symbol)
 		}
 
-		latestExisting, err := findLatestExisting(symbol, "1Min")
-		if err != nil {
-			log.Warn("%v: %v", err, symbol)
-		} else if !latestExisting.IsZero() {
-			log.Info("%v latest 1Min: %v", symbol, latestExisting)
-		}
+		//latestExisting, err := findLatestExisting(symbol, "1Min")
+		//if err != nil {
+		//	log.Warn("%v: %v", err, symbol)
+		//} else if !latestExisting.IsZero() {
+		//	log.Info("%v latest 1Min: %v", symbol, latestExisting)
+		//}
 	}
 	return nil
 }
@@ -157,4 +153,38 @@ func create(tbk *io.TimeBucketKey, dataShapes []io.DataShape) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func findLatestExisting(symbol, timeframe string) (time.Time, error) {
+	latestExisting := time.Time{}
+	tbk := io.NewTimeBucketKey(fmt.Sprintf("%s/%s/OHLCV", symbol, timeframe))
+
+	instance := executor.ThisInstance
+	cDir := instance.CatalogDir
+	q := planner.NewQuery(cDir)
+	q.AddTargetKey(tbk)
+	q.SetRowLimit(io.LAST, 1)
+
+	parsed, err := q.Parse()
+	if err != nil {
+		return latestExisting, fmt.Errorf("[polygon] query parse failure (%v)", err)
+	}
+
+	scanner, err := executor.NewReader(parsed)
+	if err != nil {
+		return latestExisting, fmt.Errorf("[polygon] new scanner failure (%v)", err)
+	}
+
+	csm, err := scanner.Read()
+	if err != nil {
+		return latestExisting, fmt.Errorf("[polygon] scanner read failure (%v)", err)
+	}
+
+	// if len(epoch) == 0, no data exists yet; return the default value defined above
+	epoch := csm[*tbk].GetEpoch()
+	if len(epoch) > 0 {
+		latestExisting = time.Unix(epoch[len(epoch)-1], 0)
+	}
+
+	return latestExisting, nil
 }
