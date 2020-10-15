@@ -349,6 +349,15 @@ func executeQuery(tbk *io.TimeBucketKey, start, end time.Time, LimitRecordCount 
 			queriedTbk.SetItemInCategory("Symbol", symbol)
 			tbk.SetItemInCategory("Symbol", symbol)
 			cs := aggtrigger.Aggregate(csm[*queriedTbk], tbk)
+			if LimitRecordCount != 0 {
+				direction := io.LAST
+				if LimitFromStart {
+					direction = io.FIRST
+				}
+				if err := cs.RestrictLength(LimitRecordCount, direction); err != nil {
+					return nil, err
+				}
+			}
 			aggCsm[*tbk] = cs
 		}
 		return aggCsm, err
