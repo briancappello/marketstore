@@ -4,7 +4,7 @@
 //
 // Background workers run under the marketstore server by implementing the
 // interface, started at the very beginning of the server lifecycle before the
-// query interface is started, but internal state shuold be fledged. The server
+// query interface is started, but internal state should be fledged. The server
 // does not handle panics that happen within the plugin.  A plugin can recover
 // from panics, but be careful not to screw the server state if touching
 // internal API.  It is often better to just let it go.
@@ -13,7 +13,7 @@
 //  bgworkers:
 //    - module: xxxWorker.so
 //      name: datafeed
-//      config: <according to the plulgin>
+//      config: <according to the plugin>
 package bgworker
 
 import "fmt"
