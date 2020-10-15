@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	alpacaApi "github.com/alpacahq/marketstore/v4/contrib/alpaca/api"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/api"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/backfill"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/handlers"
@@ -61,6 +62,33 @@ func NewBgWorker(conf map[string]interface{}) (w bgworker.BgWorker, err error) {
 	}, nil
 }
 
+func listSymbols(pf *PolygonFetcher) ([]string, error) {
+	symbols := make([]string, 0)
+	if len(pf.config.Symbols) > 0 {
+		for _, symbol := range pf.config.Symbols {
+			symbols = append(symbols, symbol)
+		}
+		return symbols, nil
+	}
+
+	alpacaApi.SetCredentials(
+		utils.InstanceConfig.Alpaca.APIKey,
+		utils.InstanceConfig.Alpaca.APISecret,
+	)
+	assets, err := alpacaApi.ListAssets()
+	if err != nil {
+		return symbols, err
+	}
+	for _, asset := range assets {
+		if strings.Contains(asset.Symbol, "-") || len(asset.Symbol) > 4 {
+			continue
+		}
+		symbols = append(symbols, asset.Symbol)
+	}
+
+	return symbols, nil
+}
+
 // Run the PolygonFetcher. It starts the streaming API as well as the
 // asynchronous backfilling routine.
 func (pf *PolygonFetcher) Run() {
@@ -70,14 +98,22 @@ func (pf *PolygonFetcher) Run() {
 		api.SetBaseURL(pf.config.BaseURL)
 	}
 
+	symbols, err := listSymbols(pf)
+	if err != nil {
+		log.Error("[polygon] %v", err)
+		return
+	}
+
 	var subscriptions []string
 	subscribeTo := func(stream string) {
-		if len(pf.config.Symbols) == 0 {
+		if len(symbols) == 0 {
 			subscriptions = append(subscriptions, fmt.Sprintf("%s.*", stream))
+			log.Info("[polygon] Subscribed to %v.*", stream)
 		} else {
-			for _, symbol := range pf.config.Symbols {
+			for _, symbol := range symbols {
 				subscriptions = append(subscriptions, fmt.Sprintf("%s.%s", stream, symbol))
 			}
+			log.Info("[polygon] Subscribed %v symbols to %v", len(symbols), stream)
 		}
 	}
 	for t := range pf.types {
