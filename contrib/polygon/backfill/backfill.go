@@ -89,8 +89,9 @@ var (
 )
 
 func Bars(symbol string, from, to time.Time, timeframe string) (err error) {
-	if from.IsZero() {
-		from = time.Date(2014, 1, 1, 0, 0, 0, 0, NY)
+	earliest := time.Date(2005, 1, 1, 0, 0, 0, 0, NY)
+	if from.IsZero() || from.Before(earliest) {
+		from = earliest
 	}
 
 	if to.IsZero() {
