@@ -336,14 +336,7 @@ func (s GRPCService) Destroy(ctx context.Context, req *proto.MultiKeyRequest) (*
 
 	response := proto.MultiServerResponse{}
 	for _, req := range req.Requests {
-		// Construct a time bucket key from the input string
-		parts := strings.Split(req.Key, ":")
-		if len(parts) < 2 {
-			// The schema string is optional for Delete, so we append a blank if none is provided
-			parts = append(parts, "")
-		}
-
-		tbk := io.NewTimeBucketKey(parts[0], parts[1])
+		tbk := io.NewTimeBucketKeyFromString(req.Key)
 		if tbk == nil {
 			err := fmt.Errorf(errorString, req.Key)
 			appendResponse(&response, err)
@@ -356,7 +349,7 @@ func (s GRPCService) Destroy(ctx context.Context, req *proto.MultiKeyRequest) (*
 			appendResponse(&response, err)
 			continue
 		}
-		appendResponse(&response, err)
+		appendResponse(&response, nil)
 	}
 
 	return &response, nil
