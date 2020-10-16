@@ -37,9 +37,9 @@ var (
 		Example:    example,
 		RunE:       executeInit,
 	}
-	Symbols			string
-	symbolsList		[]string
-	validSymbols 	map[string]int
+	Symbols      string
+	symbolsList  []string
+	validSymbols map[string]int
 )
 
 func init() {
@@ -110,11 +110,11 @@ func executeInit(*cobra.Command, []string) error {
 	}
 
 	for _, symbol := range symbolsList {
-		if _, err := create(io.NewTimeBucketKey(symbol + "/1Min/OHLCV"), ohlcvDataShapes); err != nil {
+		if _, err := create(io.NewTimeBucketKey(symbol+"/1Min/OHLCV"), ohlcvDataShapes); err != nil {
 			log.Warn("%v", err)
 		}
 
-		if _, err := create(io.NewTimeBucketKey(symbol + "/1D/OHLCV"), ohlcvDataShapes); err != nil {
+		if _, err := create(io.NewTimeBucketKey(symbol+"/1D/OHLCV"), ohlcvDataShapes); err != nil {
 			log.Warn("%v", err)
 		}
 
@@ -132,7 +132,7 @@ func create(tbk *io.TimeBucketKey, dataShapes []io.DataShape) (bool, error) {
 	/*
 		Create a new time bucket with the given datashape
 		returns (created, error)
-	 */
+	*/
 	tf, err := tbk.GetTimeFrame()
 	if err != nil {
 		return false, err

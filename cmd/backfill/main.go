@@ -20,12 +20,12 @@ import (
 )
 
 const (
-	usage   = "backfill"
-	short   = "Backfill 1Min bars"
-	long    = short
-	example = "marketstore backfill --timeframe 1D --symbols AMD,NVDA --start 2010-01-01"
-	format  = "2006-01-02"
-	defaultStartDate = "2010-01-01"
+	usage            = "backfill"
+	short            = "Backfill 1Min bars"
+	long             = short
+	example          = "marketstore backfill --timeframe 1D --symbols AMD,NVDA --start 2010-01-01"
+	format           = "2006-01-02"
+	defaultStartDate = "2004-01-01"
 )
 
 var (

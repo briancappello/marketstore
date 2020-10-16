@@ -144,7 +144,7 @@ func Bars(symbol string, from, to time.Time, timeframe string) (err error) {
 			// polygon sometime returns inconsistent data
 			continue
 		}
-		epoch[i] =  timestamp
+		epoch[i] = timestamp
 		open[i] = float32(bar.Open)
 		high[i] = float32(bar.High)
 		low[i] = float32(bar.Low)
