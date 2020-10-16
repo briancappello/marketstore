@@ -230,12 +230,13 @@ func newAccumulator(cs *io.ColumnSeries, param accumParam) *accumulator {
 		case []float64:
 			ifunc = functions.SumFloat64
 			iout = make([]float64, 0)
-		case []int8:
-			ifunc = functions.SumInt8
-			iout = make([]int8, 0)
+
 		case []int:
 			ifunc = functions.SumInt
 			iout = make([]int, 0)
+		case []int8:
+			ifunc = functions.SumInt8
+			iout = make([]int8, 0)
 		case []int16:
 			ifunc = functions.SumInt16
 			iout = make([]int16, 0)
@@ -245,21 +246,23 @@ func newAccumulator(cs *io.ColumnSeries, param accumParam) *accumulator {
 		case []int64:
 			ifunc = functions.SumInt64
 			iout = make([]int64, 0)
+
+		case []uint:
+			ifunc = functions.SumUint
+			iout = make([]uint, 0)
 		case []uint8:
 			ifunc = functions.SumUint8
 			iout = make([]uint8, 0)
 		case []uint16:
 			ifunc = functions.SumUint16
 			iout = make([]uint16, 0)
-		case []uint:
-			ifunc = functions.SumUint
-			iout = make([]uint, 0)
 		case []uint32:
 			ifunc = functions.SumUint32
 			iout = make([]uint32, 0)
 		case []uint64:
 			ifunc = functions.SumUint64
 			iout = make([]uint64, 0)
+
 		default:
 			fmt.Printf("no compatible function\n")
 			return nil
@@ -278,10 +281,19 @@ func (ac *accumulator) apply(start, end int) {
 		ivalues := ac.ivalues
 		out := ac.iout.([]float32)
 		ac.iout = append(out, fn(ivalues.([]float32)[start:end]))
+	case func([]float32) float64:
+		ivalues := ac.ivalues
+		out := ac.iout.([]float64)
+		ac.iout = append(out, fn(ivalues.([]float32)[start:end]))
 	case func([]float64) float64:
 		ivalues := ac.ivalues
 		out := ac.iout.([]float64)
 		ac.iout = append(out, fn(ivalues.([]float64)[start:end]))
+
+	case func([]int) int:
+		ivalues := ac.ivalues
+		out := ac.iout.([]int)
+		ac.iout = append(out, fn(ivalues.([]int)[start:end]))
 	case func([]int8) int8:
 		ivalues := ac.ivalues
 		out := ac.iout.([]int8)
@@ -290,10 +302,6 @@ func (ac *accumulator) apply(start, end int) {
 		ivalues := ac.ivalues
 		out := ac.iout.([]int16)
 		ac.iout = append(out, fn(ivalues.([]int16)[start:end]))
-	case func([]int) int:
-		ivalues := ac.ivalues
-		out := ac.iout.([]int)
-		ac.iout = append(out, fn(ivalues.([]int)[start:end]))
 	case func([]int32) int32:
 		ivalues := ac.ivalues
 		out := ac.iout.([]int32)
@@ -302,6 +310,24 @@ func (ac *accumulator) apply(start, end int) {
 		ivalues := ac.ivalues
 		out := ac.iout.([]int64)
 		ac.iout = append(out, fn(ivalues.([]int64)[start:end]))
+
+	case func([]int8) int16:
+		ivalues := ac.ivalues
+		out := ac.iout.([]int16)
+		ac.iout = append(out, fn(ivalues.([]int8)[start:end]))
+	case func([]int16) int32:
+		ivalues := ac.ivalues
+		out := ac.iout.([]int32)
+		ac.iout = append(out, fn(ivalues.([]int16)[start:end]))
+	case func([]int32) int64:
+		ivalues := ac.ivalues
+		out := ac.iout.([]int64)
+		ac.iout = append(out, fn(ivalues.([]int32)[start:end]))
+
+	case func([]uint) uint:
+		ivalues := ac.ivalues
+		out := ac.iout.([]uint)
+		ac.iout = append(out, fn(ivalues.([]uint)[start:end]))
 	case func([]uint8) uint8:
 		ivalues := ac.ivalues
 		out := ac.iout.([]uint8)
@@ -310,10 +336,6 @@ func (ac *accumulator) apply(start, end int) {
 		ivalues := ac.ivalues
 		out := ac.iout.([]uint16)
 		ac.iout = append(out, fn(ivalues.([]uint16)[start:end]))
-	case func([]uint) uint:
-		ivalues := ac.ivalues
-		out := ac.iout.([]uint)
-		ac.iout = append(out, fn(ivalues.([]uint)[start:end]))
 	case func([]uint32) uint32:
 		ivalues := ac.ivalues
 		out := ac.iout.([]uint32)
@@ -322,6 +344,20 @@ func (ac *accumulator) apply(start, end int) {
 		ivalues := ac.ivalues
 		out := ac.iout.([]uint64)
 		ac.iout = append(out, fn(ivalues.([]uint64)[start:end]))
+
+	case func([]uint8) uint16:
+		ivalues := ac.ivalues
+		out := ac.iout.([]uint16)
+		ac.iout = append(out, fn(ivalues.([]uint8)[start:end]))
+	case func([]uint16) uint32:
+		ivalues := ac.ivalues
+		out := ac.iout.([]uint32)
+		ac.iout = append(out, fn(ivalues.([]uint16)[start:end]))
+	case func([]uint32) uint64:
+		ivalues := ac.ivalues
+		out := ac.iout.([]uint64)
+		ac.iout = append(out, fn(ivalues.([]uint32)[start:end]))
+
 	default:
 		panic("cannot apply")
 	}
