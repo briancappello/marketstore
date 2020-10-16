@@ -62,19 +62,22 @@ var (
 		typeOf reflect.Type
 	}{
 		FLOAT32: {reflect.Float32, "float32", 4, reflect.TypeOf(float32(0))},
-		INT32:   {reflect.Int32, "int32", 4, reflect.TypeOf(int32(0))},
 		FLOAT64: {reflect.Float64, "float64", 8, reflect.TypeOf(float64(0))},
-		INT64:   {reflect.Int64, "int64", 8, reflect.TypeOf(int64(0))},
-		EPOCH:   {reflect.Int64, "epoch", 8, reflect.TypeOf(int64(0))},
-		BYTE:    {reflect.Int8, "byte", 1, reflect.TypeOf(byte(0))},
-		BOOL:    {reflect.Bool, "bool", 1, reflect.TypeOf(bool(false))},
-		NONE:    {reflect.Invalid, "none", 0, reflect.TypeOf(byte(0))},
-		STRING:  {reflect.String, "string", 0, reflect.TypeOf("")},
-		INT16:   {reflect.Int16, "int16", 2, reflect.TypeOf(int16(0))},
-		UINT8:   {reflect.Uint8, "uint8", 1, reflect.TypeOf(uint8(0))},
-		UINT16:  {reflect.Uint16, "uint16", 2, reflect.TypeOf(uint16(0))},
-		UINT32:  {reflect.Uint32, "uint32", 4, reflect.TypeOf(uint32(0))},
-		UINT64:  {reflect.Uint64, "uint64", 8, reflect.TypeOf(uint64(0))},
+
+		INT16: {reflect.Int16, "int16", 2, reflect.TypeOf(int16(0))},
+		INT32: {reflect.Int32, "int32", 4, reflect.TypeOf(int32(0))},
+		INT64: {reflect.Int64, "int64", 8, reflect.TypeOf(int64(0))},
+
+		UINT8:  {reflect.Uint8, "uint8", 1, reflect.TypeOf(uint8(0))},
+		UINT16: {reflect.Uint16, "uint16", 2, reflect.TypeOf(uint16(0))},
+		UINT32: {reflect.Uint32, "uint32", 4, reflect.TypeOf(uint32(0))},
+		UINT64: {reflect.Uint64, "uint64", 8, reflect.TypeOf(uint64(0))},
+
+		EPOCH:  {reflect.Int64, "epoch", 8, reflect.TypeOf(int64(0))},
+		BYTE:   {reflect.Int8, "byte", 1, reflect.TypeOf(byte(0))},
+		BOOL:   {reflect.Bool, "bool", 1, reflect.TypeOf(bool(false))},
+		NONE:   {reflect.Invalid, "none", 0, reflect.TypeOf(byte(0))},
+		STRING: {reflect.String, "string", 0, reflect.TypeOf("")},
 	}
 )
 
