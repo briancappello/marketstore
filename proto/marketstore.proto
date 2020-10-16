@@ -43,11 +43,22 @@ message NumpyDataset {
     repeated string column_types = 1;
     // a list of column names
     repeated string column_names = 2;
-    // two dimentional byte arrays holding the column data
+    // two dimensional byte arrays holding the column data
     repeated bytes column_data = 3;
     int32 length = 4;
     // hidden
     repeated DataShape data_shapes = 5;
+}
+
+message CreateRequest {
+    // a time bucket key
+    string key = 1;
+    repeated DataShape data_shapes = 2;
+    string row_type = 3; // fixed or variable
+}
+
+message MultiCreateRequest {
+    repeated CreateRequest requests = 1;
 }
 
 message MultiQueryRequest {
@@ -146,6 +157,7 @@ message ServerVersionResponse {
 service Marketstore {
     rpc Query (MultiQueryRequest) returns (MultiQueryResponse);
     rpc Write (MultiWriteRequest) returns (MultiServerResponse);
+    rpc Create (MultiCreateRequest) returns (MultiServerResponse);
     rpc Destroy (MultiKeyRequest) returns (MultiServerResponse);
     rpc ListSymbols (ListSymbolsRequest) returns (ListSymbolsResponse);
     rpc ServerVersion (ServerVersionRequest) returns (ServerVersionResponse);
