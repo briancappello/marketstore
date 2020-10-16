@@ -54,10 +54,12 @@ func (s *DataService) Write(r *http.Request, reqs *MultiWriteRequest, response *
 	Create: Creates a new time bucket in the DB
 */
 type CreateRequest struct {
-	Key, DataShapes, RowType string
+	Key        string `msgpack:"key"`
+	DataShapes string `msgpack:"data_shapes"`
+	RowType    string `msgpack:"row_type"`
 }
 type MultiCreateRequest struct {
-	Requests []CreateRequest
+	Requests []CreateRequest `msgpack:"requests"`
 }
 
 func (s *DataService) Create(r *http.Request, reqs *MultiCreateRequest, response *MultiServerResponse) (err error) {
