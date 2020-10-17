@@ -50,7 +50,7 @@ type Chart struct {
 	High                 float32 `json:"high"`
 	Low                  float32 `json:"low"`
 	Average              float64 `json:"average"`
-	Volume               int32   `json:"volume"`
+	Volume               int64   `json:"volume"`
 	Notional             float64 `json:"notional"`
 	NumberOfTrades       int     `json:"numberOfTrades"`
 	MarketHigh           float64 `json:"marketHigh"`

@@ -89,7 +89,7 @@ var (
 )
 
 func Bars(symbol string, from, to time.Time, timeframe string) (err error) {
-	earliest := time.Date(2005, 1, 1, 0, 0, 0, 0, NY)
+	earliest := time.Date(2004, 1, 1, 0, 0, 0, 0, NY)
 	if from.IsZero() || from.Before(earliest) {
 		from = earliest
 	}
@@ -136,7 +136,7 @@ func Bars(symbol string, from, to time.Time, timeframe string) (err error) {
 	high := make([]float32, len(resp.Results))
 	low := make([]float32, len(resp.Results))
 	close := make([]float32, len(resp.Results))
-	volume := make([]int32, len(resp.Results))
+	volume := make([]int64, len(resp.Results))
 
 	for i, bar := range resp.Results {
 		timestamp := bar.EpochMilliseconds / 1000
@@ -149,7 +149,7 @@ func Bars(symbol string, from, to time.Time, timeframe string) (err error) {
 		high[i] = float32(bar.High)
 		low[i] = float32(bar.Low)
 		close[i] = float32(bar.Close)
-		volume[i] = int32(bar.Volume)
+		volume[i] = int64(bar.Volume)
 	}
 
 	cs := io.NewColumnSeries()
@@ -214,15 +214,15 @@ func tradesToBars(ticks []api.TradeTick, symbol string, exchangeIDs []int) io.Co
 
 	var epoch int64
 	var open, high, low, close_ float32
-	var volume, tickCnt int32
+	var volume, tickCnt int64
 
 	epochs := make([]int64, 1440)
 	opens := make([]float32, 1440)
 	highs := make([]float32, 1440)
 	lows := make([]float32, 1440)
 	closes := make([]float32, 1440)
-	volumes := make([]int32, 1440)
-	tickCnts := make([]int32, 1440)
+	volumes := make([]int64, 1440)
+	tickCnts := make([]int64, 1440)
 
 	barIdx := 0
 	lastBucketTimestamp := time.Time{}
@@ -304,7 +304,7 @@ func tradesToBars(ticks []api.TradeTick, symbol string, exchangeIDs []int) io.Co
 		}
 
 		if updateInfo.UpdateVolume {
-			volume += int32(tick.Size)
+			volume += int64(tick.Size)
 		}
 	}
 

@@ -106,7 +106,7 @@ func executeInit(*cobra.Command, []string) error {
 		{Name: "High", Type: io.FLOAT32},
 		{Name: "Low", Type: io.FLOAT32},
 		{Name: "Close", Type: io.FLOAT32},
-		{Name: "Volume", Type: io.INT32},
+		{Name: "Volume", Type: io.INT64},
 	}
 
 	for _, symbol := range symbolsList {

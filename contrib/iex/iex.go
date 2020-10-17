@@ -219,7 +219,7 @@ func (f *IEXFetcher) writeBars(resp *api.GetBarsResponse, intraday, backfill boo
 			high   []float32
 			low    []float32
 			close  []float32
-			volume []int32
+			volume []int64
 		)
 
 		if intraday {
