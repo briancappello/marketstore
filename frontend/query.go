@@ -12,6 +12,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/utils/log"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -267,6 +268,8 @@ func (s *DataService) ListSymbols(r *http.Request, req *ListSymbolsRequest, resp
 		response.Results[cnt] = symbol
 		cnt++
 	}
+
+	sort.Strings(response.Results)
 	return nil
 }
 

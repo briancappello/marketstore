@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -287,7 +288,7 @@ func (s GRPCService) ListSymbols(ctx context.Context, req *proto.ListSymbolsRequ
 	default:
 		response.Results = catalog.ListTimeBucketKeyNames(executor.ThisInstance.CatalogDir)
 	}
-
+	sort.Strings(response.Results)
 	return &response, nil
 }
 
