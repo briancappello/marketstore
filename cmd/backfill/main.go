@@ -2,6 +2,7 @@ package backfill
 
 import (
 	"fmt"
+	"github.com/alpacahq/marketstore/v4/contrib/polygon/worker"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"runtime"
 	"runtime/debug"
@@ -97,7 +98,8 @@ func executeStart(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	sem := make(chan struct{}, Parallelism)
+	apiCallerWP := worker.NewWorkerPool(Parallelism)
+	writerWP := worker.NewWorkerPool(1)
 
 	log.Info("[backfill] backfilling bars from %v to %v", startTime.Format(format), endTime.Format(format))
 
@@ -113,14 +115,9 @@ func executeStart(cmd *cobra.Command, args []string) error {
 			if calendar.Nasdaq.IsMarketDay(s) {
 				log.Info("[backfill] backfilling bars for %v on %v", symbol, s.Format(format))
 
-				sem <- struct{}{}
-				go func(t time.Time) {
-					defer func() { <-sem }()
-
-					if err := backfill.Bars(symbol, t, t.Add(24*time.Hour), cd.String); err != nil {
-						log.Warn("[backfill] failed to backfill minutely bars for %v on %v (%v)", symbol, t.Format(format), err)
-					}
-				}(s)
+				if err := backfill.Bars(symbol, s, s.Add(24*time.Hour), cd.String, writerWP); err != nil {
+					log.Warn("[backfill] failed to backfill minutely bars for %v on %v (%v)", symbol, s.Format(format), err)
+				}
 			}
 			s = s.Add(24 * time.Hour)
 		}
@@ -135,23 +132,20 @@ func executeStart(cmd *cobra.Command, args []string) error {
 
 		log.Info("[backfill] backfilling %v bars for %v", cd.String, sym)
 		if cd.Suffix() == "Min" || cd.Suffix() == "T" {
-			backfillMinuteBars(tbk, startTime, endTime)
+			apiCallerWP.Do(func() {
+				backfillMinuteBars(tbk, startTime, endTime)
+			})
 		} else if cd.Suffix() == "D" {
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-
-				if err := backfill.Bars(sym, startTime, endTime, cd.String); err != nil {
+			apiCallerWP.Do(func() {
+				if err := backfill.Bars(sym, startTime, endTime, cd.String, writerWP); err != nil {
 					log.Warn("[backfill] failed to backfill daily bars for %v (%v)", sym, err)
 				}
-			}()
+			})
 		}
 	}
 
-	// make sure all goroutines finish
-	for i := 0; i < cap(sem); i++ {
-		sem <- struct{}{}
-	}
+	apiCallerWP.CloseAndWait()
+	writerWP.CloseAndWait()
 
 	log.Info("[backfill] backfilling complete")
 
@@ -159,6 +153,9 @@ func executeStart(cmd *cobra.Command, args []string) error {
 		log.Info("[backfill] waiting for 10 more seconds for ondiskagg triggers to complete")
 		time.Sleep(10 * time.Second)
 	}
+
+	executor.ThisInstance.ShutdownPending = true
+	executor.ThisInstance.WALWg.Wait()
 
 	return nil
 }

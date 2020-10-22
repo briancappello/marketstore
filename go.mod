@@ -17,7 +17,7 @@ require (
 	github.com/eapache/channels v1.1.0
 	github.com/eapache/queue v1.1.0 // indirect
 	github.com/gobwas/glob v0.2.3
-	github.com/golang/protobuf v1.4.0
+	github.com/golang/protobuf v1.4.2
 	github.com/google/go-cmp v0.5.2
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/gorilla/websocket v1.4.1
@@ -39,6 +39,7 @@ require (
 	golang.org/x/net v0.0.0-20200602114024-627f9648deb9 // indirect
 	gonum.org/v1/gonum v0.0.0-20190618015908-5dc218f86579
 	google.golang.org/grpc v1.28.0
+	google.golang.org/protobuf v1.23.0
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15
 	gopkg.in/matryer/try.v1 v1.0.0-20150601225556-312d2599e12e
 	gopkg.in/yaml.v2 v2.3.0
