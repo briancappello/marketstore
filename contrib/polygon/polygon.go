@@ -1,25 +1,21 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/alpacahq/marketstore/v4/contrib/polygon/worker"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
-	alpacaApi "github.com/alpacahq/marketstore/v4/contrib/alpaca/api"
+	"github.com/alpacahq/marketstore/v4/contrib/polygon/worker"
+
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/api"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/backfill"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/handlers"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/polygon_config"
-	"github.com/alpacahq/marketstore/v4/contrib/polygon/streaming"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/planner"
 	"github.com/alpacahq/marketstore/v4/plugins/bgworker"
-	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
@@ -28,10 +24,6 @@ type PolygonFetcher struct {
 	config polygon_config.FetcherConfig
 	types  map[string]struct{} // Bars, Quotes, Trades
 }
-
-var (
-	minute = utils.NewTimeframe("1Min")
-)
 
 // NewBgWorker returns a new instances of PolygonFetcher. See FetcherConfig
 // for more details about configuring PolygonFetcher.
@@ -63,33 +55,6 @@ func NewBgWorker(conf map[string]interface{}) (w bgworker.BgWorker, err error) {
 	}, nil
 }
 
-func listSymbols(pf *PolygonFetcher) ([]string, error) {
-	symbols := make([]string, 0)
-	if len(pf.config.Symbols) > 0 {
-		for _, symbol := range pf.config.Symbols {
-			symbols = append(symbols, symbol)
-		}
-		return symbols, nil
-	}
-
-	alpacaApi.SetCredentials(
-		utils.InstanceConfig.Alpaca.APIKey,
-		utils.InstanceConfig.Alpaca.APISecret,
-	)
-	assets, err := alpacaApi.ListAssets()
-	if err != nil {
-		return symbols, err
-	}
-	for _, asset := range assets {
-		if strings.Contains(asset.Symbol, "-") || len(asset.Symbol) > 4 {
-			continue
-		}
-		symbols = append(symbols, asset.Symbol)
-	}
-
-	return symbols, nil
-}
-
 // Run the PolygonFetcher. It starts the streaming API as well as the
 // asynchronous backfilling routine.
 func (pf *PolygonFetcher) Run() {
@@ -99,40 +64,29 @@ func (pf *PolygonFetcher) Run() {
 		api.SetBaseURL(pf.config.BaseURL)
 	}
 
-	symbols, err := listSymbols(pf)
-	if err != nil {
-		log.Error("[polygon] %v", err)
-		return
+	if pf.config.WSServers != "" {
+		api.SetWSServers(pf.config.WSServers)
 	}
 
-	var subscriptions []string
-	subscribeTo := func(stream string) {
-		if len(symbols) == 0 {
-			subscriptions = append(subscriptions, fmt.Sprintf("%s.*", stream))
-			log.Info("[polygon] Subscribed to %v.*", stream)
-		} else {
-			for _, symbol := range symbols {
-				subscriptions = append(subscriptions, fmt.Sprintf("%s.%s", stream, symbol))
-			}
-			log.Info("[polygon] Subscribed %v symbols to %v", len(symbols), stream)
-		}
-	}
 	for t := range pf.types {
+		var prefix api.Prefix
+		var handler func([]byte)
 		switch t {
 		case "bars":
-			subscribeTo("AM")
+			prefix = api.Agg
+			handler = handlers.BarsHandler
 		case "quotes":
-			subscribeTo("Q")
+			prefix = api.Quote
+			handler = handlers.QuoteHandler
 		case "trades":
-			subscribeTo("T")
+			prefix = api.Trade
+			handler = handlers.TradeHandler
 		}
+		s := api.NewSubscription(prefix, pf.config.Symbols)
+		s.Subscribe(handler)
 	}
 
-	ws := streaming.NewClient(pf.config.WSServers+"/stocks", pf.config.APIKey, strings.Join(subscriptions, ","))
-	ws.TradeHandler = handlers.TradeHandler
-	ws.QuoteHandler = handlers.QuoteHandler
-	ws.AggregateHandler = handlers.BarsHandlerWrapper(pf.config.AddTickCountToBars)
-	ws.Listen(context.Background())
+	select {}
 }
 
 func (pf *PolygonFetcher) workBackfillBars() {
@@ -230,7 +184,7 @@ func (pf *PolygonFetcher) backfillBars(symbol string, end time.Time, writerWP *w
 	}
 
 	// request & write the missing bars
-	if err = backfill.Bars(symbol, from, time.Time{}, tbk.GetItemInCategory("Timeframe"), writerWP); err != nil {
+	if err = backfill.Bars(symbol, from, time.Time{}, "1Min", 50000, writerWP); err != nil {
 		log.Error("[polygon] bars backfill failure for key: [%v] (%v)", tbk.String(), err)
 	}
 }

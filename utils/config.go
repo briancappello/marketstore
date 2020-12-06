@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,15 @@ func init() {
 type Credentials struct {
 	APIKey    string
 	APISecret string
+}
+
+type ReplicationSetting struct {
+	Enabled    bool
+	TLSEnabled bool
+	CertFile   string
+	KeyFile    string
+	ListenPort int
+	MasterHost string
 }
 
 type TriggerSetting struct {
@@ -57,6 +67,7 @@ type MktsConfig struct {
 	ClusterMode                bool
 	StartTime                  time.Time
 	Alpaca                     *Credentials
+	Replication                ReplicationSetting
 	Triggers                   []*TriggerSetting
 	BgWorkers                  []*BgWorkerSetting
 }
@@ -90,6 +101,15 @@ func (m *MktsConfig) Parse(data []byte) error {
 				APIKey    string `yaml:"api_key"`
 				APISecret string `yaml:"api_secret"`
 			} `yaml:"alpaca"`
+			Replication struct {
+				Enabled    bool   `yaml:"enabled"`
+				TLSEnabled bool   `yaml:"tls_enabled"`
+				CertFile   string `yaml:"cert_file"`
+				KeyFile    string `yaml:"key_file"`
+				// ListenPort is used for the replication protocol by the master instance
+				ListenPort int    `yaml:"listen_port"`
+				MasterHost string `yaml:"master_host"`
+			} `yaml:"replication"`
 			Triggers []struct {
 				Module string                 `yaml:"module"`
 				On     string                 `yaml:"on"`
@@ -107,10 +127,12 @@ func (m *MktsConfig) Parse(data []byte) error {
 		return err
 	}
 
-	if aux.RootDirectory == "" {
+	rootDir, err := filepath.Abs(filepath.Clean(aux.RootDirectory))
+	if aux.RootDirectory == "" || err != nil {
 		log.Fatal("Invalid root directory.")
 		return errors.New("Invalid root directory.")
 	}
+	m.RootDirectory = rootDir
 
 	if aux.ListenPort == "" {
 		log.Fatal("Invalid listen port.")
@@ -257,7 +279,34 @@ func (m *MktsConfig) Parse(data []byte) error {
 		}
 	}
 
-	m.RootDirectory = aux.RootDirectory
+	m.Replication = ReplicationSetting{
+		Enabled:    false,
+		TLSEnabled: false,
+		CertFile:   "",
+		KeyFile:    "",
+		ListenPort: 5996, // default listen port for Replication master
+		MasterHost: "",
+	}
+
+	if aux.Replication.ListenPort != 0 {
+		m.Replication.ListenPort = aux.Replication.ListenPort
+	}
+	if aux.Replication.Enabled != false {
+		m.Replication.Enabled = true
+	}
+	if aux.Replication.TLSEnabled != false {
+		m.Replication.TLSEnabled = true
+	}
+	if aux.Replication.CertFile != "" {
+		m.Replication.CertFile = aux.Replication.CertFile
+	}
+	if aux.Replication.KeyFile != "" {
+		m.Replication.KeyFile = aux.Replication.KeyFile
+	}
+	if aux.Replication.MasterHost != "" {
+		m.Replication.MasterHost = aux.Replication.MasterHost
+	}
+
 	m.ListenURL = fmt.Sprintf("%v:%v", aux.ListenHost, aux.ListenPort)
 	if aux.GRPCListenPort != "" {
 		m.GRPCListenURL = fmt.Sprintf("%v:%v", aux.ListenHost, aux.GRPCListenPort)

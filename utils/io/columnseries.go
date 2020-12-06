@@ -31,9 +31,9 @@ type ColumnInterface interface {
 type ColumnSeries struct {
 	ColumnInterface
 
-	columns          map[string]interface{}
-	orderedNames     []string
-	nameIncrement    map[string]int
+	columns       map[string]interface{}
+	orderedNames  []string
+	nameIncrement map[string]int
 }
 
 func NewColumnSeries() *ColumnSeries {
@@ -245,9 +245,9 @@ func (cs *ColumnSeries) ApplyTimeQual(tq func(epoch int64) bool) *ColumnSeries {
 	indexes := []int{}
 
 	out := &ColumnSeries{
-		orderedNames:     cs.orderedNames,
-		nameIncrement:    cs.nameIncrement,
-		columns:          map[string]interface{}{},
+		orderedNames:  cs.orderedNames,
+		nameIncrement: cs.nameIncrement,
+		columns:       map[string]interface{}{},
 	}
 
 	for i, epoch := range cs.GetEpoch() {
@@ -277,9 +277,9 @@ func (cs *ColumnSeries) ApplyTimeQual(tq func(epoch int64) bool) *ColumnSeries {
 // returned.
 func SliceColumnSeriesByEpoch(cs ColumnSeries, start, end *int64) (slc ColumnSeries, err error) {
 	slc = ColumnSeries{
-		orderedNames:     cs.orderedNames,
-		nameIncrement:    cs.nameIncrement,
-		columns:          map[string]interface{}{},
+		orderedNames:  cs.orderedNames,
+		nameIncrement: cs.nameIncrement,
+		columns:       map[string]interface{}{},
 	}
 
 	for name, col := range cs.columns {

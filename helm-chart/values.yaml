@@ -8,6 +8,20 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+backfill:
+  enabled: false
+#  schedule: "0 0 1 * * *"
+#  apiKey: "xxxxx"
+#  liveDir: "/data/live"
+#  tempDir: "/data/temp"
+#  oldDir: "/data/old"
+#  logDir: "/data/log"
+#  tradeArgs: "--trade-period 48h"
+#  barArgs: "--bar-period 1440h"
+#  tradeInterval: "1 month ago"
+#  barInterval: "5 year ago"
+#  paralelism: 5
+
 mktsConfig: |-
   root_directory: /data
   listen_port: 5993
@@ -18,6 +32,11 @@ mktsConfig: |-
 service:
   type: ClusterIP
   port: 5993  # Change to 5995 when running with grpc
+
+prometheus:
+  serviceMonitor:
+    enable: false
+    additionalLabels: {}
 
 replicaCount: 1
 

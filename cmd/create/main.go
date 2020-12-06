@@ -67,7 +67,7 @@ func executeInit(*cobra.Command, []string) error {
 	if err := utils.InstanceConfig.Load(configFilePath); err != nil {
 		return err
 	}
-	executor.NewInstanceSetup(utils.InstanceConfig.RootDirectory, true, true, true, true)
+	executor.NewInstanceSetup(utils.InstanceConfig.RootDirectory, nil, true, true, true, true)
 
 	// fetch valid symbols from Alpaca API
 	api.SetCredentials(

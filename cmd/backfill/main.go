@@ -113,9 +113,7 @@ func executeStart(cmd *cobra.Command, args []string) error {
 
 		for e.After(s) {
 			if calendar.Nasdaq.IsMarketDay(s) {
-				log.Info("[backfill] backfilling bars for %v on %v", symbol, s.Format(format))
-
-				if err := backfill.Bars(symbol, s, s.Add(24*time.Hour), cd.String, writerWP); err != nil {
+				if err := backfill.Bars(symbol, s, s.Add(24*time.Hour), cd.String, 0, writerWP); err != nil {
 					log.Warn("[backfill] failed to backfill minutely bars for %v on %v (%v)", symbol, s.Format(format), err)
 				}
 			}
@@ -123,21 +121,21 @@ func executeStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	for _, sym := range symbolList {
+	for i, sym := range symbolList {
 		tbk := io.NewTimeBucketKeyFromString(sym + "/" + Timeframe + "/OHLCV")
 		cd, err := tbk.GetCandleDuration()
 		if err != nil {
 			log.Error("[backfill] error creating TBK Candle Duration: %v", err)
 		}
 
-		log.Info("[backfill] backfilling %v bars for %v", cd.String, sym)
+		log.Info("[backfill (%v/%v)] backfilling %v bars for %v", i, len(symbolList), cd.String, sym)
 		if cd.Suffix() == "Min" || cd.Suffix() == "T" {
 			apiCallerWP.Do(func() {
 				backfillMinuteBars(tbk, startTime, endTime)
 			})
 		} else if cd.Suffix() == "D" {
 			apiCallerWP.Do(func() {
-				if err := backfill.Bars(sym, startTime, endTime, cd.String, writerWP); err != nil {
+				if err := backfill.Bars(sym, startTime, endTime, cd.String, 0, writerWP); err != nil {
 					log.Warn("[backfill] failed to backfill daily bars for %v (%v)", sym, err)
 				}
 			})
@@ -195,7 +193,7 @@ func initConfig() error {
 }
 
 func initWriter() {
-	executor.NewInstanceSetup(utils.InstanceConfig.RootDirectory, true, true, true, true)
+	executor.NewInstanceSetup(utils.InstanceConfig.RootDirectory, nil, true, true, true, true)
 
 	// if configured, also load the 1Min ondiskagg trigger
 	for _, triggerSetting := range utils.InstanceConfig.Triggers {

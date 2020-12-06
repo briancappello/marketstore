@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpacahq/marketstore/v4/contrib/polygon/api"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/backfill"
 	"github.com/alpacahq/marketstore/v4/contrib/polygon/metrics"
-	"github.com/alpacahq/marketstore/v4/contrib/polygon/streaming"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
@@ -23,7 +23,7 @@ const (
 	ConditionOpening         = 19
 )
 
-func conditionsPresent(conditions []int32) (skip bool) {
+func conditionsPresent(conditions []int) (skip bool) {
 	for _, c := range conditions {
 		switch c {
 		case ConditionExchangeSummary, ConditionReOpening, ConditionOpening, ConditionClosing,
@@ -40,33 +40,33 @@ func TradeHandler(msg []byte) {
 	if msg == nil {
 		return
 	}
-
-	rt := streaming.Trade{}
-	err := json.Unmarshal(msg, &rt)
+	tt := make([]api.PolyTrade, 0)
+	err := json.Unmarshal(msg, &tt)
 	if err != nil {
 		log.Warn("error processing upstream message",
 			"message", string(msg),
 			"error", err.Error())
 		return
 	}
-
-	if conditionsPresent(rt.Conditions) || rt.Size <= 0 || rt.Price <= 0 {
-		return
-	}
-
 	writeMap := make(map[io.TimeBucketKey]interface{})
-	// Polygon time is in milliseconds since the Unix epoch
-	timestamp := time.Unix(0, int64(1000*1000*float64(rt.Timestamp)))
-	lagOnReceipt := time.Now().Sub(timestamp).Seconds()
-	t := trade{
-		epoch: timestamp.Unix(),
-		nanos: int32(timestamp.Nanosecond()),
-		sz:    int32(rt.Size),
-		px:    float32(rt.Price),
+	for _, rt := range tt {
+		switch {
+		case conditionsPresent(rt.Conditions), rt.Size <= 0, rt.Price <= 0:
+			continue
+		}
+		// Polygon time is in milliseconds since the Unix epoch
+		timestamp := time.Unix(0, int64(1000*1000*float64(rt.Timestamp)))
+		lagOnReceipt := time.Now().Sub(timestamp).Seconds()
+		t := trade{
+			epoch: timestamp.Unix(),
+			nanos: int32(timestamp.Nanosecond()),
+			sz:    uint64(rt.Size),
+			px:    float64(rt.Price),
+		}
+		key := fmt.Sprintf("%s/1Sec/TRADE", strings.Replace(rt.Symbol, "/", ".", 1))
+		appendItem(writeMap, io.NewTimeBucketKey(key), &t)
+		_ = lagOnReceipt
 	}
-	key := fmt.Sprintf("%s/1Min/TRADE", strings.Replace(rt.Symbol, "/", ".", 1))
-	appendItem(writeMap, io.NewTimeBucketKey(key), &t)
-	_ = lagOnReceipt
 	Write(writeMap)
 
 	metrics.PolygonStreamLastUpdate.WithLabelValues("trade").SetToCurrentTime()
@@ -78,9 +78,8 @@ func QuoteHandler(msg []byte) {
 	if msg == nil {
 		return
 	}
-
-	rq := streaming.Quote{}
-	err := json.Unmarshal(msg, &rq)
+	qq := make([]api.PolyQuote, 0)
+	err := json.Unmarshal(msg, &qq)
 	if err != nil {
 		log.Warn("error processing upstream message",
 			"message", string(msg),
@@ -88,70 +87,64 @@ func QuoteHandler(msg []byte) {
 		return
 	}
 	writeMap := make(map[io.TimeBucketKey]interface{})
-	timestamp := time.Unix(0, int64(1000*1000*float64(rq.Timestamp)))
-	lagOnReceipt := time.Now().Sub(timestamp).Seconds()
-	q := quote{
-		epoch: timestamp.Unix(),
-		nanos: int32(timestamp.Nanosecond()),
-		bidPx: float32(rq.BidPrice),
-		bidSz: int32(rq.BidSize),
-		askPx: float32(rq.AskPrice),
-		askSz: int32(rq.AskSize),
+	for _, rq := range qq {
+		timestamp := time.Unix(0, int64(1000*1000*float64(rq.Timestamp)))
+		lagOnReceipt := time.Now().Sub(timestamp).Seconds()
+		q := quote{
+			epoch: timestamp.Unix(),
+			nanos: int32(timestamp.Nanosecond()),
+			bidPx: rq.BidPrice,
+			bidSz: uint64(rq.BidSize),
+			askPx: rq.AskPrice,
+			askSz: uint64(rq.AskSize),
+		}
+		key := fmt.Sprintf("%s/1Min/QUOTE", strings.Replace(rq.Symbol, "/", ".", 1))
+		appendItem(writeMap, io.NewTimeBucketKey(key), &q)
+		_ = lagOnReceipt
 	}
-	key := fmt.Sprintf("%s/1Min/QUOTE", strings.Replace(rq.Symbol, "/", ".", 1))
-	appendItem(writeMap, io.NewTimeBucketKey(key), &q)
-	_ = lagOnReceipt
 	Write(writeMap)
 
 	metrics.PolygonStreamLastUpdate.WithLabelValues("quote").SetToCurrentTime()
 }
 
-func BarsHandlerWrapper(addTickCount bool) func([]byte) {
-	return func(msg []byte) {
-		BarsHandler(msg, addTickCount)
-	}
-}
-
-func BarsHandler(msg []byte, addTickCount bool) {
+func BarsHandler(msg []byte) {
 	if msg == nil {
 		return
 	}
-	bar := streaming.Aggregate{}
-	err := json.Unmarshal(msg, &bar)
+	am := make([]api.PolyAggregate, 0)
+	err := json.Unmarshal(msg, &am)
 	if err != nil {
 		log.Warn("error processing upstream message",
 			"message", string(msg),
 			"error", err.Error())
 		return
 	}
+	for _, bar := range am {
+		timestamp := time.Unix(0, int64(1000*1000*float64(bar.EpochMillis)))
+		lagOnReceipt := time.Now().Sub(timestamp).Seconds()
 
-	timestamp := time.Unix(0, int64(1000*1000*float64(bar.EpochMillis)))
-	lagOnReceipt := time.Now().Sub(timestamp).Seconds()
+		epoch := bar.EpochMillis / 1000
 
-	epoch := bar.EpochMillis / 1000
+		backfill.BackfillM.LoadOrStore(bar.Symbol, &epoch)
 
-	backfill.BackfillM.LoadOrStore(bar.Symbol, &epoch)
+		tbk := io.NewTimeBucketKeyFromString(fmt.Sprintf("%s/1Min/OHLCV", bar.Symbol))
+		csm := io.NewColumnSeriesMap()
 
-	tbk := io.NewTimeBucketKeyFromString(fmt.Sprintf("%s/1Min/OHLCV", bar.Symbol))
-	csm := io.NewColumnSeriesMap()
+		cs := io.NewColumnSeries()
+		cs.AddColumn("Epoch", []int64{epoch})
+		cs.AddColumn("Open", []float64{bar.Open})
+		cs.AddColumn("High", []float64{bar.High})
+		cs.AddColumn("Low", []float64{bar.Low})
+		cs.AddColumn("Close", []float64{bar.Close})
+		cs.AddColumn("Volume", []uint64{uint64(bar.Volume)})
+		csm.AddColumnSeries(*tbk, cs)
 
-	cs := io.NewColumnSeries()
-	cs.AddColumn("Epoch", []int64{epoch})
-	cs.AddColumn("Open", []float32{float32(bar.Open)})
-	cs.AddColumn("High", []float32{float32(bar.High)})
-	cs.AddColumn("Low", []float32{float32(bar.Low)})
-	cs.AddColumn("Close", []float32{float32(bar.Close)})
-	cs.AddColumn("Volume", []int32{int32(bar.Volume)})
-	if addTickCount {
-		cs.AddColumn("TickCnt", []int32{int32(0)})
+		if err := executor.WriteCSM(csm, false); err != nil {
+			log.Error("[polygon] csm write failure for key: [%v] (%v)", tbk.String(), err)
+		}
+
+		_ = lagOnReceipt
 	}
-	csm.AddColumnSeries(*tbk, cs)
-
-	if err := executor.WriteCSM(csm, false); err != nil {
-		log.Error("[polygon] csm write failure for key: [%v] (%v)", tbk.String(), err)
-	}
-
-	_ = lagOnReceipt
 
 	metrics.PolygonStreamLastUpdate.WithLabelValues("bar").SetToCurrentTime()
 }

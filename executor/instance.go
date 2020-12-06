@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -24,7 +25,7 @@ type InstanceMetadata struct {
 	TriggerMatchers []*trigger.TriggerMatcher
 }
 
-func NewInstanceSetup(relRootDir string, options ...bool) {
+func NewInstanceSetup(relRootDir string, rs ReplicationSender, options ...bool) {
 	/*
 		Defaults
 	*/
@@ -48,14 +49,21 @@ func NewInstanceSetup(relRootDir string, options ...bool) {
 	if ThisInstance == nil {
 		ThisInstance = new(InstanceMetadata)
 	}
+
 	var err error
-	log.Info("Root Directory: %s", relRootDir)
 	rootDir, err := filepath.Abs(filepath.Clean(relRootDir))
 	if err != nil {
 		log.Error("Cannot take absolute path of root directory %s", err.Error())
+	} else {
+		log.Info("Root Directory: %s", rootDir)
+		err = os.Mkdir(rootDir, 0770)
+		if err != nil && !os.IsExist(err) {
+			log.Fatal("Could not create root directory: %s", err.Error())
+		}
 	}
 	instanceID := time.Now().UTC().UnixNano()
 	ThisInstance.RootDir = rootDir
+
 	// Initialize a global catalog
 	if initCatalog {
 		ThisInstance.CatalogDir = catalog.NewDirectory(rootDir)
@@ -65,12 +73,13 @@ func NewInstanceSetup(relRootDir string, options ...bool) {
 		// Allocate a new WALFile and cache
 		if WALBypass {
 			ThisInstance.TXNPipe = NewTransactionPipe()
-			ThisInstance.WALFile, err = NewWALFile(ThisInstance.RootDir, instanceID)
+			ThisInstance.WALFile, err = NewWALFile(ThisInstance.RootDir, instanceID, nil)
 			if err != nil {
 				log.Fatal("Unable to create WAL")
 			}
 		} else {
-			ThisInstance.TXNPipe, ThisInstance.WALFile, err = StartupCacheAndWAL(ThisInstance.RootDir, instanceID)
+			ThisInstance.TXNPipe, ThisInstance.WALFile, err = StartupCacheAndWAL(ThisInstance.RootDir, instanceID, rs)
+
 			if err != nil {
 				log.Fatal("Unable to startup Cache and WAL")
 			}

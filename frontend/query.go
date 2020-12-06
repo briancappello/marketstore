@@ -319,7 +319,7 @@ func executeQuery(tbk *io.TimeBucketKey, start, end time.Time, LimitRecordCount 
 			}
 			// otherwise add contextual details to the error and return early
 			err = fmt.Errorf(
-				"No results returned from query: Target: %v, start, end: %v,%v LimitRecordCount: %v",
+				"No files returned from query parse: Target: %v, start, end: %v,%v LimitRecordCount: %v",
 				tbk.String(), start, end, LimitRecordCount)
 			log.Error("Error: %s\n", err)
 		} else {
