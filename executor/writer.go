@@ -266,7 +266,7 @@ func WriteBufferToFileIndirect(fp *os.File, buffer wal.OffsetIndexBuffer, varRec
 	return err
 }
 
-// WriteCSM writs ColumnSeriesMap csm to each destination file, and flush it to the disk,
+// WriteCSM writes ColumnSeriesMap (csm) to each destination file, and flush it to the disk,
 // isVariableLength is set to true if the record content is variable-length type. WriteCSM
 // also verifies the DataShapeVector of the incoming ColumnSeriesMap matches the on-disk
 // DataShapeVector defined by the file header. WriteCSM will create any files if they do
@@ -350,10 +350,20 @@ func WriteCSMInner(csm io.ColumnSeriesMap, isVariableLength bool) (err error) {
 		if missing != nil {
 			return fmt.Errorf(columnMismatchError, csDSV, dbDSV)
 		}
+		
+		if coercion != nil {
+			for _, dbDS := range coercion {
+				if err := cs.CoerceColumnType(dbDS.Name, dbDS.Type); err != nil {
+					csType := GetElementType(cs.GetColumn(dbDS.Name))
+					log.Error("[%s] error coercing %s from %s to %s", tbk.GetItemKey(), dbDS.Name, csType.String(), dbDS.Type.String())
+					return err
+				}
+			}
+		}
 
 		if coercion != nil {
 			for _, dbDS := range coercion {
-				if err := cs.CoerceColumnType(dbDS); err != nil {
+				if err := cs.CoerceColumnType(dbDS.Name, dbDS.Type); err != nil {
 					var csDS DataShape
 					for _, csDS := range csDSV {
 						if csDS.Name == dbDS.Name {
@@ -374,8 +384,8 @@ func WriteCSMInner(csm io.ColumnSeriesMap, isVariableLength bool) (err error) {
 			return err
 		}
 
-		rowsData := cs.ToRowSeries(tbk, alignData).GetData()
-		w.WriteRecords(times, rowsData, dbDSV)
+		rowData := cs.ToRowSeries(tbk, alignData).GetData()
+		w.WriteRecords(times, rowData, dbDSV)
 	}
 	walfile := ThisInstance.WALFile
 	walfile.RequestFlush()

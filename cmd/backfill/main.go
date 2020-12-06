@@ -113,7 +113,7 @@ func executeStart(cmd *cobra.Command, args []string) error {
 
 		for e.After(s) {
 			if calendar.Nasdaq.IsMarketDay(s) {
-				if err := backfill.Bars(symbol, s, s.Add(24*time.Hour), cd.String, 0, writerWP); err != nil {
+				if err := backfill.Bars(symbol, s, s.Add(24*time.Hour), cd.String, 0, false, writerWP); err != nil {
 					log.Warn("[backfill] failed to backfill minutely bars for %v on %v (%v)", symbol, s.Format(format), err)
 				}
 			}
@@ -135,7 +135,7 @@ func executeStart(cmd *cobra.Command, args []string) error {
 			})
 		} else if cd.Suffix() == "D" {
 			apiCallerWP.Do(func() {
-				if err := backfill.Bars(sym, startTime, endTime, cd.String, 0, writerWP); err != nil {
+				if err := backfill.Bars(sym, startTime, endTime, cd.String, 0, false, writerWP); err != nil {
 					log.Warn("[backfill] failed to backfill daily bars for %v (%v)", sym, err)
 				}
 			})

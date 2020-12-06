@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-//go:generate ./generateMethods.sh generatedMethods.go
 
 /*
 ColumnSeries stores query results using the following keys:
@@ -487,34 +486,35 @@ func GetMissingAndTypeCoercionColumns(requiredDSV, availableDSV []DataShape) (mi
 	availableDSVSet, _ := NewAnySet(availableDSV)
 	if availableDSVSet.Contains(requiredDSV) {
 		return nil, nil
-	} else {
-		// The required datashapes are not found in the cols
-		requiredDSVSet, _ := NewAnySet(requiredDSV)
-		// missingDSV reflects both missing columns and ones with incorrect type
-		i_missingDSV := requiredDSVSet.Subtract(availableDSV)
-		missingDSV := GetDSVFromInterface(i_missingDSV)
-
-		// Find the missing column names
-		requiredNamesSet, _ := NewAnySet(GetNamesFromDSV(requiredDSV))
-		i_allMissingNames := requiredNamesSet.Subtract(GetNamesFromDSV(availableDSV))
-		allMissingNames := GetStringSliceFromInterface(i_allMissingNames)
-		/*
-			If the number of missing (name+types) is not the same as the missing names
-			then we know that there are more (name+types) than names missing, so
-			we will have to isolate missing columns from those that need type coercion
-		*/
-		switch {
-		case len(missingDSV) == len(allMissingNames):
-			return ExtractDatashapesByNames(requiredDSV, allMissingNames), nil
-		case len(missingDSV) != len(allMissingNames):
-			//We have to coerce types
-			missingDSVNamesSet, _ := NewAnySet(GetNamesFromDSV(missingDSV))
-			i_needCoercionCols := missingDSVNamesSet.Subtract(allMissingNames)
-			needCoercionCols := GetStringSliceFromInterface(i_needCoercionCols)
-			return ExtractDatashapesByNames(requiredDSV, allMissingNames),
-				ExtractDatashapesByNames(requiredDSV, needCoercionCols)
-		}
 	}
+
+	// The required datashapes are not found in the cols
+	requiredDSVSet, _ := NewAnySet(requiredDSV)
+	// missingDSV reflects both missing columns and ones with incorrect type
+	i_missingDSV := requiredDSVSet.Subtract(availableDSV)
+	missingDSV := GetDSVFromInterface(i_missingDSV)
+
+	// Find the missing column names
+	requiredNamesSet, _ := NewAnySet(GetNamesFromDSV(requiredDSV))
+	i_allMissingNames := requiredNamesSet.Subtract(GetNamesFromDSV(availableDSV))
+	allMissingNames := GetStringSliceFromInterface(i_allMissingNames)
+	/*
+		If the number of missing (name+types) is not the same as the missing names
+		then we know that there are more (name+types) than names missing, so
+		we will have to isolate missing columns from those that need type coercion
+	*/
+	switch {
+	case len(missingDSV) == len(allMissingNames):
+		return ExtractDatashapesByNames(requiredDSV, allMissingNames), nil
+	case len(missingDSV) != len(allMissingNames):
+		//We have to coerce types
+		missingDSVNamesSet, _ := NewAnySet(GetNamesFromDSV(missingDSV))
+		i_needCoercionCols := missingDSVNamesSet.Subtract(allMissingNames)
+		needCoercionCols := GetStringSliceFromInterface(i_needCoercionCols)
+		return ExtractDatashapesByNames(requiredDSV, allMissingNames),
+			ExtractDatashapesByNames(requiredDSV, needCoercionCols)
+	}
+
 	return nil, nil
 }
 
@@ -536,7 +536,7 @@ func SerializeColumnsToRows(cs *ColumnSeries, dataShapes []DataShape, align64 bo
 	}
 	// Coerce column types as needed
 	for _, shape := range needcoercion {
-		cs.CoerceColumnType(shape)
+		cs.CoerceColumnType(shape.Name, shape.Type)
 	}
 
 	/*
