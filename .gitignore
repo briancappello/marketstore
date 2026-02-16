@@ -8,10 +8,14 @@ coverage.txt
 /tmp/
 *.pyc
 mktsdb/
+build/
 marketstore
 *.exe
 *.test
 .vscode
+
+# config
+mkts.yml
 
 # Rust相关忽略文件
 # 编译输出

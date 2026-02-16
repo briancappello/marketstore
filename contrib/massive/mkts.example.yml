@@ -1,0 +1,36 @@
+root_directory: data
+listen_port: 5993
+log_level: info
+stop_grace_period: 0
+wal_rotate_interval: 5
+enable_last_known: false
+timezone: "America/New_York"
+triggers:
+  - module: ondiskagg.so
+    on: "*/1Min/OHLCV"
+    config:
+      filter: nasdaq
+      destinations: [ '5Min', '15Min', '1H', '1D' ]
+bgworkers:
+  - module: massive.so
+    name: Massive
+    config:
+      api_key: your_massive_api_key
+      base_url: https://api.massive.com
+      ws_server: wss://socket.massive.com
+      data_types: [ 'bars', 'trades' ]
+      symbols:
+        - AAPL
+        - SPY
+      # Bar frequencies to backfill (only these will be fetched from query_start)
+      bar_frequencies: [ '1Min', '1D' ]
+      # Set query_start to backfill historical data on startup.
+      # Keys are timeframes (1Min, 5Min, 1H, 1D, etc.) or 'trades'/'quotes'.
+      # Only frequencies listed in bar_frequencies will be backfilled for bars.
+      # Omit to skip backfill and only stream real-time data.
+      query_start:
+        1Min: "2024-01-01"
+        1D: "2020-01-01"
+        trades: "2024-06-01"
+      backfill_batch_size: 50000
+      backfill_adjusted: true

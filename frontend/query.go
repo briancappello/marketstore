@@ -13,6 +13,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/planner"
 	"github.com/alpacahq/marketstore/v4/sqlparser"
 	"github.com/alpacahq/marketstore/v4/utils"
+	"github.com/alpacahq/marketstore/v4/utils/agg"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
@@ -306,45 +307,68 @@ func (qs *QueryService) ExecuteQuery(tbk *io.TimeBucketKey, start, end time.Time
 ) (io.ColumnSeriesMap, error) {
 	query := planner.NewQuery(qs.catalogDir)
 
-	/*
-		Alter timeframe inside key to ensure it matches a queryable TF
-	*/
-
-	tf := tbk.GetItemInCategory("Timeframe")
-	cd, err := utils.CandleDurationFromString(tf)
+	// Keep original tbk for aggregation; create a copy for querying
+	requestedTf := tbk.GetItemInCategory("Timeframe")
+	cd, err := utils.CandleDurationFromString(requestedTf)
 	if err != nil {
 		return nil, fmt.Errorf("timeframe not found in TimeBucketKey=%s: %w", tbk.String(), err)
 	}
-	queryableTimeframe := cd.QueryableTimeframe()
-	tbk.SetItemInCategory("Timeframe", queryableTimeframe)
-	query.AddTargetKey(tbk)
 
-	if limitRecordCount != 0 {
-		direction := io.LAST
-		if limitFromStart {
-			direction = io.FIRST
+	// Get all timeframes that can satisfy the requested duration, ordered from
+	// lowest to highest frequency. We'll try each until we find one with data.
+	queryableTimeframes := cd.QueryableTimeframes()
+
+	// queriedTbk is a copy that we'll modify for each query attempt
+	queriedTbk := io.NewTimeBucketKeyFromString(tbk.String())
+
+	var parseResult *planner.ParseResult
+	var queriedTimeframe string
+
+	// Search for the lowest-frequency timeframe with data able to satisfy the request
+	for i, timeframe := range queryableTimeframes {
+		queriedTbk.SetItemInCategory("Timeframe", timeframe)
+
+		query.Reset()
+		query.AddTargetKey(queriedTbk)
+		query.SetRange(start, end)
+
+		if limitRecordCount != 0 {
+			direction := io.LAST
+			if limitFromStart {
+				direction = io.FIRST
+			}
+			query.SetRowLimit(
+				direction,
+				cd.QueryableNrecords(timeframe, limitRecordCount),
+			)
 		}
-		query.SetRowLimit(
-			direction,
-			cd.QueryableNrecords(
-				queryableTimeframe,
-				limitRecordCount,
-			),
-		)
-	}
 
-	query.SetRange(start, end)
-	parseResult, err := query.Parse()
-	if err != nil {
-		// No results from query
-		if err.Error() == "no files returned from query parse" {
-			log.Info("no results returned from query: Target: %v, start, end: %v,%v limitRecordCount: %v",
+		result, parseErr := query.Parse()
+		if parseErr == nil {
+			parseResult = result
+			queriedTimeframe = timeframe
+			break
+		}
+
+		// No results from query - try the next higher-frequency timeframe
+		if parseErr.Error() == "no files returned from query parse" {
+			// Continue checking higher-frequency timeframes if there are any left
+			if i+1 < len(queryableTimeframes) {
+				continue
+			}
+			// Otherwise, return the error with context
+			err = fmt.Errorf(
+				"no results returned from query: Target: %v, start, end: %v,%v limitRecordCount: %v",
 				tbk.String(), start, end, limitRecordCount)
+			log.Info("%s", err)
 		} else {
-			log.Error("Parsing query: %s\n", err)
+			log.Error("Parsing query: %s\n", parseErr)
+			err = parseErr
 		}
 		return nil, err
 	}
+
+	// Read the data
 	scanner, err := executor.NewReader(parseResult)
 	if err != nil {
 		log.Error("Unable to create scanner: %s\n", err)
@@ -356,7 +380,33 @@ func (qs *QueryService) ExecuteQuery(tbk *io.TimeBucketKey, start, end time.Time
 		return nil, err
 	}
 
-	csm.FilterColumns(columns)
+	// Check if we need to aggregate the queried data to the requested timeframe
+	if requestedTf != queriedTimeframe {
+		aggCsm := io.NewColumnSeriesMap()
+		for _, symbol := range tbk.GetMultiItemInCategory("Symbol") {
+			// Build the keys for this symbol
+			symbolQueriedTbk := io.NewTimeBucketKeyFromString(queriedTbk.String())
+			symbolQueriedTbk.SetItemInCategory("Symbol", symbol)
 
-	return csm, err
+			symbolRequestedTbk := io.NewTimeBucketKeyFromString(tbk.String())
+			symbolRequestedTbk.SetItemInCategory("Symbol", symbol)
+
+			cs := csm[*symbolQueriedTbk]
+			if cs == nil || cs.Len() == 0 {
+				continue
+			}
+
+			aggCs, aggErr := agg.Aggregate(cs, requestedTf)
+			if aggErr != nil {
+				log.Error("Error aggregating data for %s: %s\n", symbol, aggErr)
+				continue
+			}
+			aggCsm[*symbolRequestedTbk] = aggCs
+		}
+		aggCsm.FilterColumns(columns)
+		return aggCsm, nil
+	}
+
+	csm.FilterColumns(columns)
+	return csm, nil
 }

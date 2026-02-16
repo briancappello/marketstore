@@ -46,10 +46,15 @@ func Load(pluginName string) (pi *plugin.Plugin, err error) {
 		return plugin.Open(pluginName)
 	}
 	envGOPATH := os.Getenv("GOPATH")
-	gopaths := strings.Split(envGOPATH, ":")
-	if len(gopaths) == 0 {
-		return nil, fmt.Errorf("GOPATH is not set")
+	if envGOPATH == "" {
+		// Use default GOPATH when not set (Go 1.8+)
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("GOPATH is not set and cannot determine home directory: %w", err)
+		}
+		envGOPATH = filepath.Join(homeDir, "go")
 	}
+	gopaths := strings.Split(envGOPATH, ":")
 	for _, path := range gopaths {
 		pluginPath := filepath.Join(filepath.Join(path, "bin"), pluginName)
 		log.Info("Trying to load module from path: %s...\n", pluginPath)

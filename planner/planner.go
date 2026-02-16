@@ -157,6 +157,14 @@ func NewQuery(d *catalog.Directory) *Query {
 	return q
 }
 
+// Reset clears the query state so it can be reused with different parameters.
+func (q *Query) Reset() {
+	q.Restriction = NewRestrictionList()
+	q.Range = NewDateRange()
+	q.Limit = NewRowLimit()
+	q.TimeQuals = nil
+}
+
 func (q *Query) SetRowLimit(direction io.DirectionEnum, rowLimit int) {
 	q.Limit = NewRowLimit()
 	q.Limit.Number = int32(rowLimit)

@@ -2,7 +2,7 @@ package calendar
 
 var NasdaqJSON = `{
   "timezone": "America/New_York",
-  "open_time": "09:30:00",
+  "open_time": "04:00:00",
   "close_time": "16:00:00",
   "early_close_time": "13:00:00",
   "non_trading_days": [

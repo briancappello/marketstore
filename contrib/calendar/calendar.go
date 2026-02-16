@@ -27,12 +27,16 @@ type Time struct {
 	hour, minute, second int
 }
 
+// extendedHoursOffset is added to the regular close time to get the extended hours close.
+// Extended hours run from 4 AM to (regular close + 4 hours), e.g., 4 AM to 8 PM on normal days.
+const extendedHoursOffset = 4 * time.Hour
+
 type Calendar struct {
 	days           map[int]MarketState
 	tz             *time.Location
-	openTime       Time
-	closeTime      Time
-	earlyCloseTime Time
+	openTime       Time // Pre-market open (e.g., 4:00 AM for extended hours)
+	closeTime      Time // Regular market close (e.g., 4:00 PM)
+	earlyCloseTime Time // Early close time (e.g., 1:00 PM)
 }
 
 type calendarJSON struct {
@@ -104,7 +108,8 @@ func (calendar *Calendar) EpochIsMarketOpen(epoch int64) bool {
 	return calendar.IsMarketOpen(t)
 }
 
-// IsMarketOpen returns true if t is in the market hours.
+// IsMarketOpen returns true if t is in the extended market hours.
+// Extended hours run from pre-market open (4 AM) to regular close + 4 hours (8 PM normally).
 func (calendar *Calendar) IsMarketOpen(t time.Time) bool {
 	wd := t.Weekday()
 	if wd == time.Saturday || wd == time.Sunday {
@@ -114,12 +119,15 @@ func (calendar *Calendar) IsMarketOpen(t time.Time) bool {
 	year, month, day := t.Date()
 	ot := calendar.openTime
 	open := time.Date(year, month, day, ot.hour, ot.minute, ot.second, 0, calendar.tz)
+
 	if state, ok := calendar.days[julianDate(t)]; ok {
 		switch state {
 		case EarlyClose:
+			// Extended close = early close time + 4 hours
 			et := calendar.earlyCloseTime
-			clos := time.Date(year, month, day, et.hour, et.minute, et.second, 0, calendar.tz)
-			if t.Before(open) || t.Equal(clos) || t.After(clos) {
+			regularClose := time.Date(year, month, day, et.hour, et.minute, et.second, 0, calendar.tz)
+			extendedClose := regularClose.Add(extendedHoursOffset)
+			if t.Before(open) || t.Equal(extendedClose) || t.After(extendedClose) {
 				return false
 			}
 			return true
@@ -127,9 +135,11 @@ func (calendar *Calendar) IsMarketOpen(t time.Time) bool {
 			return false
 		}
 	} else {
+		// Extended close = regular close time + 4 hours
 		ct := calendar.closeTime
-		clos := time.Date(year, month, day, ct.hour, ct.minute, ct.second, 0, calendar.tz)
-		if t.Before(open) || t.Equal(clos) || t.After(clos) {
+		regularClose := time.Date(year, month, day, ct.hour, ct.minute, ct.second, 0, calendar.tz)
+		extendedClose := regularClose.Add(extendedHoursOffset)
+		if t.Before(open) || t.Equal(extendedClose) || t.After(extendedClose) {
 			return false
 		}
 		return true
@@ -177,4 +187,59 @@ func (calendar *Calendar) MarketClose(t time.Time) *time.Time {
 
 func (calendar *Calendar) Tz() *time.Location {
 	return calendar.tz
+}
+
+// LatestMarketTime returns the most recent time when the market was or is open.
+// If the market is currently open (including extended hours), it returns the current time.
+// If the market is closed, it returns the extended hours close time of the most recent trading day.
+func (calendar *Calendar) LatestMarketTime(now time.Time) time.Time {
+	now = now.In(calendar.tz)
+
+	// If market is currently open (including extended hours), return now.
+	if calendar.IsMarketOpen(now) {
+		return now
+	}
+
+	// Helper to get extended hours close time for a given day.
+	// Extended close = regular close + 4 hours.
+	getExtendedCloseTime := func(t time.Time) time.Time {
+		year, month, day := t.Date()
+		var regularClose time.Time
+		if state, ok := calendar.days[julianDate(t)]; ok && state == EarlyClose {
+			regularClose = time.Date(year, month, day,
+				calendar.earlyCloseTime.hour,
+				calendar.earlyCloseTime.minute,
+				calendar.earlyCloseTime.second,
+				0, calendar.tz)
+		} else {
+			regularClose = time.Date(year, month, day,
+				calendar.closeTime.hour,
+				calendar.closeTime.minute,
+				calendar.closeTime.second,
+				0, calendar.tz)
+		}
+		return regularClose.Add(extendedHoursOffset)
+	}
+
+	// Check if today is a market day and we're past extended close.
+	if calendar.IsMarketDay(now) {
+		extendedClose := getExtendedCloseTime(now)
+		if now.After(extendedClose) || now.Equal(extendedClose) {
+			// Today was a market day and extended hours already ended.
+			return extendedClose
+		}
+	}
+
+	// Walk backwards to find the most recent market day.
+	// Start from yesterday since today either isn't a market day or hasn't opened yet.
+	const maxDaysBack = 10 // Should never need more than this (worst case: holiday + weekend)
+	for i := 1; i <= maxDaysBack; i++ {
+		day := now.AddDate(0, 0, -i)
+		if calendar.IsMarketDay(day) {
+			return getExtendedCloseTime(day)
+		}
+	}
+
+	// Fallback: return now if we somehow can't find a recent market day.
+	return now
 }

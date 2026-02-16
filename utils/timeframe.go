@@ -139,7 +139,8 @@ func (cd *CandleDuration) IsWithin(ts, start time.Time) bool {
 			return false
 		}
 	case "Y":
-		if (ts.Year() - start.Year()) <= cd.multiplier {
+		// Fix: use < instead of <= to avoid including the next year
+		if (ts.Year() - start.Year()) < cd.multiplier {
 			return true
 		}
 	default:
@@ -153,12 +154,22 @@ func (cd *CandleDuration) IsWithin(ts, start time.Time) bool {
 // Truncate returns the lower boundary time of this candle window that
 // ts belongs to.
 func (cd *CandleDuration) Truncate(ts time.Time) time.Time {
+	yy, mm, dd := ts.Date()
+	day := time.Date(yy, mm, dd, 0, 0, 0, 0, ts.Location())
+
 	switch cd.suffix {
 	case "D":
-		yy, mm, dd := ts.Date()
-		return time.Date(yy, mm, dd, 0, 0, 0, 0, ts.Location())
+		return day
+	case "W":
+		// Find the most recent Monday
+		for day.Weekday() != time.Monday {
+			day = day.AddDate(0, 0, -1)
+		}
+		return day
 	case "M":
 		return time.Date(ts.Year(), ts.Month(), 1, 0, 0, 0, 0, ts.Location())
+	case "Y":
+		return time.Date(ts.Year(), time.January, 1, 0, 0, 0, 0, ts.Location())
 	default:
 		return ts.Truncate(cd.duration)
 	}
@@ -186,15 +197,34 @@ func (cd *CandleDuration) Ceil(ts time.Time) time.Time {
 	return (ts.Add(cd.duration)).Truncate(cd.duration)
 }
 
+// QueryableTimeframe returns the lowest-frequency timeframe that can satisfy
+// the requested duration. This is the preferred timeframe to query.
 func (cd *CandleDuration) QueryableTimeframe() string {
+	tfs := cd.QueryableTimeframes()
+	if len(tfs) > 0 {
+		return tfs[0]
+	}
+	return "1D"
+}
+
+// QueryableTimeframes returns all timeframes that can be aggregated to produce
+// the requested duration, ordered from lowest to highest frequency.
+// Lower frequency timeframes are preferred as they require less data to read.
+func (cd *CandleDuration) QueryableTimeframes() []string {
+	timeframes := make([]string, 0)
 	if cd.suffix != "M" {
 		for i := len(Timeframes) - 1; i >= 0; i-- {
 			if cd.duration%Timeframes[i].Duration == time.Duration(0) {
-				return Timeframes[i].String
+				timeframes = append(timeframes, Timeframes[i].String)
 			}
 		}
 	}
-	return "1D"
+
+	if len(timeframes) > 0 {
+		return timeframes
+	}
+
+	return []string{"1D"}
 }
 
 func (cd *CandleDuration) QueryableNrecords(tf string, nrecords int) int {

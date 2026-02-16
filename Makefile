@@ -2,9 +2,12 @@
 
 GOFLAGS=""
 GOPATH0 := $(firstword $(subst :, ,$(GOPATH)))
+ifeq ($(GOPATH0),)
+GOPATH0 := $(CURDIR)/build
+endif
 UTIL_PATH := github.com/alpacahq/marketstore/v4/utils
 
-build:
+build: plugins
 	GOFLAGS=$(GOFLAGS) go build -ldflags "-s -X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" .
 
 install:
@@ -39,6 +42,7 @@ plugins:
 	$(MAKE) -C contrib/gdaxfeeder
 	${MAKE} -C contrib/ice
 	$(MAKE) -C contrib/iex
+	$(MAKE) -C contrib/massive
 	$(MAKE) -C contrib/ondiskagg
 	$(MAKE) -C contrib/polygon
 	$(MAKE) -C contrib/stream
