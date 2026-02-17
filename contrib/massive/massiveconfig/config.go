@@ -16,7 +16,7 @@ type FetcherConfig struct {
 	// QueryStart is a mapping of data type/frequency to start date (YYYY-MM-DD).
 	// For bars, keys should be timeframe strings (e.g., "1Min", "5Min", "1H", "1D").
 	// For trades and quotes, use "trades" and "quotes" as keys.
-	// Only frequencies listed in BarFrequencies will be backfilled for bars.
+	// The keys determine which data types/frequencies are backfilled.
 	// On subsequent restarts, backfill resumes from the last written timestamp.
 	// If empty, no automatic backfill is performed.
 	// Example: {"1Min": "2024-01-01", "1D": "2020-01-01", "trades": "2024-06-01"}
@@ -32,7 +32,8 @@ type FetcherConfig struct {
 	// This is only sent when the ws_server host is localhost or 127.0.0.1.
 	// If empty, the stream starts from real-time.
 	WSQueryStart string `json:"ws_query_start"`
-	// BarFrequencies is a list of bar timeframes to backfill (e.g., ["1Min", "5Min", "1H", "1D"]).
+	// WSFrequencies is a list of bar timeframes for WebSocket streaming subscriptions
+	// (e.g., ["1Min"]). This only affects real-time data, not backfilling.
 	// If empty, defaults to ["1Min"].
-	BarFrequencies []string `json:"bar_frequencies"`
+	WSFrequencies []string `json:"ws_frequencies"`
 }

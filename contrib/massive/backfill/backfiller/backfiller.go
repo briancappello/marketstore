@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/gobwas/glob"
+	jsoniter "github.com/json-iterator/go"
 
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/internal/di"
@@ -21,6 +23,10 @@ import (
 	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
+
+// json iter supports marshal/unmarshal of map[interface{}]interface{} type
+// which is produced by gopkg.in/yaml.v2 for nested maps.
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 const (
 	dateFormat                 = "2006-01-02"
@@ -64,9 +70,6 @@ var (
 	dir            string
 	fromDates      = make(fromFlags)
 	to             string
-	bars           bool
-	quotes         bool
-	trades         bool
 	symbols        string
 	parallelism    int
 	apiKey         string
@@ -74,7 +77,6 @@ var (
 	batchSize      int
 	adjusted       bool
 	configFilePath string
-	barFrequencies string
 )
 
 // nolint:gochecknoinits // cobra's standard way to initialize flags
@@ -82,39 +84,48 @@ func init() {
 	flag.StringVar(&dir, "dir", "", "mktsdb directory (overrides mkts.yml)")
 	flag.Var(&fromDates, "from",
 		"start date per frequency as key=value (e.g., -from 1Min=2024-01-01 -from 1D=2020-01-01). "+
-			"Use 'trades' and 'quotes' as keys for tick data.")
+			"Use 'trades' and 'quotes' as keys for tick data. "+
+			"If not specified, uses query_start from config file.")
 	flag.StringVar(&to, "to", time.Now().Format(dateFormat),
 		"backfill to date (YYYY-MM-DD) [not included]")
-	flag.BoolVar(&bars, "bars", false, "backfill bars")
-	flag.BoolVar(&quotes, "quotes", false, "backfill quotes")
-	flag.BoolVar(&trades, "trades", false, "backfill trades")
-	flag.StringVar(&symbols, "symbols", "*",
-		"glob pattern of symbols to backfill (* = all)")
+	flag.StringVar(&symbols, "symbols", "",
+		"glob pattern of symbols to backfill (* = all). If not specified, uses symbols from config file.")
 	flag.IntVar(&parallelism, "parallelism", runtime.NumCPU(),
 		"number of parallel API workers (default NumCPU)")
-	flag.IntVar(&batchSize, "batchSize", defaultBatchSize,
-		"pagination size for API requests")
-	flag.StringVar(&apiKey, "apiKey", "", "Massive API key (required)")
+	flag.IntVar(&batchSize, "batchSize", 0,
+		"pagination size for API requests (default from config or 50000)")
+	flag.StringVar(&apiKey, "apiKey", "", "Massive API key (from flag, POLYGON_API_KEY, MASSIVE_API_KEY env, or config)")
 	flag.StringVar(&baseURL, "baseURL", "",
-		"override Massive API base URL (default https://api.massive.com)")
+		"override Massive API base URL (default from config or https://api.massive.com)")
 	flag.BoolVar(&adjusted, "adjusted", true,
 		"request split-adjusted price data")
 	flag.StringVar(&configFilePath, "config", "/etc/mkts.yml",
 		"path to the mkts.yml config file")
-	flag.StringVar(&barFrequencies, "barFrequencies", "1Min",
-		"comma-separated list of bar timeframes to backfill (e.g., 1Min,5Min,1H,1D)")
 
 	flag.Parse()
 }
 
 func main() {
+	// Load and parse config file first to get defaults.
+	instanceMeta, massiveConfig := initWriter()
+
+	// Apply config defaults for flags not explicitly set.
+	applyConfigDefaults(massiveConfig)
+
+	// If apiKey still not set, check environment variables.
 	if apiKey == "" {
-		log.Error("[massive] apiKey is required")
+		apiKey = os.Getenv("POLYGON_API_KEY")
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("MASSIVE_API_KEY")
+	}
+	if apiKey == "" {
+		log.Error("[massive] apiKey is required (via -apiKey flag, POLYGON_API_KEY, MASSIVE_API_KEY env, or config)")
 		os.Exit(1)
 	}
 
 	if len(fromDates) == 0 {
-		log.Error("[massive] at least one -from flag is required (e.g., -from 1Min=2024-01-01)")
+		log.Error("[massive] no backfill dates specified (use -from flags or query_start in config)")
 		os.Exit(1)
 	}
 
@@ -129,8 +140,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	instanceMeta := initWriter()
-
 	client := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
@@ -139,65 +148,45 @@ func main() {
 		Timeout: 30 * time.Second,
 	}
 
-	// Resolve symbols.
-	symbolList := resolveSymbols(client, symbols)
+	// Normalize and resolve symbols.
+	symbolPattern := normalizeSymbolPattern(symbols)
+	symbolList := resolveSymbols(client, symbolPattern)
 	if len(symbolList) == 0 {
-		log.Error("[massive] no symbols matched pattern: %s", symbols)
+		log.Error("[massive] no symbols matched pattern: %s", symbolPattern)
 		os.Exit(1)
 	}
 	log.Info("[massive] selected %d symbols", len(symbolList))
 
 	startTime := time.Now()
 
-	if bars {
-		frequencies := strings.Split(barFrequencies, ",")
-		for _, tf := range frequencies {
-			tf = strings.TrimSpace(tf)
-			if tf == "" {
-				continue
-			}
-
-			// Look up the start date for this frequency
-			startDateStr, ok := fromDates[tf]
-			if !ok {
-				log.Warn("[massive] no -from date specified for %s, skipping", tf)
-				continue
-			}
-			start, _ := time.Parse(dateFormat, startDateStr) // already validated
-
-			timeframe := tf // capture for closure
-			startCopy := start
-			runBackfill(timeframe+" bars", symbolList, startCopy, end, func(sym string, writerWP *worker.Pool) {
-				if err := backfill.Bars(client, sym, timeframe, startCopy, end, batchSize, adjusted, writerWP); err != nil {
-					log.Warn("[massive] failed to backfill %s bars for %s: %v", timeframe, sym, err)
-				}
-			})
+	// Process each key in fromDates. Keys are either timeframes (e.g., "1Min", "1D")
+	// for bars, or "trades"/"quotes" for tick data.
+	for key, startDateStr := range fromDates {
+		start, err := time.Parse(dateFormat, startDateStr)
+		if err != nil {
+			log.Warn("[massive] invalid date %q for %s, skipping", startDateStr, key)
+			continue
 		}
-	}
 
-	if trades {
-		startDateStr, ok := fromDates["trades"]
-		if !ok {
-			log.Warn("[massive] no -from date specified for trades, skipping")
-		} else {
-			start, _ := time.Parse(dateFormat, startDateStr) // already validated
+		switch key {
+		case "trades":
 			runBackfill("trades", symbolList, start, end, func(sym string, writerWP *worker.Pool) {
 				if err := backfill.Trades(client, sym, start, end, batchSize, writerWP); err != nil {
 					log.Warn("[massive] failed to backfill trades for %s: %v", sym, err)
 				}
 			})
-		}
-	}
-
-	if quotes {
-		startDateStr, ok := fromDates["quotes"]
-		if !ok {
-			log.Warn("[massive] no -from date specified for quotes, skipping")
-		} else {
-			start, _ := time.Parse(dateFormat, startDateStr) // already validated
+		case "quotes":
 			runBackfill("quotes", symbolList, start, end, func(sym string, writerWP *worker.Pool) {
 				if err := backfill.Quotes(client, sym, start, end, batchSize, writerWP); err != nil {
 					log.Warn("[massive] failed to backfill quotes for %s: %v", sym, err)
+				}
+			})
+		default:
+			// Assume it's a bar timeframe (e.g., "1Min", "5Min", "1H", "1D").
+			timeframe := key
+			runBackfill(timeframe+" bars", symbolList, start, end, func(sym string, writerWP *worker.Pool) {
+				if err := backfill.Bars(client, sym, timeframe, start, end, batchSize, adjusted, writerWP); err != nil {
+					log.Warn("[massive] failed to backfill %s bars for %s: %v", timeframe, sym, err)
 				}
 			})
 		}
@@ -205,6 +194,80 @@ func main() {
 
 	instanceMeta.WALFile.Shutdown()
 	log.Info("[massive] backfill complete in %s", time.Since(startTime))
+}
+
+// applyConfigDefaults applies defaults from the massive bgworker config
+// for any flags that weren't explicitly set.
+func applyConfigDefaults(cfg *massiveconfig.FetcherConfig) {
+	if cfg == nil {
+		return
+	}
+
+	// API key from config (lowest priority, will be overridden by env vars).
+	if apiKey == "" && cfg.APIKey != "" {
+		apiKey = cfg.APIKey
+	}
+
+	// Base URL from config.
+	if baseURL == "" && cfg.BaseURL != "" {
+		baseURL = cfg.BaseURL
+	}
+
+	// Batch size from config.
+	if batchSize == 0 && cfg.BackfillBatchSize > 0 {
+		batchSize = cfg.BackfillBatchSize
+	}
+	if batchSize == 0 {
+		batchSize = defaultBatchSize
+	}
+
+	// Symbols from config (join as glob pattern).
+	if symbols == "" && len(cfg.Symbols) > 0 {
+		if len(cfg.Symbols) == 1 {
+			symbols = cfg.Symbols[0]
+		} else {
+			// Multiple symbols: create a brace glob pattern like "{AAPL,MSFT,SPY}".
+			symbols = "{" + strings.Join(cfg.Symbols, ",") + "}"
+		}
+	}
+	if symbols == "" {
+		symbols = "*"
+	}
+
+	// query_start from config provides the backfill dates.
+	if len(fromDates) == 0 && len(cfg.QueryStart) > 0 {
+		for key, dateStr := range cfg.QueryStart {
+			// Validate date format before adding.
+			if _, err := time.Parse(dateFormat, dateStr); err != nil {
+				log.Warn("[massive] invalid query_start date %q for %s in config, skipping", dateStr, key)
+				continue
+			}
+			fromDates[key] = dateStr
+		}
+		log.Info("[massive] using query_start from config: %v", fromDates)
+	}
+}
+
+// normalizeSymbolPattern converts a comma-separated list of symbols (e.g., "AAPL,MSFT,SPY")
+// into a brace glob pattern (e.g., "{AAPL,MSFT,SPY}") that the glob library understands.
+// If the input is already a glob pattern (contains *, ?, {, or [), it's returned as-is.
+func normalizeSymbolPattern(pattern string) string {
+	// If it looks like a glob pattern already, return as-is.
+	if strings.ContainsAny(pattern, "*?{[") {
+		return pattern
+	}
+
+	// Check if it's a comma-separated list.
+	if strings.Contains(pattern, ",") {
+		parts := strings.Split(pattern, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return "{" + strings.Join(parts, ",") + "}"
+	}
+
+	// Single symbol, return as-is.
+	return pattern
 }
 
 func runBackfill(name string, symbolList []string, start, end time.Time, fn func(string, *worker.Pool)) {
@@ -253,7 +316,7 @@ func resolveSymbols(client *http.Client, pattern string) []string {
 	return result
 }
 
-func initWriter() *executor.InstanceMetadata {
+func initWriter() (*executor.InstanceMetadata, *massiveconfig.FetcherConfig) {
 	data, err := os.ReadFile(configFilePath)
 	if err != nil {
 		log.Error("[massive] failed to read config: %v", err)
@@ -287,5 +350,33 @@ func initWriter() *executor.InstanceMetadata {
 	}
 	c.InjectTriggerMatchers(tm)
 
-	return executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
+	// Extract massive bgworker config if present.
+	massiveConfig := findMassiveBgWorkerConfig(config)
+
+	return executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile()), massiveConfig
+}
+
+// findMassiveBgWorkerConfig searches for a massive.so bgworker in the config
+// and parses its config section into a FetcherConfig.
+func findMassiveBgWorkerConfig(config *utils.MktsConfig) *massiveconfig.FetcherConfig {
+	for _, bg := range config.BgWorkers {
+		if bg.Module == "massive.so" {
+			// Marshal the config map to JSON, then unmarshal to FetcherConfig.
+			// Using jsoniter to handle map[interface{}]interface{} from YAML.
+			data, err := json.Marshal(bg.Config)
+			if err != nil {
+				log.Warn("[massive] failed to marshal bgworker config: %v", err)
+				return nil
+			}
+
+			var fetcherConfig massiveconfig.FetcherConfig
+			if err := json.Unmarshal(data, &fetcherConfig); err != nil {
+				log.Warn("[massive] failed to parse bgworker config: %v", err)
+				return nil
+			}
+
+			return &fetcherConfig
+		}
+	}
+	return nil
 }

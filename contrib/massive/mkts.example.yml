@@ -22,11 +22,12 @@ bgworkers:
       symbols:
         - AAPL
         - SPY
-      # Bar frequencies to backfill (only these will be fetched from query_start)
-      bar_frequencies: [ '1Min', '1D' ]
+      # WebSocket streaming frequencies for bars (only 1Min and 1Sec are supported).
+      # Defaults to [ '1Min' ] if not specified.
+      ws_frequencies: [ '1Min' ]
       # Set query_start to backfill historical data on startup.
       # Keys are timeframes (1Min, 5Min, 1H, 1D, etc.) or 'trades'/'quotes'.
-      # Only frequencies listed in bar_frequencies will be backfilled for bars.
+      # All keys will be backfilled; use ondiskagg trigger for aggregations.
       # Omit to skip backfill and only stream real-time data.
       query_start:
         1Min: "2024-01-01"

@@ -1,6 +1,8 @@
 module github.com/alpacahq/marketstore/v4
 
-go 1.18
+go 1.24.9
+
+toolchain go1.24.13
 
 require (
 	cloud.google.com/go v0.34.0
@@ -19,13 +21,11 @@ require (
 	github.com/gobwas/glob v0.2.3
 	github.com/golang/mock v1.4.4
 	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/google/go-cmp v0.5.6
+	github.com/google/go-cmp v0.7.0
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/gorilla/websocket v1.4.2
 	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.10.4
-	github.com/onsi/ginkgo v1.14.2 // indirect
-	github.com/onsi/gomega v1.10.3 // indirect
 	github.com/pkg/errors v0.9.1
 	github.com/preichenberger/go-gdax v0.0.0-20181027225743-eb74ba719d9a
 	github.com/prometheus/client_golang v1.7.1
@@ -36,7 +36,7 @@ require (
 	github.com/timpalpant/go-iex v0.0.0-20181027174710-0b8a5fdd2ec1
 	github.com/vmihailenco/msgpack v4.0.4+incompatible
 	go.uber.org/zap v1.15.0
-	golang.org/x/tools v0.1.12
+	golang.org/x/tools v0.42.0
 	gonum.org/v1/gonum v0.0.0-20190618015908-5dc218f86579
 	google.golang.org/grpc v1.46.2
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c
@@ -46,7 +46,7 @@ require (
 
 require (
 	github.com/hashicorp/go-retryablehttp v0.7.1
-	google.golang.org/protobuf v1.28.0
+	google.golang.org/protobuf v1.36.7
 )
 
 require (
@@ -72,11 +72,14 @@ require (
 	github.com/spf13/pflag v1.0.3 // indirect
 	go.uber.org/atomic v1.6.0 // indirect
 	go.uber.org/multierr v1.5.0 // indirect
-	golang.org/x/mod v0.6.0-dev.0.20220419223038-86c51ed26bb4 // indirect
-	golang.org/x/net v0.0.0-20220722155237-a158d28d115b // indirect
-	golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/mod v0.33.0 // indirect
+	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/appengine v1.4.0 // indirect
 	google.golang.org/genproto v0.0.0-20220527130721-00d5c0f3be58 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
 )
+
+replace code.cloudfoundry.org/bytefmt => github.com/cloudfoundry/bytefmt v0.64.0

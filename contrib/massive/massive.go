@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	jsoniter "github.com/json-iterator/go"
 
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
@@ -44,13 +44,29 @@ const (
 type Prefix string
 
 const (
-	// PrefixAgg subscribes to per-minute aggregate bars.
-	PrefixAgg Prefix = "AM."
+	// PrefixAggMinute subscribes to per-minute aggregate bars (AM.*).
+	PrefixAggMinute Prefix = "AM."
+	// PrefixAggSecond subscribes to per-second aggregate bars (A.*).
+	PrefixAggSecond Prefix = "A."
 	// PrefixTrade subscribes to tick-level trades.
 	PrefixTrade Prefix = "T."
 	// PrefixQuote subscribes to NBBO quotes.
 	PrefixQuote Prefix = "Q."
 )
+
+// wsFrequencyToPrefix maps MarketStore timeframe strings to WebSocket prefixes.
+// Only 1Min and 1Sec are supported for WebSocket streaming.
+var wsFrequencyToPrefix = map[string]Prefix{
+	"1Min": PrefixAggMinute,
+	"1Sec": PrefixAggSecond,
+}
+
+// Use jsoniter because it supports marshal/unmarshal of map[interface{}]interface{} type.
+// When the config file contains nested structures like query_start: {1Min: "2024-01-01"},
+// the standard "encoding/json" library cannot marshal the structure because the config
+// is parsed from a YAML file to map[string]interface{}, and nested maps become
+// map[interface{}]interface{} which encoding/json doesn't support.
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // MassiveFetcher is a MarketStore background worker that streams
 // real-time market data from the Massive WebSocket API, with optional
@@ -112,20 +128,27 @@ func (mf *MassiveFetcher) Run() {
 	}
 
 	for dataType := range mf.types {
-		var prefix Prefix
-		var handler func([]byte)
 		switch dataType {
 		case "bars":
-			prefix = PrefixAgg
-			handler = handlers.BarsHandler
+			// Start a stream for each configured ws_frequency.
+			wsFrequencies := mf.config.WSFrequencies
+			if len(wsFrequencies) == 0 {
+				wsFrequencies = []string{"1Min"} // default to 1Min
+			}
+			for _, freq := range wsFrequencies {
+				prefix, ok := wsFrequencyToPrefix[freq]
+				if !ok {
+					log.Error("[massive] invalid ws_frequency %q: only 1Min and 1Sec are supported for WebSocket streaming", freq)
+					continue
+				}
+				handler := handlers.MakeBarsHandler(freq)
+				go streamForever(wsServer, mf.config.APIKey, prefix, mf.config.Symbols, wsQueryStart, handler)
+			}
 		case "quotes":
-			prefix = PrefixQuote
-			handler = handlers.QuoteHandler
+			go streamForever(wsServer, mf.config.APIKey, PrefixQuote, mf.config.Symbols, wsQueryStart, handlers.QuoteHandler)
 		case "trades":
-			prefix = PrefixTrade
-			handler = handlers.TradeHandler
+			go streamForever(wsServer, mf.config.APIKey, PrefixTrade, mf.config.Symbols, wsQueryStart, handlers.TradeHandler)
 		}
-		go streamForever(wsServer, mf.config.APIKey, prefix, mf.config.Symbols, wsQueryStart, handler)
 	}
 
 	select {} // block forever
@@ -168,50 +191,22 @@ func (mf *MassiveFetcher) runBackfill() {
 			continue
 		}
 
-		for dataType := range mf.types {
-			switch dataType {
-			case "bars":
-				// Backfill each configured bar frequency
-				barFrequencies := mf.config.BarFrequencies
-				if len(barFrequencies) == 0 {
-					barFrequencies = []string{"1Min"}
-				}
-				for _, tf := range barFrequencies {
-					// Look up the start date for this frequency
-					startDateStr, ok := mf.config.QueryStart[tf]
-					if !ok {
-						log.Debug("[massive] no query_start configured for %s, skipping", tf)
-						continue
-					}
-					configStart, err := time.Parse(dateFormat, startDateStr)
-					if err != nil {
-						log.Error("[massive] invalid query_start date %q for %s: %v", startDateStr, tf, err)
-						continue
-					}
+		// Iterate over query_start keys to determine what to backfill.
+		// Keys are either timeframes (e.g., "1Min", "1D") for bars,
+		// or "trades"/"quotes" for tick data.
+		for key, startDateStr := range mf.config.QueryStart {
+			configStart, err := time.Parse(dateFormat, startDateStr)
+			if err != nil {
+				log.Error("[massive] invalid query_start date %q for %s: %v", startDateStr, key, err)
+				continue
+			}
 
-					tbk := io.NewTimeBucketKey(models.BarBucketKey(symbol, tf))
-					start, skip := mf.determineBackfillStart(tbk, configStart, end, tf+" bars", symbol)
-					if skip {
-						continue
-					}
-					log.Info("[massive] backfilling %s bars for %s from %s to %s",
-						tf, symbol, start.Format(time.RFC3339), end.Format(time.RFC3339))
-					if err := backfill.Bars(client, symbol, tf, start, end, batchSize, adjusted, writerWP); err != nil {
-						log.Warn("[massive] failed to backfill %s bars for %s: %v", tf, symbol, err)
-					}
-				}
+			switch key {
 			case "trades":
-				startDateStr, ok := mf.config.QueryStart["trades"]
-				if !ok {
-					log.Debug("[massive] no query_start configured for trades, skipping")
+				// Only process if trades is in data_types.
+				if _, ok := mf.types["trades"]; !ok {
 					continue
 				}
-				configStart, err := time.Parse(dateFormat, startDateStr)
-				if err != nil {
-					log.Error("[massive] invalid query_start date %q for trades: %v", startDateStr, err)
-					continue
-				}
-
 				tbk := io.NewTimeBucketKey(models.TradeBucketKey(symbol))
 				start, skip := mf.determineBackfillStart(tbk, configStart, end, "trades", symbol)
 				if skip {
@@ -223,17 +218,10 @@ func (mf *MassiveFetcher) runBackfill() {
 					log.Warn("[massive] failed to backfill trades for %s: %v", symbol, err)
 				}
 			case "quotes":
-				startDateStr, ok := mf.config.QueryStart["quotes"]
-				if !ok {
-					log.Debug("[massive] no query_start configured for quotes, skipping")
+				// Only process if quotes is in data_types.
+				if _, ok := mf.types["quotes"]; !ok {
 					continue
 				}
-				configStart, err := time.Parse(dateFormat, startDateStr)
-				if err != nil {
-					log.Error("[massive] invalid query_start date %q for quotes: %v", startDateStr, err)
-					continue
-				}
-
 				tbk := io.NewTimeBucketKey(models.QuoteBucketKey(symbol))
 				start, skip := mf.determineBackfillStart(tbk, configStart, end, "quotes", symbol)
 				if skip {
@@ -243,6 +231,23 @@ func (mf *MassiveFetcher) runBackfill() {
 					symbol, start.Format(time.RFC3339), end.Format(time.RFC3339))
 				if err := backfill.Quotes(client, symbol, start, end, batchSize, writerWP); err != nil {
 					log.Warn("[massive] failed to backfill quotes for %s: %v", symbol, err)
+				}
+			default:
+				// Assume it's a bar timeframe (e.g., "1Min", "5Min", "1H", "1D").
+				// Only process if bars is in data_types.
+				if _, ok := mf.types["bars"]; !ok {
+					continue
+				}
+				tf := key
+				tbk := io.NewTimeBucketKey(models.BarBucketKey(symbol, tf))
+				start, skip := mf.determineBackfillStart(tbk, configStart, end, tf+" bars", symbol)
+				if skip {
+					continue
+				}
+				log.Info("[massive] backfilling %s bars for %s from %s to %s",
+					tf, symbol, start.Format(time.RFC3339), end.Format(time.RFC3339))
+				if err := backfill.Bars(client, symbol, tf, start, end, batchSize, adjusted, writerWP); err != nil {
+					log.Warn("[massive] failed to backfill %s bars for %s: %v", tf, symbol, err)
 				}
 			}
 		}

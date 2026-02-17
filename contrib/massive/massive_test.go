@@ -44,10 +44,10 @@ func TestBuildSubScope(t *testing.T) {
 		symbols  []string
 		expected string
 	}{
-		{"single symbol", PrefixAgg, []string{"AAPL"}, "AM.AAPL"},
+		{"single symbol", PrefixAggMinute, []string{"AAPL"}, "AM.AAPL"},
 		{"multiple symbols", PrefixTrade, []string{"AAPL", "MSFT"}, "T.AAPL,T.MSFT"},
 		{"wildcard", PrefixQuote, []string{"*"}, "Q.*"},
-		{"nil defaults to wildcard", PrefixAgg, nil, "AM.*"},
+		{"nil defaults to wildcard", PrefixAggMinute, nil, "AM.*"},
 	}
 
 	for _, tt := range tests {
