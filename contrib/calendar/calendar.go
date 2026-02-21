@@ -193,40 +193,60 @@ func (calendar *Calendar) Tz() *time.Location {
 // If the market is currently open (including extended hours), it returns the current time.
 // If the market is closed, it returns the extended hours close time of the most recent trading day.
 func (calendar *Calendar) LatestMarketTime(now time.Time) time.Time {
+	return calendar.latestMarketTime(now, true)
+}
+
+// LatestMarketTimeRegular returns the most recent time when the regular market session was or is open.
+// Unlike LatestMarketTime, this uses regular market hours (9:30 AM - 4 PM) instead of extended hours.
+// Use this for daily or longer timeframes where extended hours data is not relevant.
+func (calendar *Calendar) LatestMarketTimeRegular(now time.Time) time.Time {
+	return calendar.latestMarketTime(now, false)
+}
+
+// latestMarketTime is the internal implementation that supports both extended and regular hours.
+func (calendar *Calendar) latestMarketTime(now time.Time, includeExtendedHours bool) time.Time {
 	now = now.In(calendar.tz)
 
-	// If market is currently open (including extended hours), return now.
-	if calendar.IsMarketOpen(now) {
-		return now
+	// If market is currently open, return now.
+	if includeExtendedHours {
+		if calendar.IsMarketOpen(now) {
+			return now
+		}
+	} else {
+		if calendar.IsRegularMarketOpen(now) {
+			return now
+		}
 	}
 
-	// Helper to get extended hours close time for a given day.
-	// Extended close = regular close + 4 hours.
-	getExtendedCloseTime := func(t time.Time) time.Time {
+	// Helper to get close time for a given day.
+	getCloseTime := func(t time.Time) time.Time {
 		year, month, day := t.Date()
-		var regularClose time.Time
+		var closeTime time.Time
 		if state, ok := calendar.days[julianDate(t)]; ok && state == EarlyClose {
-			regularClose = time.Date(year, month, day,
+			closeTime = time.Date(year, month, day,
 				calendar.earlyCloseTime.hour,
 				calendar.earlyCloseTime.minute,
 				calendar.earlyCloseTime.second,
 				0, calendar.tz)
 		} else {
-			regularClose = time.Date(year, month, day,
+			closeTime = time.Date(year, month, day,
 				calendar.closeTime.hour,
 				calendar.closeTime.minute,
 				calendar.closeTime.second,
 				0, calendar.tz)
 		}
-		return regularClose.Add(extendedHoursOffset)
+		if includeExtendedHours {
+			closeTime = closeTime.Add(extendedHoursOffset)
+		}
+		return closeTime
 	}
 
-	// Check if today is a market day and we're past extended close.
+	// Check if today is a market day and we're past close.
 	if calendar.IsMarketDay(now) {
-		extendedClose := getExtendedCloseTime(now)
-		if now.After(extendedClose) || now.Equal(extendedClose) {
-			// Today was a market day and extended hours already ended.
-			return extendedClose
+		closeTime := getCloseTime(now)
+		if now.After(closeTime) || now.Equal(closeTime) {
+			// Today was a market day and market already closed.
+			return closeTime
 		}
 	}
 
@@ -236,10 +256,39 @@ func (calendar *Calendar) LatestMarketTime(now time.Time) time.Time {
 	for i := 1; i <= maxDaysBack; i++ {
 		day := now.AddDate(0, 0, -i)
 		if calendar.IsMarketDay(day) {
-			return getExtendedCloseTime(day)
+			return getCloseTime(day)
 		}
 	}
 
 	// Fallback: return now if we somehow can't find a recent market day.
 	return now
+}
+
+// IsRegularMarketOpen returns true if t is within regular market hours (9:30 AM - 4 PM ET).
+func (calendar *Calendar) IsRegularMarketOpen(now time.Time) bool {
+	wd := now.Weekday()
+	if wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+
+	year, month, day := now.Date()
+
+	// Regular market opens at 9:30 AM.
+	open := time.Date(year, month, day, 9, 30, 0, 0, calendar.tz)
+
+	if state, ok := calendar.days[julianDate(now)]; ok {
+		switch state {
+		case EarlyClose:
+			et := calendar.earlyCloseTime
+			close := time.Date(year, month, day, et.hour, et.minute, et.second, 0, calendar.tz)
+			return !now.Before(open) && now.Before(close)
+		default: // Closed
+			return false
+		}
+	}
+
+	// Normal day: regular hours are 9:30 AM to 4:00 PM.
+	ct := calendar.closeTime
+	close := time.Date(year, month, day, ct.hour, ct.minute, ct.second, 0, calendar.tz)
+	return !now.Before(open) && now.Before(close)
 }

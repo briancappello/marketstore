@@ -32,7 +32,7 @@ require (
 	github.com/ryszard/goskiplist v0.0.0-20150312221310-2dfbae5fcf46
 	github.com/secsy/goftp v0.0.0-20200609142545-aa2de14babf4
 	github.com/spf13/cobra v1.0.0
-	github.com/stretchr/testify v1.7.0
+	github.com/stretchr/testify v1.11.1
 	github.com/timpalpant/go-iex v0.0.0-20181027174710-0b8a5fdd2ec1
 	github.com/vmihailenco/msgpack v4.0.4+incompatible
 	go.uber.org/zap v1.15.0
@@ -46,6 +46,7 @@ require (
 
 require (
 	github.com/hashicorp/go-retryablehttp v0.7.1
+	github.com/jackc/pgx/v5 v5.8.0
 	google.golang.org/protobuf v1.36.7
 )
 
@@ -57,6 +58,8 @@ require (
 	github.com/google/gopacket v1.1.16-0.20181023151400-a35e09f9f224 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.1 // indirect
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/matryer/try v0.0.0-20161228173917-9ac251b645a2 // indirect
@@ -79,7 +82,7 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/appengine v1.4.0 // indirect
 	google.golang.org/genproto v0.0.0-20220527130721-00d5c0f3be58 // indirect
-	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace code.cloudfoundry.org/bytefmt => github.com/cloudfoundry/bytefmt v0.64.0

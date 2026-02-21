@@ -30,13 +30,14 @@ bgworkers:
 #      ws_server: "ws://127.0.0.1:8765"
       data_types:
         - bars
-      bar_frequencies:
+      ws_frequencies:
+#        - 1Sec
         - 1Min
       symbols:
         - AAPL
         - SPY
       query_start:
-        - 1Min: "2024-01-01"
-        - 1D: "2024-01-01"
+        1Min: "2024-01-01"
+        1D: "2024-01-01"
       backfill_batch_size: 50000
       backfill_adjusted: true

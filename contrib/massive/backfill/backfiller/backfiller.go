@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gobwas/glob"
@@ -77,6 +80,10 @@ var (
 	batchSize      int
 	adjusted       bool
 	configFilePath string
+
+	// symbolInfos holds resolved symbols with optional listing dates.
+	// Populated either from database (symbols_dsn) or API (glob pattern).
+	symbolInfos []massiveconfig.SymbolInfo
 )
 
 // nolint:gochecknoinits // cobra's standard way to initialize flags
@@ -148,21 +155,52 @@ func main() {
 		Timeout: 30 * time.Second,
 	}
 
-	// Normalize and resolve symbols.
-	symbolPattern := normalizeSymbolPattern(symbols)
-	symbolList := resolveSymbols(client, symbolPattern)
-	if len(symbolList) == 0 {
-		log.Error("[massive] no symbols matched pattern: %s", symbolPattern)
+	// Resolve symbols: database (with listing dates) or API (glob pattern).
+	symbolInfos = resolveSymbolInfos(client, massiveConfig)
+	if len(symbolInfos) == 0 {
+		log.Error("[massive] no symbols resolved")
 		os.Exit(1)
 	}
-	log.Info("[massive] selected %d symbols", len(symbolList))
+	withDates := 0
+	for _, info := range symbolInfos {
+		if info.ListingDate != nil {
+			withDates++
+		}
+	}
+	if withDates > 0 {
+		log.Info("[massive] selected %d symbols (%d with listing dates)", len(symbolInfos), withDates)
+	} else {
+		log.Info("[massive] selected %d symbols", len(symbolInfos))
+	}
+
+	// Set up context with signal handling for graceful shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle Ctrl+C and SIGTERM for graceful shutdown.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		log.Info("[massive] received signal %v, initiating shutdown...", sig)
+		cancel()
+	}()
 
 	startTime := time.Now()
 
 	// Process each key in fromDates. Keys are either timeframes (e.g., "1Min", "1D")
 	// for bars, or "trades"/"quotes" for tick data.
 	for key, startDateStr := range fromDates {
-		start, err := time.Parse(dateFormat, startDateStr)
+		// Check for cancellation between data types.
+		select {
+		case <-ctx.Done():
+			log.Info("[massive] backfill cancelled")
+			instanceMeta.WALFile.Shutdown()
+			os.Exit(0)
+		default:
+		}
+
+		configStart, err := time.Parse(dateFormat, startDateStr)
 		if err != nil {
 			log.Warn("[massive] invalid date %q for %s, skipping", startDateStr, key)
 			continue
@@ -170,23 +208,32 @@ func main() {
 
 		switch key {
 		case "trades":
-			runBackfill("trades", symbolList, start, end, func(sym string, writerWP *worker.Pool) {
-				if err := backfill.Trades(client, sym, start, end, batchSize, writerWP); err != nil {
-					log.Warn("[massive] failed to backfill trades for %s: %v", sym, err)
+			runBackfill(ctx, "trades", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
+				if err := backfill.Trades(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP); err != nil {
+					if err == context.Canceled {
+						return
+					}
+					log.Warn("[massive] failed to backfill trades for %s: %v", symInfo.Symbol, err)
 				}
 			})
 		case "quotes":
-			runBackfill("quotes", symbolList, start, end, func(sym string, writerWP *worker.Pool) {
-				if err := backfill.Quotes(client, sym, start, end, batchSize, writerWP); err != nil {
-					log.Warn("[massive] failed to backfill quotes for %s: %v", sym, err)
+			runBackfill(ctx, "quotes", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
+				if err := backfill.Quotes(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP); err != nil {
+					if err == context.Canceled {
+						return
+					}
+					log.Warn("[massive] failed to backfill quotes for %s: %v", symInfo.Symbol, err)
 				}
 			})
 		default:
 			// Assume it's a bar timeframe (e.g., "1Min", "5Min", "1H", "1D").
 			timeframe := key
-			runBackfill(timeframe+" bars", symbolList, start, end, func(sym string, writerWP *worker.Pool) {
-				if err := backfill.Bars(client, sym, timeframe, start, end, batchSize, adjusted, writerWP); err != nil {
-					log.Warn("[massive] failed to backfill %s bars for %s: %v", timeframe, sym, err)
+			runBackfill(ctx, timeframe+" bars", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
+				if err := backfill.Bars(ctx, client, symInfo.Symbol, timeframe, effectiveStart, end, batchSize, adjusted, writerWP); err != nil {
+					if err == context.Canceled {
+						return
+					}
+					log.Warn("[massive] failed to backfill %s bars for %s: %v", timeframe, symInfo.Symbol, err)
 				}
 			})
 		}
@@ -222,7 +269,8 @@ func applyConfigDefaults(cfg *massiveconfig.FetcherConfig) {
 	}
 
 	// Symbols from config (join as glob pattern).
-	if symbols == "" && len(cfg.Symbols) > 0 {
+	// Only apply if symbols_dsn is not set (database takes precedence).
+	if symbols == "" && cfg.SymbolsDSN == "" && len(cfg.Symbols) > 0 {
 		if len(cfg.Symbols) == 1 {
 			symbols = cfg.Symbols[0]
 		} else {
@@ -230,9 +278,7 @@ func applyConfigDefaults(cfg *massiveconfig.FetcherConfig) {
 			symbols = "{" + strings.Join(cfg.Symbols, ",") + "}"
 		}
 	}
-	if symbols == "" {
-		symbols = "*"
-	}
+	// Don't default to "*" here - let resolveSymbolInfos handle the logic.
 
 	// query_start from config provides the backfill dates.
 	if len(fromDates) == 0 && len(cfg.QueryStart) > 0 {
@@ -270,16 +316,36 @@ func normalizeSymbolPattern(pattern string) string {
 	return pattern
 }
 
-func runBackfill(name string, symbolList []string, start, end time.Time, fn func(string, *worker.Pool)) {
+func runBackfill(ctx context.Context, name string, symbols []massiveconfig.SymbolInfo, configStart, end time.Time, fn func(massiveconfig.SymbolInfo, time.Time, *worker.Pool)) {
 	log.Info("[massive] backfilling %s for %d symbols from %s to %s",
-		name, len(symbolList), start.Format(dateFormat), end.Format(dateFormat))
-	apiWP := worker.NewWorkerPool(parallelism)
-	writerWP := worker.NewWorkerPool(1)
+		name, len(symbols), configStart.Format(dateFormat), end.Format(dateFormat))
+	apiWP := worker.NewWorkerPool(ctx, parallelism)
+	writerWP := worker.NewWorkerPool(ctx, 1)
 
-	for _, sym := range symbolList {
-		currentSymbol := sym
+	for _, symInfo := range symbols {
+		// Check for cancellation between symbols.
+		select {
+		case <-ctx.Done():
+			apiWP.CloseAndWait()
+			writerWP.CloseAndWait()
+			return
+		default:
+		}
+
+		// Compute effective start date for this symbol.
+		effectiveStart := massiveconfig.EffectiveBackfillStart(configStart, symInfo.ListingDate)
+
+		// Skip if effective start is after end (future listing date).
+		if effectiveStart.After(end) {
+			log.Info("[massive] %s listing date %s is in the future, skipping backfill",
+				symInfo.Symbol, effectiveStart.Format(dateFormat))
+			continue
+		}
+
+		currentSymInfo := symInfo
+		currentStart := effectiveStart
 		apiWP.Do(func() {
-			fn(currentSymbol, writerWP)
+			fn(currentSymInfo, currentStart, writerWP)
 		})
 	}
 
@@ -287,8 +353,43 @@ func runBackfill(name string, symbolList []string, start, end time.Time, fn func
 	writerWP.CloseAndWait()
 }
 
-func resolveSymbols(client *http.Client, pattern string) []string {
+// resolveSymbolInfos resolves symbols from database (if configured) or API (glob pattern).
+// Database resolution returns symbols with optional listing dates.
+// API resolution returns symbols without listing dates.
+func resolveSymbolInfos(client *http.Client, cfg *massiveconfig.FetcherConfig) []massiveconfig.SymbolInfo {
+	// Priority 1: Database query (with potential listing dates).
+	if cfg != nil && cfg.SymbolsDSN != "" {
+		if cfg.SymbolsQuery == "" {
+			log.Error("[massive] symbols_query is required when symbols_dsn is set")
+			os.Exit(1)
+		}
+		infos, err := massiveconfig.FetchSymbolsFromDB(cfg.SymbolsDSN, cfg.SymbolsQuery)
+		if err != nil {
+			log.Error("[massive] failed to fetch symbols from database: %v", err)
+			os.Exit(1)
+		}
+		log.Info("[massive] loaded %d symbols from database", len(infos))
+		return infos
+	}
+
+	// Priority 2: CLI -symbols flag or config symbols (via glob pattern against API).
+	pattern := symbols
+	if pattern == "" {
+		pattern = "*"
+	}
+	symbolList := resolveSymbolsFromAPI(client, pattern)
+
+	// Convert to SymbolInfo without listing dates.
+	result := make([]massiveconfig.SymbolInfo, len(symbolList))
+	for i, sym := range symbolList {
+		result[i] = massiveconfig.SymbolInfo{Symbol: sym}
+	}
+	return result
+}
+
+func resolveSymbolsFromAPI(client *http.Client, pattern string) []string {
 	log.Info("[massive] listing tickers for pattern: %s", pattern)
+	pattern = normalizeSymbolPattern(pattern)
 	g := glob.MustCompile(pattern)
 
 	tickers, err := api.ListTickers(client)

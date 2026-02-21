@@ -23,8 +23,10 @@ configuration file under `bgworkers`.
 | `ws_server`           | string            | `wss://socket.massive.com` | WebSocket server URL                                                                      |
 | `data_types`          | []string          | (required)                 | Data types to subscribe to: `bars`, `quotes`, `trades`                                    |
 | `symbols`             | []string          | `["*"]`                    | Symbols to subscribe to (use `*` for all)                                                 |
+| `symbols_dsn`         | string            | (none)                     | PostgreSQL connection string for dynamic symbol lookup (overrides `symbols` if set)       |
+| `symbols_query`       | string            | (none)                     | SQL query returning a single column of symbols (required when `symbols_dsn` is set)       |
 | `query_start`         | map[string]string | (none)                     | Start dates per frequency. Keys are timeframes (e.g., `1Min`, `1D`) or `trades`/`quotes`. |
-| `bar_frequencies`     | []string          | `["1Min"]`                 | Bar timeframes to backfill (e.g., `["1Min", "5Min", "1H", "1D"]`)                         |
+| `ws_frequencies`      | []string          | `["1Min"]`                 | Bar timeframes to stream (e.g., `["1Sec", "1Min"]`)                                       |
 | `backfill_batch_size` | int               | `50000`                    | Pagination limit for REST API backfill                                                    |
 | `backfill_adjusted`   | bool              | `true`                     | Whether backfilled bars are split-adjusted                                                |
 
@@ -41,12 +43,71 @@ bgworkers:
       symbols:
         - AAPL
         - SPY
-      bar_frequencies: ["1Min", "1D"]
+      ws_frequencies: ["1Sec", "1Min"]
       query_start:
         1Min: "2024-01-01"
         1D: "2020-01-01"
         trades: "2024-06-01"
 ```
+
+### Dynamic Symbols from PostgreSQL
+
+Instead of defining a static symbol list, you can query symbols from a PostgreSQL
+database at startup. This is useful when managing symbols through an external system.
+
+```yaml
+bgworkers:
+  - module: massive.so
+    name: Massive
+    config:
+      api_key: your_api_key
+      data_types: ["bars"]
+      # Query symbols from PostgreSQL instead of using static list
+      symbols_dsn: "postgres://user:password@localhost:5432/mydb?sslmode=disable"
+      symbols_query: "SELECT symbol FROM tracked_symbols WHERE active = true"
+      query_start:
+        1Min: "2024-01-01"
+```
+
+When `symbols_dsn` is set:
+- The `symbols` field is ignored
+- The query must return a single column containing symbol strings
+- If the database connection fails or returns no symbols, the plugin fails to start
+- Symbols are fetched once at startup (restart MarketStore to reload symbols)
+
+#### Per-Symbol Listing Dates
+
+The database query can optionally return a second column with the symbol's listing
+date. When a listing date is provided and is more recent than the global `query_start`,
+backfilling for that symbol starts from the listing date instead.
+
+This is useful for newer symbols (e.g., IPOs) where requesting data before their
+listing date would be wasteful.
+
+```yaml
+bgworkers:
+  - module: massive.so
+    name: Massive
+    config:
+      api_key: your_api_key
+      data_types: ["bars"]
+      symbols_dsn: "postgres://user:password@localhost:5432/mydb?sslmode=disable"
+      # Query returns (symbol, listing_date) pairs
+      symbols_query: "SELECT symbol, listing_date FROM tracked_symbols WHERE active = true"
+      query_start:
+        1Min: "2020-01-01"  # Global start, but newer symbols use their listing date
+```
+
+**Listing date behavior:**
+- If `listing_date` is `NULL`, the global `query_start` is used
+- If `listing_date` is earlier than `query_start`, the global `query_start` is used
+- If `listing_date` is more recent than `query_start`, backfilling starts from `listing_date`
+- If `listing_date` is in the future, backfilling is skipped (but WebSocket streaming still subscribes)
+
+**Supported date formats:**
+- PostgreSQL `DATE` type
+- PostgreSQL `TIMESTAMP` or `TIMESTAMPTZ` (time portion is ignored)
+- Text in `YYYY-MM-DD` format
 
 ### Testing with Mock Server
 

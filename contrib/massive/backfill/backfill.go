@@ -1,6 +1,7 @@
 package backfill
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -116,7 +117,9 @@ func splitDateRange(from, to time.Time, timeframe string) []dateRange {
 // and writes them to MarketStore. The timeframe parameter specifies the
 // bar frequency (e.g., "1Min", "5Min", "1H", "1D").
 // Date ranges are split into chunks and fetched in parallel for improved throughput.
+// Returns context.Canceled if the context is cancelled during the operation.
 func Bars(
+	ctx context.Context,
 	client *http.Client,
 	symbol string,
 	timeframe string,
@@ -125,6 +128,13 @@ func Bars(
 	adjusted bool,
 	writerWP *worker.Pool,
 ) error {
+	// Check for cancellation at start.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	if from.IsZero() {
 		from = time.Date(2014, 1, 1, 0, 0, 0, 0, NY)
 	}
@@ -143,7 +153,7 @@ func Bars(
 
 	if len(chunks) == 1 {
 		// Single chunk: fetch directly without parallelization overhead.
-		return fetchAndWriteBars(client, symbol, timeframe, apiTimespan, multiplier,
+		return fetchAndWriteBars(ctx, client, symbol, timeframe, apiTimespan, multiplier,
 			from, to, limit, adjusted, writerWP)
 	}
 
@@ -158,12 +168,31 @@ func Bars(
 	sem := make(chan struct{}, dayFetchParallelism)
 	var wg sync.WaitGroup
 
+	// Create a cancellable context for the parallel fetches.
+	fetchCtx, fetchCancel := context.WithCancel(ctx)
+	defer fetchCancel()
+
 	for i, chunk := range chunks {
 		wg.Add(1)
 		go func(idx int, dr dateRange) {
 			defer wg.Done()
-			sem <- struct{}{}        // acquire
+
+			// Check for cancellation before acquiring semaphore.
+			select {
+			case <-fetchCtx.Done():
+				results <- chunkResult{idx: idx, err: fetchCtx.Err()}
+				return
+			case sem <- struct{}{}: // acquire
+			}
 			defer func() { <-sem }() // release
+
+			// Check again after acquiring semaphore.
+			select {
+			case <-fetchCtx.Done():
+				results <- chunkResult{idx: idx, err: fetchCtx.Err()}
+				return
+			default:
+			}
 
 			resp, err := api.GetHistoricAggregates(client, symbol, apiTimespan, multiplier,
 				dr.from, dr.to, limit, adjusted)
@@ -185,9 +214,17 @@ func Bars(
 	chunkResults := make([][]api.AggResult, len(chunks))
 	for res := range results {
 		if res.err != nil {
+			fetchCancel() // Cancel remaining fetches.
 			return res.err
 		}
 		chunkResults[res.idx] = res.results
+	}
+
+	// Check for cancellation before writing.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	// Flatten results in chunk order.
@@ -227,6 +264,7 @@ func Bars(
 
 // fetchAndWriteBars is a helper for single-chunk bar fetches (no parallelization).
 func fetchAndWriteBars(
+	ctx context.Context,
 	client *http.Client,
 	symbol, timeframe, apiTimespan string,
 	multiplier int,
@@ -235,6 +273,13 @@ func fetchAndWriteBars(
 	adjusted bool,
 	writerWP *worker.Pool,
 ) error {
+	// Check for cancellation.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	resp, err := api.GetHistoricAggregates(client, symbol, apiTimespan, multiplier, from, to, limit, adjusted)
 	if err != nil {
 		return err
@@ -310,13 +355,22 @@ func timeframeToAPI(timeframe string) (apiTimespan string, multiplier int, err e
 // Trades fetches historical tick-level trades from the Massive REST API
 // for each market day in the from/to range and writes them to MarketStore.
 // Days are fetched in parallel for improved throughput on I/O-bound workloads.
+// Returns context.Canceled if the context is cancelled during the operation.
 func Trades(
+	ctx context.Context,
 	client *http.Client,
 	symbol string,
 	from, to time.Time,
 	limit int,
 	writerWP *worker.Pool,
 ) error {
+	// Check for cancellation at start.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	const hoursInDay = 24
 
 	// Collect market days to fetch.
@@ -342,12 +396,31 @@ func Trades(
 	sem := make(chan struct{}, dayFetchParallelism)
 	var wg sync.WaitGroup
 
+	// Create a cancellable context for the parallel fetches.
+	fetchCtx, fetchCancel := context.WithCancel(ctx)
+	defer fetchCancel()
+
 	for _, date := range dates {
 		wg.Add(1)
 		go func(d time.Time) {
 			defer wg.Done()
-			sem <- struct{}{}        // acquire
+
+			// Check for cancellation before acquiring semaphore.
+			select {
+			case <-fetchCtx.Done():
+				results <- dayResult{date: d, err: fetchCtx.Err()}
+				return
+			case sem <- struct{}{}: // acquire
+			}
 			defer func() { <-sem }() // release
+
+			// Check again after acquiring semaphore.
+			select {
+			case <-fetchCtx.Done():
+				results <- dayResult{date: d, err: fetchCtx.Err()}
+				return
+			default:
+			}
 
 			resp, err := api.GetHistoricTrades(client, symbol, d, limit)
 			if err != nil {
@@ -368,9 +441,17 @@ func Trades(
 	dayTrades := make(map[time.Time][]api.TradeTick)
 	for res := range results {
 		if res.err != nil {
+			fetchCancel() // Cancel remaining fetches.
 			return res.err
 		}
 		dayTrades[res.date] = res.trades
+	}
+
+	// Check for cancellation before writing.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	// Flatten results in date order.
@@ -416,13 +497,22 @@ func Trades(
 // Quotes fetches historical NBBO quotes from the Massive REST API
 // for each market day in the from/to range and writes them to MarketStore.
 // Days are fetched in parallel for improved throughput on I/O-bound workloads.
+// Returns context.Canceled if the context is cancelled during the operation.
 func Quotes(
+	ctx context.Context,
 	client *http.Client,
 	symbol string,
 	from, to time.Time,
 	limit int,
 	writerWP *worker.Pool,
 ) error {
+	// Check for cancellation at start.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	const hoursInDay = 24
 
 	// Collect market days to fetch.
@@ -448,12 +538,31 @@ func Quotes(
 	sem := make(chan struct{}, dayFetchParallelism)
 	var wg sync.WaitGroup
 
+	// Create a cancellable context for the parallel fetches.
+	fetchCtx, fetchCancel := context.WithCancel(ctx)
+	defer fetchCancel()
+
 	for _, date := range dates {
 		wg.Add(1)
 		go func(d time.Time) {
 			defer wg.Done()
-			sem <- struct{}{}        // acquire
+
+			// Check for cancellation before acquiring semaphore.
+			select {
+			case <-fetchCtx.Done():
+				results <- dayResult{date: d, err: fetchCtx.Err()}
+				return
+			case sem <- struct{}{}: // acquire
+			}
 			defer func() { <-sem }() // release
+
+			// Check again after acquiring semaphore.
+			select {
+			case <-fetchCtx.Done():
+				results <- dayResult{date: d, err: fetchCtx.Err()}
+				return
+			default:
+			}
 
 			resp, err := api.GetHistoricQuotes(client, symbol, d, limit)
 			if err != nil {
@@ -474,9 +583,17 @@ func Quotes(
 	dayQuotes := make(map[time.Time][]api.QuoteTick)
 	for res := range results {
 		if res.err != nil {
+			fetchCancel() // Cancel remaining fetches.
 			return res.err
 		}
 		dayQuotes[res.date] = res.quotes
+	}
+
+	// Check for cancellation before writing.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	// Flatten results in date order.

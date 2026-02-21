@@ -19,9 +19,17 @@ bgworkers:
       base_url: https://api.massive.com
       ws_server: wss://socket.massive.com
       data_types: [ 'bars', 'trades' ]
+      # Option 1: Static symbol list
       symbols:
         - AAPL
         - SPY
+      # Option 2: Dynamic symbols from PostgreSQL (overrides 'symbols' if set)
+      # symbols_dsn: "postgres://user:password@localhost:5432/mydb?sslmode=disable"
+      # symbols_query: "SELECT symbol FROM tracked_symbols WHERE active = true"
+      # Option 3: Dynamic symbols with per-symbol listing dates
+      # The query can return 2 columns: (symbol, listing_date)
+      # If listing_date is more recent than query_start, backfill uses listing_date
+      # symbols_query: "SELECT symbol, listing_date FROM tracked_symbols WHERE active = true"
       # WebSocket streaming frequencies for bars (only 1Min and 1Sec are supported).
       # Defaults to [ '1Min' ] if not specified.
       ws_frequencies: [ '1Min' ]

@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"math"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -74,6 +76,9 @@ var json = jsoniter.ConfigCompatibleWithStandardLibrary
 type MassiveFetcher struct {
 	config massiveconfig.FetcherConfig
 	types  map[string]struct{} // bars, quotes, trades
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 // NewBgWorker returns a new instance of MassiveFetcher.
@@ -83,6 +88,44 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 	config := massiveconfig.FetcherConfig{}
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("parse massive config: %w", err)
+	}
+
+	// Fetch symbols from PostgreSQL if configured, otherwise use static Symbols list.
+	if config.SymbolsDSN != "" {
+		if config.SymbolsQuery == "" {
+			return nil, fmt.Errorf("symbols_query is required when symbols_dsn is set")
+		}
+		symbolInfos, err := massiveconfig.FetchSymbolsFromDB(config.SymbolsDSN, config.SymbolsQuery)
+		if err != nil {
+			return nil, fmt.Errorf("fetch symbols from database: %w", err)
+		}
+		if len(symbolInfos) == 0 {
+			return nil, fmt.Errorf("no symbols returned from database query")
+		}
+		config.SymbolInfos = symbolInfos
+		// Also populate Symbols for WebSocket streaming (which ignores dates).
+		config.Symbols = make([]string, len(symbolInfos))
+		for i, info := range symbolInfos {
+			config.Symbols[i] = info.Symbol
+		}
+		// Log count with listing dates if any have them.
+		withDates := 0
+		for _, info := range symbolInfos {
+			if info.ListingDate != nil {
+				withDates++
+			}
+		}
+		if withDates > 0 {
+			log.Info("[massive] loaded %d symbols from database (%d with listing dates)", len(symbolInfos), withDates)
+		} else {
+			log.Info("[massive] loaded %d symbols from database", len(symbolInfos))
+		}
+	} else {
+		// Convert static Symbols to SymbolInfos (no listing dates).
+		config.SymbolInfos = make([]massiveconfig.SymbolInfo, len(config.Symbols))
+		for i, sym := range config.Symbols {
+			config.SymbolInfos[i] = massiveconfig.SymbolInfo{Symbol: sym}
+		}
 	}
 
 	t := map[string]struct{}{}
@@ -95,9 +138,13 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 		return nil, fmt.Errorf("at least one valid data_type is required (bars, quotes, trades)")
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &MassiveFetcher{
 		config: config,
 		types:  t,
+		ctx:    ctx,
+		cancel: cancel,
 	}, nil
 }
 
@@ -112,7 +159,18 @@ func (mf *MassiveFetcher) Run() {
 
 	// Run backfill if query_start is set.
 	if len(mf.config.QueryStart) > 0 {
-		mf.runBackfill()
+		if err := mf.runBackfill(); err != nil {
+			log.Info("[massive] backfill stopped: %v", err)
+			return
+		}
+	}
+
+	// Check if context was cancelled during backfill.
+	select {
+	case <-mf.ctx.Done():
+		log.Info("[massive] shutdown requested, skipping WebSocket streaming")
+		return
+	default:
 	}
 
 	// Start WebSocket streaming.
@@ -142,26 +200,52 @@ func (mf *MassiveFetcher) Run() {
 					continue
 				}
 				handler := handlers.MakeBarsHandler(freq)
-				go streamForever(wsServer, mf.config.APIKey, prefix, mf.config.Symbols, wsQueryStart, handler)
+				mf.wg.Add(1)
+				go func(p Prefix, h func([]byte)) {
+					defer mf.wg.Done()
+					mf.streamForever(wsServer, mf.config.APIKey, p, mf.config.Symbols, wsQueryStart, h)
+				}(prefix, handler)
 			}
 		case "quotes":
-			go streamForever(wsServer, mf.config.APIKey, PrefixQuote, mf.config.Symbols, wsQueryStart, handlers.QuoteHandler)
+			mf.wg.Add(1)
+			go func() {
+				defer mf.wg.Done()
+				mf.streamForever(wsServer, mf.config.APIKey, PrefixQuote, mf.config.Symbols, wsQueryStart, handlers.QuoteHandler)
+			}()
 		case "trades":
-			go streamForever(wsServer, mf.config.APIKey, PrefixTrade, mf.config.Symbols, wsQueryStart, handlers.TradeHandler)
+			mf.wg.Add(1)
+			go func() {
+				defer mf.wg.Done()
+				mf.streamForever(wsServer, mf.config.APIKey, PrefixTrade, mf.config.Symbols, wsQueryStart, handlers.TradeHandler)
+			}()
 		}
 	}
 
-	select {} // block forever
+	// Wait for context cancellation.
+	<-mf.ctx.Done()
+	log.Info("[massive] shutdown requested, waiting for goroutines to finish...")
+	mf.wg.Wait()
+	log.Info("[massive] shutdown complete")
+}
+
+// Shutdown cancels the context and stops all background operations.
+func (mf *MassiveFetcher) Shutdown() {
+	mf.cancel()
 }
 
 // runBackfill performs a historical data backfill from the Massive REST API
 // for all configured data types and symbols. On subsequent restarts, backfill
 // resumes from the last written timestamp for each symbol/datatype combination.
 // Backfill runs up to the latest market trading time (not wall-clock time).
-func (mf *MassiveFetcher) runBackfill() {
+// Returns context.Canceled if shutdown was requested during backfill.
+func (mf *MassiveFetcher) runBackfill() error {
 	// Use the latest market trading time as the end boundary, not wall-clock time.
 	// This ensures we only backfill data that could actually exist.
-	end := calendar.Nasdaq.LatestMarketTime(time.Now())
+	// For intraday data (trades, quotes, sub-daily bars), use extended hours.
+	// For daily+ bars, use regular market hours since extended hours data is not relevant.
+	now := time.Now()
+	endExtended := calendar.Nasdaq.LatestMarketTime(now)
+	endRegular := calendar.Nasdaq.LatestMarketTimeRegular(now)
 
 	batchSize := mf.config.BackfillBatchSize
 	if batchSize <= 0 {
@@ -181,11 +265,22 @@ func (mf *MassiveFetcher) runBackfill() {
 		Timeout: backfillHTTPTimeout,
 	}
 
-	writerWP := worker.NewWorkerPool(1)
+	writerWP := worker.NewWorkerPool(mf.ctx, 1)
 
-	log.Info("[massive] starting backfill to %s", end.Format(time.RFC3339))
+	log.Info("[massive] starting backfill (extended hours end: %s, regular hours end: %s)",
+		endExtended.Format(time.RFC3339), endRegular.Format(time.RFC3339))
 
-	for _, symbol := range mf.config.Symbols {
+	for _, symInfo := range mf.config.SymbolInfos {
+		symbol := symInfo.Symbol
+
+		// Check for cancellation between symbols.
+		select {
+		case <-mf.ctx.Done():
+			writerWP.CloseAndWait()
+			return mf.ctx.Err()
+		default:
+		}
+
 		if symbol == "*" {
 			log.Warn("[massive] backfill with wildcard symbol is not supported, use the backfiller CLI instead")
 			continue
@@ -195,9 +290,27 @@ func (mf *MassiveFetcher) runBackfill() {
 		// Keys are either timeframes (e.g., "1Min", "1D") for bars,
 		// or "trades"/"quotes" for tick data.
 		for key, startDateStr := range mf.config.QueryStart {
-			configStart, err := time.Parse(dateFormat, startDateStr)
+			// Check for cancellation between data types.
+			select {
+			case <-mf.ctx.Done():
+				writerWP.CloseAndWait()
+				return mf.ctx.Err()
+			default:
+			}
+
+			configStart, err := time.ParseInLocation(dateFormat, startDateStr, calendar.Nasdaq.Tz())
 			if err != nil {
 				log.Error("[massive] invalid query_start date %q for %s: %v", startDateStr, key, err)
+				continue
+			}
+
+			// Apply per-symbol listing date override if available and more recent.
+			effectiveStart := massiveconfig.EffectiveBackfillStart(configStart, symInfo.ListingDate)
+
+			// Check if effectiveStart is in the future (listing date not yet reached).
+			if effectiveStart.After(endExtended) {
+				log.Info("[massive] %s listing date %s is in the future, skipping backfill",
+					symbol, effectiveStart.Format(dateFormat))
 				continue
 			}
 
@@ -208,13 +321,17 @@ func (mf *MassiveFetcher) runBackfill() {
 					continue
 				}
 				tbk := io.NewTimeBucketKey(models.TradeBucketKey(symbol))
-				start, skip := mf.determineBackfillStart(tbk, configStart, end, "trades", symbol)
-				if skip {
+				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended, false)
+				if decision.skip {
 					continue
 				}
-				log.Info("[massive] backfilling trades for %s from %s to %s",
-					symbol, start.Format(time.RFC3339), end.Format(time.RFC3339))
-				if err := backfill.Trades(client, symbol, start, end, batchSize, writerWP); err != nil {
+				log.Info("[massive] %s backfilling trades from %s to %s",
+					symbol, decision.start.Format(time.RFC3339), endExtended.Format(time.RFC3339))
+				if err := backfill.Trades(mf.ctx, client, symbol, decision.start, endExtended, batchSize, writerWP); err != nil {
+					if err == context.Canceled {
+						writerWP.CloseAndWait()
+						return err
+					}
 					log.Warn("[massive] failed to backfill trades for %s: %v", symbol, err)
 				}
 			case "quotes":
@@ -223,13 +340,17 @@ func (mf *MassiveFetcher) runBackfill() {
 					continue
 				}
 				tbk := io.NewTimeBucketKey(models.QuoteBucketKey(symbol))
-				start, skip := mf.determineBackfillStart(tbk, configStart, end, "quotes", symbol)
-				if skip {
+				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended, false)
+				if decision.skip {
 					continue
 				}
-				log.Info("[massive] backfilling quotes for %s from %s to %s",
-					symbol, start.Format(time.RFC3339), end.Format(time.RFC3339))
-				if err := backfill.Quotes(client, symbol, start, end, batchSize, writerWP); err != nil {
+				log.Info("[massive] %s backfilling quotes from %s to %s",
+					symbol, decision.start.Format(time.RFC3339), endExtended.Format(time.RFC3339))
+				if err := backfill.Quotes(mf.ctx, client, symbol, decision.start, endExtended, batchSize, writerWP); err != nil {
+					if err == context.Canceled {
+						writerWP.CloseAndWait()
+						return err
+					}
 					log.Warn("[massive] failed to backfill quotes for %s: %v", symbol, err)
 				}
 			default:
@@ -239,14 +360,24 @@ func (mf *MassiveFetcher) runBackfill() {
 					continue
 				}
 				tf := key
+				// Use regular market hours for daily+ timeframes, extended hours for intraday.
+				end := endExtended
+				daily := isDailyOrLonger(tf)
+				if daily {
+					end = endRegular
+				}
 				tbk := io.NewTimeBucketKey(models.BarBucketKey(symbol, tf))
-				start, skip := mf.determineBackfillStart(tbk, configStart, end, tf+" bars", symbol)
-				if skip {
+				decision := mf.determineBackfillStart(tbk, effectiveStart, end, daily)
+				if decision.skip {
 					continue
 				}
-				log.Info("[massive] backfilling %s bars for %s from %s to %s",
-					tf, symbol, start.Format(time.RFC3339), end.Format(time.RFC3339))
-				if err := backfill.Bars(client, symbol, tf, start, end, batchSize, adjusted, writerWP); err != nil {
+				log.Info("[massive] %s backfilling %s from %s to %s",
+					symbol, tf, decision.start.Format(time.RFC3339), end.Format(time.RFC3339))
+				if err := backfill.Bars(mf.ctx, client, symbol, tf, decision.start, end, batchSize, adjusted, writerWP); err != nil {
+					if err == context.Canceled {
+						writerWP.CloseAndWait()
+						return err
+					}
 					log.Warn("[massive] failed to backfill %s bars for %s: %v", tf, symbol, err)
 				}
 			}
@@ -255,6 +386,7 @@ func (mf *MassiveFetcher) runBackfill() {
 
 	writerWP.CloseAndWait()
 	log.Info("[massive] backfill complete")
+	return nil
 }
 
 // findLastTimestamp queries the database for the most recent timestamp in the
@@ -301,36 +433,173 @@ func findLastTimestamp(tbk *io.TimeBucketKey) time.Time {
 	return ts[0]
 }
 
+// findFirstTimestamp queries the database for the earliest timestamp in the
+// given TimeBucketKey. Returns a zero time if no data exists or on error.
+func findFirstTimestamp(tbk *io.TimeBucketKey) time.Time {
+	cDir := executor.ThisInstance.CatalogDir
+	query := planner.NewQuery(cDir)
+	query.AddTargetKey(tbk)
+
+	start := time.Unix(0, 0).In(utils.InstanceConfig.Timezone)
+	end := time.Unix(math.MaxInt64, 0).In(utils.InstanceConfig.Timezone)
+	query.SetRange(start, end)
+	query.SetRowLimit(io.FIRST, 1)
+
+	parsed, err := query.Parse()
+	if err != nil {
+		// This is expected if no data exists yet for this symbol.
+		return time.Time{}
+	}
+
+	reader, err := executor.NewReader(parsed)
+	if err != nil {
+		log.Warn("[massive] failed to create reader for %s: %v", tbk, err)
+		return time.Time{}
+	}
+
+	csm, err := reader.Read()
+	if err != nil {
+		log.Warn("[massive] failed to read data for %s: %v", tbk, err)
+		return time.Time{}
+	}
+
+	cs := csm[*tbk]
+	if cs == nil || cs.Len() == 0 {
+		return time.Time{}
+	}
+
+	ts, err := cs.GetTime()
+	if err != nil {
+		log.Warn("[massive] failed to get time from %s: %v", tbk, err)
+		return time.Time{}
+	}
+
+	return ts[0]
+}
+
+// firstMarketDayOnOrAfter returns the first market day on or after the given time.
+// For a time like 2025-01-01 (Wednesday, but a holiday), it would return 2025-01-02.
+// Returns the input truncated to midnight in the market timezone.
+func firstMarketDayOnOrAfter(t time.Time) time.Time {
+	day := truncateToLocalMidnight(t, calendar.Nasdaq.Tz())
+	const maxDaysForward = 10 // Should never need more than this
+	for i := 0; i < maxDaysForward; i++ {
+		if calendar.Nasdaq.IsMarketDay(day) {
+			return day
+		}
+		day = day.AddDate(0, 0, 1)
+	}
+	return t // Fallback
+}
+
+// truncateToLocalMidnight returns a time representing midnight on the same
+// calendar date in the given location. Unlike time.Truncate which truncates
+// to UTC midnight, this properly handles timezone offsets.
+func truncateToLocalMidnight(t time.Time, loc *time.Location) time.Time {
+	local := t.In(loc)
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+}
+
+// configStartNeedsBackfill checks if configStart requires backfilling data before
+// the first existing timestamp. This accounts for the fact that configStart is
+// typically midnight, while firstTS is the actual first data point (e.g., market open).
+// For daily bars, we compare dates. For intraday, we compare the first market day.
+func configStartNeedsBackfill(configStart, firstTS time.Time, dailyOrLonger bool) bool {
+	if firstTS.IsZero() {
+		return false // No existing data, will backfill from configStart anyway
+	}
+
+	tz := calendar.Nasdaq.Tz()
+
+	if dailyOrLonger {
+		// For daily bars, compare calendar dates.
+		configDate := truncateToLocalMidnight(configStart, tz)
+		firstDate := truncateToLocalMidnight(firstTS, tz)
+		return configDate.Before(firstDate)
+	}
+
+	// For intraday data, check if the first market day on or after configStart
+	// is before the first data's market day. We compare dates only.
+	configFirstMarketDay := firstMarketDayOnOrAfter(configStart)
+	firstTSDate := truncateToLocalMidnight(firstTS, tz)
+	return configFirstMarketDay.Before(firstTSDate)
+}
+
+// backfillDecision contains the result of determineBackfillStart.
+type backfillDecision struct {
+	start time.Time // When to start backfilling from
+	skip  bool      // If true, skip backfilling entirely
+}
+
 // determineBackfillStart checks for existing data and returns the appropriate start time.
-// It returns (start time, skip) where skip is true if the backfill should be skipped.
+// It returns a backfillDecision indicating what action to take.
+// For daily+ timeframes, set dailyOrLonger=true to use date comparison instead of timestamp
+// comparison (since daily bars have timestamps at midnight, not market close).
 func (mf *MassiveFetcher) determineBackfillStart(
 	tbk *io.TimeBucketKey,
 	configStart, end time.Time,
-	dataType, symbol string,
-) (time.Time, bool) {
+	dailyOrLonger bool,
+) backfillDecision {
 	start := configStart
+	firstTS := findFirstTimestamp(tbk)
 	lastTS := findLastTimestamp(tbk)
-	if !lastTS.IsZero() {
-		// Start from after the last written timestamp (not inclusive).
+
+	// Check if configStart requires backfilling earlier data.
+	needsEarlierData := configStartNeedsBackfill(configStart, firstTS, dailyOrLonger)
+	if needsEarlierData {
+		// start remains as configStart
+	} else if !lastTS.IsZero() {
+		// Otherwise, start from after the last written timestamp (not inclusive).
 		start = lastTS.Add(time.Nanosecond)
-		log.Info("[massive] resuming %s backfill for %s from %s (last written: %s)",
-			dataType, symbol, start.Format(time.RFC3339), lastTS.Format(time.RFC3339))
 	}
 
-	// Skip if the last timestamp matches or exceeds the latest trading time.
-	if !lastTS.IsZero() && !lastTS.Before(end) {
-		log.Info("[massive] %s data for %s is up to date (last: %s, market: %s)",
-			dataType, symbol, lastTS.Format(time.RFC3339), end.Format(time.RFC3339))
-		return start, true
+	// Skip if data is up to date.
+	if !lastTS.IsZero() {
+		isUpToDate := false
+		if dailyOrLonger {
+			// For daily+ bars, compare calendar dates since bar timestamps are at midnight,
+			// not market close. A bar dated 2026-02-20 represents data through market close
+			// on that day.
+			lastDate := truncateToLocalMidnight(lastTS, end.Location())
+			endDate := truncateToLocalMidnight(end, end.Location())
+			isUpToDate = !lastDate.Before(endDate)
+		} else {
+			// For intraday data, compare timestamps directly.
+			isUpToDate = !lastTS.Before(end)
+		}
+		// Only skip if up to date AND we don't need to backfill earlier data.
+		if isUpToDate && !needsEarlierData {
+			return backfillDecision{
+				start: start,
+				skip:  true,
+			}
+		}
 	}
 
 	// Skip if start is after end.
 	if start.After(end) {
-		log.Info("[massive] %s data for %s is up to date, skipping backfill", dataType, symbol)
-		return start, true
+		return backfillDecision{
+			start: start,
+			skip:  true,
+		}
 	}
 
-	return start, false
+	return backfillDecision{
+		start: start,
+		skip:  false,
+	}
+}
+
+// isDailyOrLonger returns true if the timeframe represents daily or longer periods.
+// Daily+ timeframes use regular market hours for backfill since extended hours data
+// is aggregated into regular session bars by data providers.
+func isDailyOrLonger(tf string) bool {
+	// Daily+ timeframes end with "D", "W", "M", or "Y" (e.g., "1D", "1W", "1M", "1Y").
+	// We check the suffix, not ContainsAny, to avoid matching "1Min" (which contains "M").
+	return strings.HasSuffix(tf, "D") ||
+		strings.HasSuffix(tf, "W") ||
+		strings.HasSuffix(tf, "M") ||
+		strings.HasSuffix(tf, "Y")
 }
 
 // buildSubScope builds the comma-separated subscription string.
@@ -349,21 +618,56 @@ func buildSubScope(prefix Prefix, symbols []string) string {
 	return buf.String()
 }
 
+// formatScopeForLog returns a human-readable description of the subscription scope.
+// If there are more than 10 symbols, it returns a count instead of listing them all.
+func formatScopeForLog(prefix Prefix, symbols []string) string {
+	if len(symbols) == 0 || (len(symbols) == 1 && symbols[0] == "*") {
+		return string(prefix) + "*"
+	}
+	if len(symbols) > 10 {
+		return fmt.Sprintf("%s<%d symbols>", prefix, len(symbols))
+	}
+	return buildSubScope(prefix, symbols)
+}
+
 // streamForever connects to the Massive WebSocket API and processes messages,
-// reconnecting automatically on any failure.
-func streamForever(server, apiKey string, prefix Prefix, symbols []string, wsQueryStart string, handler func([]byte)) {
+// reconnecting automatically on any failure. It exits when the context is cancelled.
+func (mf *MassiveFetcher) streamForever(server, apiKey string, prefix Prefix, symbols []string, wsQueryStart string, handler func([]byte)) {
 	scope := buildSubScope(prefix, symbols)
+	scopeLog := formatScopeForLog(prefix, symbols)
 	for {
-		err := stream(server, apiKey, scope, wsQueryStart, handler)
-		if err != nil {
-			log.Warn("[massive] stream disconnected, reconnecting... {scope:%s, error:%v}", scope, err)
+		select {
+		case <-mf.ctx.Done():
+			log.Info("[massive] stopping stream for %s", scopeLog)
+			return
+		default:
 		}
-		time.Sleep(reconnectBackoff)
+
+		err := mf.stream(server, apiKey, scope, scopeLog, wsQueryStart, handler)
+		if err != nil {
+			// Don't log if we're shutting down.
+			select {
+			case <-mf.ctx.Done():
+				log.Info("[massive] stopping stream for %s", scopeLog)
+				return
+			default:
+				log.Warn("[massive] stream disconnected, reconnecting... {scope:%s, error:%v}", scopeLog, err)
+			}
+		}
+
+		// Wait before reconnecting, but check for cancellation.
+		select {
+		case <-mf.ctx.Done():
+			log.Info("[massive] stopping stream for %s", scopeLog)
+			return
+		case <-time.After(reconnectBackoff):
+		}
 	}
 }
 
 // stream runs a single WebSocket session: connect, authenticate, subscribe, read.
-func stream(server, apiKey, scope, wsQueryStart string, handler func([]byte)) error {
+// It returns when the context is cancelled or an error occurs.
+func (mf *MassiveFetcher) stream(server, apiKey, scope, scopeLog, wsQueryStart string, handler func([]byte)) error {
 	conn, err := connect(server, apiKey)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
@@ -374,15 +678,22 @@ func stream(server, apiKey, scope, wsQueryStart string, handler func([]byte)) er
 		return fmt.Errorf("auth: %w", err)
 	}
 
-	if err := subscribe(conn, scope, wsQueryStart); err != nil {
+	if err := subscribe(conn, scope, scopeLog, wsQueryStart); err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
 
-	log.Info("[massive] streaming {scope:%s}", scope)
+	log.Info("[massive] streaming {scope:%s}", scopeLog)
 
 	conn.SetReadLimit(maxRecvMsgSize)
 
 	for {
+		// Check for context cancellation.
+		select {
+		case <-mf.ctx.Done():
+			return mf.ctx.Err()
+		default:
+		}
+
 		if err := conn.SetReadDeadline(time.Now().Add(6 * pingInterval / 5)); err != nil {
 			return fmt.Errorf("set read deadline: %w", err)
 		}
@@ -458,7 +769,7 @@ func authenticate(conn *websocket.Conn, apiKey string) error {
 	return nil
 }
 
-func subscribe(conn *websocket.Conn, scope, wsQueryStart string) error {
+func subscribe(conn *websocket.Conn, scope, scopeLog, wsQueryStart string) error {
 	var subMsg string
 	if wsQueryStart != "" {
 		subMsg = fmt.Sprintf(`{"action":"subscribe","params":"%s","date":"%s"}`, scope, wsQueryStart)
@@ -479,7 +790,7 @@ func subscribe(conn *websocket.Conn, scope, wsQueryStart string) error {
 		return fmt.Errorf("subscription failed: %s", string(msg))
 	}
 
-	log.Info("[massive] subscribed to %s", scope)
+	log.Info("[massive] subscribed to %s", scopeLog)
 	return nil
 }
 
