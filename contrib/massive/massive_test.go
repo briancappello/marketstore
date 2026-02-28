@@ -3,12 +3,9 @@ package main
 import (
 	"net/url"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 )
 
 func TestIsLocalHost(t *testing.T) {
@@ -197,86 +194,6 @@ func TestIsDailyOrLonger(t *testing.T) {
 		t.Run(tt.tf, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.expected, isDailyOrLonger(tt.tf), "isDailyOrLonger(%q)", tt.tf)
-		})
-	}
-}
-
-func TestConfigStartNeedsBackfill(t *testing.T) {
-	t.Parallel()
-
-	ny := calendar.Nasdaq.Tz()
-
-	tests := []struct {
-		name          string
-		configStart   time.Time
-		firstTS       time.Time
-		dailyOrLonger bool
-		expected      bool
-	}{
-		{
-			name:          "no existing data returns false",
-			configStart:   time.Date(2025, 1, 1, 0, 0, 0, 0, ny),
-			firstTS:       time.Time{}, // zero time
-			dailyOrLonger: false,
-			expected:      false,
-		},
-		{
-			name:          "intraday: holiday config start with first market day data is up-to-date",
-			configStart:   time.Date(2025, 1, 1, 0, 0, 0, 0, ny),  // New Year's Day (holiday)
-			firstTS:       time.Date(2025, 1, 2, 9, 30, 0, 0, ny), // First bar on Jan 2
-			dailyOrLonger: false,
-			expected:      false, // Should NOT need earlier data
-		},
-		{
-			name:          "intraday: config start before first data needs backfill",
-			configStart:   time.Date(2025, 1, 2, 0, 0, 0, 0, ny),  // Jan 2
-			firstTS:       time.Date(2025, 1, 3, 9, 30, 0, 0, ny), // First bar on Jan 3
-			dailyOrLonger: false,
-			expected:      true, // Missing Jan 2 data
-		},
-		{
-			name:          "intraday: same market day is up-to-date",
-			configStart:   time.Date(2025, 1, 2, 0, 0, 0, 0, ny),
-			firstTS:       time.Date(2025, 1, 2, 14, 0, 0, 0, ny), // Same day, afternoon
-			dailyOrLonger: false,
-			expected:      false,
-		},
-		{
-			name:          "intraday: weekend config start with Monday data is up-to-date",
-			configStart:   time.Date(2025, 1, 4, 0, 0, 0, 0, ny),  // Saturday
-			firstTS:       time.Date(2025, 1, 6, 9, 30, 0, 0, ny), // Monday market open
-			dailyOrLonger: false,
-			expected:      false, // Monday is first market day after Saturday
-		},
-		{
-			name:          "daily: config date before first data needs backfill",
-			configStart:   time.Date(2025, 1, 2, 0, 0, 0, 0, ny),
-			firstTS:       time.Date(2025, 1, 3, 0, 0, 0, 0, ny),
-			dailyOrLonger: true,
-			expected:      true,
-		},
-		{
-			name:          "daily: same date is up-to-date",
-			configStart:   time.Date(2025, 1, 2, 0, 0, 0, 0, ny),
-			firstTS:       time.Date(2025, 1, 2, 0, 0, 0, 0, ny),
-			dailyOrLonger: true,
-			expected:      false,
-		},
-		{
-			name:          "intraday: UTC listing date with local first data (same calendar day)",
-			configStart:   time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC), // From DB as UTC
-			firstTS:       time.Date(2025, 1, 2, 9, 30, 0, 0, ny),      // ET market open
-			dailyOrLonger: false,
-			expected:      false, // Same calendar day in ET
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			result := configStartNeedsBackfill(tt.configStart, tt.firstTS, tt.dailyOrLonger)
-			assert.Equal(t, tt.expected, result, "configStart=%v, firstTS=%v", tt.configStart, tt.firstTS)
 		})
 	}
 }

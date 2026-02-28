@@ -321,7 +321,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 					continue
 				}
 				tbk := io.NewTimeBucketKey(models.TradeBucketKey(symbol))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended, false)
+				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended)
 				if decision.skip {
 					continue
 				}
@@ -340,7 +340,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 					continue
 				}
 				tbk := io.NewTimeBucketKey(models.QuoteBucketKey(symbol))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended, false)
+				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended)
 				if decision.skip {
 					continue
 				}
@@ -362,12 +362,11 @@ func (mf *MassiveFetcher) runBackfill() error {
 				tf := key
 				// Use regular market hours for daily+ timeframes, extended hours for intraday.
 				end := endExtended
-				daily := isDailyOrLonger(tf)
-				if daily {
+				if isDailyOrLonger(tf) {
 					end = endRegular
 				}
 				tbk := io.NewTimeBucketKey(models.BarBucketKey(symbol, tf))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, end, daily)
+				decision := mf.determineBackfillStart(tbk, effectiveStart, end)
 				if decision.skip {
 					continue
 				}
@@ -433,98 +432,6 @@ func findLastTimestamp(tbk *io.TimeBucketKey) time.Time {
 	return ts[0]
 }
 
-// findFirstTimestamp queries the database for the earliest timestamp in the
-// given TimeBucketKey. Returns a zero time if no data exists or on error.
-func findFirstTimestamp(tbk *io.TimeBucketKey) time.Time {
-	cDir := executor.ThisInstance.CatalogDir
-	query := planner.NewQuery(cDir)
-	query.AddTargetKey(tbk)
-
-	start := time.Unix(0, 0).In(utils.InstanceConfig.Timezone)
-	end := time.Unix(math.MaxInt64, 0).In(utils.InstanceConfig.Timezone)
-	query.SetRange(start, end)
-	query.SetRowLimit(io.FIRST, 1)
-
-	parsed, err := query.Parse()
-	if err != nil {
-		// This is expected if no data exists yet for this symbol.
-		return time.Time{}
-	}
-
-	reader, err := executor.NewReader(parsed)
-	if err != nil {
-		log.Warn("[massive] failed to create reader for %s: %v", tbk, err)
-		return time.Time{}
-	}
-
-	csm, err := reader.Read()
-	if err != nil {
-		log.Warn("[massive] failed to read data for %s: %v", tbk, err)
-		return time.Time{}
-	}
-
-	cs := csm[*tbk]
-	if cs == nil || cs.Len() == 0 {
-		return time.Time{}
-	}
-
-	ts, err := cs.GetTime()
-	if err != nil {
-		log.Warn("[massive] failed to get time from %s: %v", tbk, err)
-		return time.Time{}
-	}
-
-	return ts[0]
-}
-
-// firstMarketDayOnOrAfter returns the first market day on or after the given time.
-// For a time like 2025-01-01 (Wednesday, but a holiday), it would return 2025-01-02.
-// Returns the input truncated to midnight in the market timezone.
-func firstMarketDayOnOrAfter(t time.Time) time.Time {
-	day := truncateToLocalMidnight(t, calendar.Nasdaq.Tz())
-	const maxDaysForward = 10 // Should never need more than this
-	for i := 0; i < maxDaysForward; i++ {
-		if calendar.Nasdaq.IsMarketDay(day) {
-			return day
-		}
-		day = day.AddDate(0, 0, 1)
-	}
-	return t // Fallback
-}
-
-// truncateToLocalMidnight returns a time representing midnight on the same
-// calendar date in the given location. Unlike time.Truncate which truncates
-// to UTC midnight, this properly handles timezone offsets.
-func truncateToLocalMidnight(t time.Time, loc *time.Location) time.Time {
-	local := t.In(loc)
-	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
-}
-
-// configStartNeedsBackfill checks if configStart requires backfilling data before
-// the first existing timestamp. This accounts for the fact that configStart is
-// typically midnight, while firstTS is the actual first data point (e.g., market open).
-// For daily bars, we compare dates. For intraday, we compare the first market day.
-func configStartNeedsBackfill(configStart, firstTS time.Time, dailyOrLonger bool) bool {
-	if firstTS.IsZero() {
-		return false // No existing data, will backfill from configStart anyway
-	}
-
-	tz := calendar.Nasdaq.Tz()
-
-	if dailyOrLonger {
-		// For daily bars, compare calendar dates.
-		configDate := truncateToLocalMidnight(configStart, tz)
-		firstDate := truncateToLocalMidnight(firstTS, tz)
-		return configDate.Before(firstDate)
-	}
-
-	// For intraday data, check if the first market day on or after configStart
-	// is before the first data's market day. We compare dates only.
-	configFirstMarketDay := firstMarketDayOnOrAfter(configStart)
-	firstTSDate := truncateToLocalMidnight(firstTS, tz)
-	return configFirstMarketDay.Before(firstTSDate)
-}
-
 // backfillDecision contains the result of determineBackfillStart.
 type backfillDecision struct {
 	start time.Time // When to start backfilling from
@@ -532,62 +439,33 @@ type backfillDecision struct {
 }
 
 // determineBackfillStart checks for existing data and returns the appropriate start time.
-// It returns a backfillDecision indicating what action to take.
-// For daily+ timeframes, set dailyOrLonger=true to use date comparison instead of timestamp
-// comparison (since daily bars have timestamps at midnight, not market close).
+//
+// Logic:
+//   - No data exists: backfill from effectiveStart (the earlier of query_start and
+//     listing date) up to end.
+//   - Data exists: assume the earliest data is already correct; only backfill from
+//     the latest written timestamp up to end.
 func (mf *MassiveFetcher) determineBackfillStart(
 	tbk *io.TimeBucketKey,
-	configStart, end time.Time,
-	dailyOrLonger bool,
+	effectiveStart, end time.Time,
 ) backfillDecision {
-	start := configStart
-	firstTS := findFirstTimestamp(tbk)
 	lastTS := findLastTimestamp(tbk)
 
-	// Check if configStart requires backfilling earlier data.
-	needsEarlierData := configStartNeedsBackfill(configStart, firstTS, dailyOrLonger)
-	if needsEarlierData {
-		// start remains as configStart
-	} else if !lastTS.IsZero() {
-		// Otherwise, start from after the last written timestamp (not inclusive).
+	var start time.Time
+	if lastTS.IsZero() {
+		// No data on disk: backfill from the effective start.
+		start = effectiveStart
+	} else {
+		// Data exists: resume from just after the last written timestamp.
 		start = lastTS.Add(time.Nanosecond)
 	}
 
-	// Skip if data is up to date.
-	if !lastTS.IsZero() {
-		isUpToDate := false
-		if dailyOrLonger {
-			// For daily+ bars, compare calendar dates since bar timestamps are at midnight,
-			// not market close. A bar dated 2026-02-20 represents data through market close
-			// on that day.
-			lastDate := truncateToLocalMidnight(lastTS, end.Location())
-			endDate := truncateToLocalMidnight(end, end.Location())
-			isUpToDate = !lastDate.Before(endDate)
-		} else {
-			// For intraday data, compare timestamps directly.
-			isUpToDate = !lastTS.Before(end)
-		}
-		// Only skip if up to date AND we don't need to backfill earlier data.
-		if isUpToDate && !needsEarlierData {
-			return backfillDecision{
-				start: start,
-				skip:  true,
-			}
-		}
+	// Skip if already up to date or start is beyond end.
+	if !start.Before(end) {
+		return backfillDecision{start: start, skip: true}
 	}
 
-	// Skip if start is after end.
-	if start.After(end) {
-		return backfillDecision{
-			start: start,
-			skip:  true,
-		}
-	}
-
-	return backfillDecision{
-		start: start,
-		skip:  false,
-	}
+	return backfillDecision{start: start, skip: false}
 }
 
 // isDailyOrLonger returns true if the timeframe represents daily or longer periods.
@@ -686,6 +564,39 @@ func (mf *MassiveFetcher) stream(server, apiKey, scope, scopeLog, wsQueryStart s
 
 	conn.SetReadLimit(maxRecvMsgSize)
 
+	// Set up ping/pong handling to keep the connection alive.
+	// The pong handler resets the read deadline when we receive a pong from the server.
+	// The gorilla/websocket library automatically sends pong responses to server pings,
+	// but we need to send our own pings to detect dead connections.
+	conn.SetPongHandler(func(appData string) error {
+		return conn.SetReadDeadline(time.Now().Add(2 * pingInterval))
+	})
+
+	// Start a goroutine to send periodic pings to the server.
+	pingDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+					return
+				}
+			case <-mf.ctx.Done():
+				return
+			case <-pingDone:
+				return
+			}
+		}
+	}()
+	defer close(pingDone)
+
+	// Set initial read deadline.
+	if err := conn.SetReadDeadline(time.Now().Add(2 * pingInterval)); err != nil {
+		return fmt.Errorf("set read deadline: %w", err)
+	}
+
 	for {
 		// Check for context cancellation.
 		select {
@@ -694,13 +605,14 @@ func (mf *MassiveFetcher) stream(server, apiKey, scope, scopeLog, wsQueryStart s
 		default:
 		}
 
-		if err := conn.SetReadDeadline(time.Now().Add(6 * pingInterval / 5)); err != nil {
-			return fmt.Errorf("set read deadline: %w", err)
-		}
-
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
+		}
+
+		// Reset read deadline after receiving any message.
+		if err := conn.SetReadDeadline(time.Now().Add(2 * pingInterval)); err != nil {
+			return fmt.Errorf("set read deadline: %w", err)
 		}
 
 		handler(msg)

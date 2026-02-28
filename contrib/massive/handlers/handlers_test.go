@@ -36,7 +36,7 @@ func TestAggregateUnmarshal(t *testing.T) {
 	assert.Equal(t, 0.4486, bars[0].Close)
 	assert.Equal(t, 0.4489, bars[0].High)
 	assert.Equal(t, 0.4486, bars[0].Low)
-	assert.Equal(t, 4110, bars[0].Volume)
+	assert.Equal(t, float64(4110), bars[0].Volume)
 	assert.Equal(t, int64(1610144640000), bars[0].StartTimestamp)
 	assert.Equal(t, int64(1610144700000), bars[0].EndTimestamp)
 }

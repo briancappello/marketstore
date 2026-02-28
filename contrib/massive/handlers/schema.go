@@ -7,8 +7,8 @@ package handlers
 // Endpoint: WS /stocks/AM
 type Aggregate struct {
 	Symbol         string  `json:"sym"`
-	Volume         int     `json:"v"`
-	AccumulatedVol int     `json:"av"`
+	Volume         float64 `json:"v"`
+	AccumulatedVol float64 `json:"av"`
 	OfficialOpen   float64 `json:"op"`
 	VWAP           float64 `json:"vw"`
 	Open           float64 `json:"o"`
@@ -16,7 +16,7 @@ type Aggregate struct {
 	High           float64 `json:"h"`
 	Low            float64 `json:"l"`
 	AvgPrice       float64 `json:"a"`
-	AvgTradeSize   int     `json:"z"`
+	AvgTradeSize   float64 `json:"z"`
 	StartTimestamp int64   `json:"s"`
 	EndTimestamp   int64   `json:"e"`
 	OTC            bool    `json:"otc,omitempty"`

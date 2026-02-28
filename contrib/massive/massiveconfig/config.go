@@ -177,8 +177,11 @@ func parseListingDate(val interface{}) (time.Time, error) {
 }
 
 // EffectiveBackfillStart returns the effective start date for backfilling a symbol.
-// If listingDate is set and is more recent than configStart, use listingDate.
-// Otherwise, use configStart.
+// It returns the later (more recent) of configStart and listingDate (if set).
+//
+// Rationale: listingDate is the earliest date data can exist for a symbol, so
+// backfilling before it is pointless. But if configStart is more recent than the
+// listing date, the user's configured start takes precedence.
 func EffectiveBackfillStart(configStart time.Time, listingDate *time.Time) time.Time {
 	if listingDate == nil {
 		return configStart
@@ -189,15 +192,12 @@ func EffectiveBackfillStart(configStart time.Time, listingDate *time.Time) time.
 	listingY, listingM, listingD := listingDate.Date()
 	configY, configM, configD := configStart.Date()
 
-	// Create comparable dates (both at midnight UTC for fair comparison)
+	// Create comparable dates (both at midnight UTC for fair comparison).
 	listingDay := time.Date(listingY, listingM, listingD, 0, 0, 0, 0, time.UTC)
 	configDay := time.Date(configY, configM, configD, 0, 0, 0, 0, time.UTC)
 
-	log.Info("[massive] EffectiveBackfillStart: listingDate=%s, configStart=%s, listingDay=%s, configDay=%s, after=%v",
-		listingDate.Format("2006-01-02 MST"), configStart.Format("2006-01-02 MST"),
-		listingDay.Format("2006-01-02"), configDay.Format("2006-01-02"),
-		listingDay.After(configDay))
-
+	// Use the later of the two: listing date caps how far back we can go,
+	// but configStart may be even more recent and should take precedence.
 	if listingDay.After(configDay) {
 		return *listingDate
 	}
