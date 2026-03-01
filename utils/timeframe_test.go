@@ -37,6 +37,17 @@ func TestTimeframeFromString(t *testing.T) {
 
 	tf = TimeframeFromString("0H")
 	assert.Nil(t, tf)
+
+	// Monthly timeframes
+	tf = TimeframeFromString("1M")
+	assert.NotNil(t, tf)
+	assert.Equal(t, "1M", tf.String)
+	assert.Equal(t, Month, tf.Duration)
+
+	tf = TimeframeFromString("3M")
+	assert.NotNil(t, tf)
+	assert.Equal(t, "3M", tf.String)
+	assert.Equal(t, 3*Month, tf.Duration)
 }
 
 func TestCandleDuration(t *testing.T) {

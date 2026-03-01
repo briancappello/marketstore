@@ -147,6 +147,10 @@ message ListSymbolsRequest {
         TIME_BUCKET_KEY = 1;
     }
     Format format = 1;
+    // Optional: filter to symbols that have data for this timeframe (e.g. "1Min", "1D")
+    string timeframe = 2;
+    // Optional: filter to symbols that have data on this specific date (unix epoch seconds, UTC)
+    int64 date = 3;
 }
 
 message ListSymbolsResponse {

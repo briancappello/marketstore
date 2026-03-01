@@ -49,12 +49,15 @@ var (
 	}
 	// configFilePath set flag for a path to the config file.
 	configFilePath string
+	// noBackfill disables automatic backfill on startup for background workers.
+	noBackfill bool
 )
 
 // nolint:gochecknoinits // cobra's standard way to initialize flags
 func init() {
 	utils.InstanceConfig.StartTime = time.Now()
 	Cmd.Flags().StringVarP(&configFilePath, "config", "c", defaultConfigFilePath, configDesc)
+	Cmd.Flags().BoolVar(&noBackfill, "no-backfill", false, "disable automatic backfill on startup for background workers")
 }
 
 // executeStart implements the start command.
@@ -80,6 +83,8 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse configuration file error: %w", err)
 	}
+	// Apply CLI flags that override config file settings.
+	config.NoBackfill = noBackfill
 	utils.InstanceConfig = *config // TODO: remove the singleton instance
 
 	// New gRPC stream server for replication.

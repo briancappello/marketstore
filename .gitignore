@@ -10,6 +10,7 @@ coverage.txt
 mktsdb/
 build/
 marketstore
+marketstore_test
 *.exe
 *.test
 .vscode

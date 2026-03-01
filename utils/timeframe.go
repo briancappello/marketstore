@@ -14,6 +14,10 @@ const (
 	Year = 365 * Day
 )
 
+// Month is an approximate duration for monthly timeframes.
+// Actual month boundaries are handled by calendar-aware logic in CandleDuration methods.
+const Month = 30 * Day
+
 var timeframeDefs = []Timeframe{
 	{"S", time.Second},
 	{"Sec", time.Second},
@@ -22,6 +26,7 @@ var timeframeDefs = []Timeframe{
 	{"H", time.Hour},
 	{"D", Day},
 	{"W", Week},
+	{"M", Month},
 	{"Y", Year},
 }
 
@@ -37,6 +42,7 @@ var Timeframes = []*Timeframe{
 	{"4H", 4 * time.Hour},
 	{"2H", 2 * time.Hour},
 	{"1D", Day},
+	{"1M", Month},
 	// {"24H", 24 * time.Hour},
 }
 
@@ -268,5 +274,6 @@ var suffixDefs = map[string]time.Duration{
 	"H":   time.Hour,
 	"D":   Day,
 	"W":   Week,
+	"M":   Month,
 	"Y":   Year,
 }

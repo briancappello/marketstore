@@ -58,10 +58,13 @@ type MktsConfig struct {
 	InitWALCache               bool
 	BackgroundSync             bool
 	WALBypass                  bool
-	StartTime                  time.Time
-	Replication                ReplicationSetting
-	Triggers                   []*TriggerSetting
-	BgWorkers                  []*BgWorkerSetting
+	// NoBackfill disables automatic backfill on startup for background workers
+	// like massive. Set via --no-backfill CLI flag.
+	NoBackfill  bool
+	StartTime   time.Time
+	Replication ReplicationSetting
+	Triggers    []*TriggerSetting
+	BgWorkers   []*BgWorkerSetting
 }
 
 const (

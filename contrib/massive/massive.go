@@ -157,9 +157,11 @@ func (mf *MassiveFetcher) Run() {
 		api.SetBaseURL(mf.config.BaseURL)
 	}
 
-	// Run backfill if query_start is set.
+	// Run backfill if query_start is set and backfill is not disabled.
 	if len(mf.config.QueryStart) > 0 {
-		if err := mf.runBackfill(); err != nil {
+		if utils.InstanceConfig.NoBackfill {
+			log.Info("[massive] backfill disabled via --no-backfill flag, skipping")
+		} else if err := mf.runBackfill(); err != nil {
 			log.Info("[massive] backfill stopped: %v", err)
 			return
 		}

@@ -260,6 +260,10 @@ type ListSymbolsResponse struct {
 type ListSymbolsRequest struct {
 	// "symbol", or "tbk"
 	Format string `msgpack:"format,omitempty"`
+	// Timeframe filters to symbols that have data for this timeframe (e.g. "1Min", "1D")
+	Timeframe string `msgpack:"timeframe,omitempty"`
+	// Date filters to symbols that have data on this specific date (unix epoch seconds, UTC)
+	Date *int64 `msgpack:"date,omitempty"`
 }
 
 func (s *DataService) ListSymbols(r *http.Request, req *ListSymbolsRequest, response *ListSymbolsResponse) (err error) {
@@ -273,7 +277,28 @@ func (s *DataService) ListSymbols(r *http.Request, req *ListSymbolsRequest, resp
 		return nil
 	}
 
-	// Symbol format (e.g. ["AMZN", "AAPL", ...])
+	// Check if filtering is requested
+	var timeframe string
+	var date *time.Time
+	if req != nil {
+		timeframe = req.Timeframe
+		if req.Date != nil {
+			t := time.Unix(*req.Date, 0).UTC()
+			date = &t
+		}
+	}
+
+	// If filtering by timeframe or date, use the filtered listing
+	if timeframe != "" || date != nil {
+		symbols, err := listSymbolsForDate(s.catalogDir, timeframe, date)
+		if err != nil {
+			return fmt.Errorf("list symbols with filters: %w", err)
+		}
+		response.Results = symbols
+		return nil
+	}
+
+	// No filters - return all symbols (original behavior)
 	ret, err := s.catalogDir.GatherCategoriesAndItems()
 	if err != nil {
 		return fmt.Errorf("gather categories and items from catalog dir to list symbols: %w", err)

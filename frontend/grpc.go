@@ -287,17 +287,37 @@ func (s GRPCService) ListSymbols(ctx context.Context, req *proto.ListSymbolsRequ
 		return nil, errNotQueryable
 	}
 
-	switch req.Format {
-	case proto.ListSymbolsRequest_SYMBOL:
-		ret, err := s.catalogDir.GatherCategoriesAndItems()
-		if err != nil {
-			return nil, fmt.Errorf("gather categories and items from catDir: %w", err)
-		}
-		for symbol := range ret["Symbol"] {
-			response.Results = append(response.Results, symbol)
-		}
-	default: // proto.ListSymbolsRequest_TIME_BUCKET_KEY:
+	// For TBK format, return all time bucket keys (no filtering supported)
+	if req.Format == proto.ListSymbolsRequest_TIME_BUCKET_KEY {
 		response.Results = catalog.ListTimeBucketKeyNames(s.catalogDir)
+		return &response, nil
+	}
+
+	// Symbol format - check for filtering
+	timeframe := req.GetTimeframe()
+	var date *time.Time
+	if req.GetDate() != 0 {
+		t := time.Unix(req.GetDate(), 0).UTC()
+		date = &t
+	}
+
+	// If filtering by timeframe or date, use the filtered listing
+	if timeframe != "" || date != nil {
+		symbols, err := listSymbolsForDate(s.catalogDir, timeframe, date)
+		if err != nil {
+			return nil, fmt.Errorf("list symbols with filters: %w", err)
+		}
+		response.Results = symbols
+		return &response, nil
+	}
+
+	// No filters - return all symbols (original behavior)
+	ret, err := s.catalogDir.GatherCategoriesAndItems()
+	if err != nil {
+		return nil, fmt.Errorf("gather categories and items from catDir: %w", err)
+	}
+	for symbol := range ret["Symbol"] {
+		response.Results = append(response.Results, symbol)
 	}
 
 	return &response, nil
