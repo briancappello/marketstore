@@ -262,8 +262,9 @@ type ListSymbolsRequest struct {
 	Format string `msgpack:"format,omitempty"`
 	// Timeframe filters to symbols that have data for this timeframe (e.g. "1Min", "1D")
 	Timeframe string `msgpack:"timeframe,omitempty"`
-	// Date filters to symbols that have data on this specific date (unix epoch seconds, UTC)
-	Date *int64 `msgpack:"date,omitempty"`
+	// Date filters to symbols that have data on this specific date.
+	// Accepts either "YYYY-MM-DD" format or unix epoch seconds as a string (e.g. "2024-01-15" or "1705276800")
+	Date string `msgpack:"date,omitempty"`
 }
 
 func (s *DataService) ListSymbols(r *http.Request, req *ListSymbolsRequest, response *ListSymbolsResponse) (err error) {
@@ -282,8 +283,11 @@ func (s *DataService) ListSymbols(r *http.Request, req *ListSymbolsRequest, resp
 	var date *time.Time
 	if req != nil {
 		timeframe = req.Timeframe
-		if req.Date != nil {
-			t := time.Unix(*req.Date, 0).UTC()
+		if req.Date != "" {
+			t, err := parseDate(req.Date)
+			if err != nil {
+				return fmt.Errorf("invalid date format %q: %w", req.Date, err)
+			}
 			date = &t
 		}
 	}

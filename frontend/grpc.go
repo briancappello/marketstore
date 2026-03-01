@@ -296,8 +296,11 @@ func (s GRPCService) ListSymbols(ctx context.Context, req *proto.ListSymbolsRequ
 	// Symbol format - check for filtering
 	timeframe := req.GetTimeframe()
 	var date *time.Time
-	if req.GetDate() != 0 {
-		t := time.Unix(req.GetDate(), 0).UTC()
+	if req.GetDate() != "" {
+		t, err := parseDate(req.GetDate())
+		if err != nil {
+			return nil, fmt.Errorf("invalid date format %q: %w", req.GetDate(), err)
+		}
 		date = &t
 	}
 

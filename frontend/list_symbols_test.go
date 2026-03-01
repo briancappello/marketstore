@@ -3,7 +3,6 @@ package frontend_test
 import (
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -79,13 +78,29 @@ func TestListSymbols_FilterByNonexistentTimeframe(t *testing.T) {
 	assert.Len(t, response.Results, 0)
 }
 
-func TestListSymbols_FilterByDate(t *testing.T) {
+func TestListSymbols_FilterByDateISO(t *testing.T) {
 	service := setupListSymbols(t)
 
-	// Test with a date in year 2001 (which has data)
-	date := time.Date(2001, 6, 15, 0, 0, 0, 0, time.UTC).Unix()
+	// Test with a date in year 2001 (which has data) using ISO format
 	req := &frontend.ListSymbolsRequest{
-		Date: &date,
+		Date: "2001-06-15",
+	}
+	var response frontend.ListSymbolsResponse
+	err := service.ListSymbols(nil, req, &response)
+
+	assert.Nil(t, err)
+	assert.Len(t, response.Results, 3)
+	assert.Contains(t, response.Results, "EURUSD")
+	assert.Contains(t, response.Results, "USDJPY")
+	assert.Contains(t, response.Results, "NZDUSD")
+}
+
+func TestListSymbols_FilterByDateEpoch(t *testing.T) {
+	service := setupListSymbols(t)
+
+	// Test with a date in year 2001 (which has data) using epoch seconds
+	req := &frontend.ListSymbolsRequest{
+		Date: "992563200", // 2001-06-15 00:00:00 UTC
 	}
 	var response frontend.ListSymbolsResponse
 	err := service.ListSymbols(nil, req, &response)
@@ -101,9 +116,8 @@ func TestListSymbols_FilterByDateNoData(t *testing.T) {
 	service := setupListSymbols(t)
 
 	// Test with a date in year 2020 (which has no data - test data only has 2000-2002)
-	date := time.Date(2020, 6, 15, 0, 0, 0, 0, time.UTC).Unix()
 	req := &frontend.ListSymbolsRequest{
-		Date: &date,
+		Date: "2020-06-15",
 	}
 	var response frontend.ListSymbolsResponse
 	err := service.ListSymbols(nil, req, &response)
@@ -112,14 +126,26 @@ func TestListSymbols_FilterByDateNoData(t *testing.T) {
 	assert.Len(t, response.Results, 0)
 }
 
+func TestListSymbols_FilterByDateInvalidFormat(t *testing.T) {
+	service := setupListSymbols(t)
+
+	req := &frontend.ListSymbolsRequest{
+		Date: "not-a-date",
+	}
+	var response frontend.ListSymbolsResponse
+	err := service.ListSymbols(nil, req, &response)
+
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "invalid date format")
+}
+
 func TestListSymbols_FilterByTimeframeAndDate(t *testing.T) {
 	service := setupListSymbols(t)
 
 	// Test with both timeframe and date filters
-	date := time.Date(2001, 6, 15, 0, 0, 0, 0, time.UTC).Unix()
 	req := &frontend.ListSymbolsRequest{
 		Timeframe: "1D",
-		Date:      &date,
+		Date:      "2001-06-15",
 	}
 	var response frontend.ListSymbolsResponse
 	err := service.ListSymbols(nil, req, &response)

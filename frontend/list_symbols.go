@@ -2,13 +2,30 @@ package frontend
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/alpacahq/marketstore/v4/catalog"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 )
+
+// parseDate parses a date string in either "YYYY-MM-DD" format or unix epoch seconds.
+func parseDate(s string) (time.Time, error) {
+	// Try parsing as YYYY-MM-DD first
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.UTC(), nil
+	}
+
+	// Try parsing as unix epoch seconds
+	epoch, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("expected YYYY-MM-DD or unix epoch seconds, got %q", s)
+	}
+	return time.Unix(epoch, 0).UTC(), nil
+}
 
 // listSymbolsForDate returns symbols that have data on the specified date,
 // optionally filtered by timeframe.

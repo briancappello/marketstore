@@ -20,7 +20,7 @@ require (
 	github.com/eapache/queue v1.1.0 // indirect
 	github.com/gobwas/glob v0.2.3
 	github.com/golang/mock v1.4.4
-	github.com/golang/protobuf v1.5.2 // indirect
+	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/gorilla/websocket v1.4.2
@@ -37,8 +37,8 @@ require (
 	github.com/vmihailenco/msgpack v4.0.4+incompatible
 	go.uber.org/zap v1.15.0
 	golang.org/x/tools v0.42.0
-	gonum.org/v1/gonum v0.0.0-20190618015908-5dc218f86579
-	google.golang.org/grpc v1.46.2
+	gonum.org/v1/gonum v0.16.0
+	google.golang.org/grpc v1.79.1
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c
 	gopkg.in/matryer/try.v1 v1.0.0-20150601225556-312d2599e12e
 	gopkg.in/yaml.v2 v2.4.0
@@ -47,12 +47,12 @@ require (
 require (
 	github.com/hashicorp/go-retryablehttp v0.7.1
 	github.com/jackc/pgx/v5 v5.8.0
-	google.golang.org/protobuf v1.36.7
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.1.2 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cheekybits/is v0.0.0-20150225183255-68e9c0620927 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/gopacket v1.1.16-0.20181023151400-a35e09f9f224 // indirect
