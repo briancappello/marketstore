@@ -95,7 +95,7 @@ func TestConnectURLPath(t *testing.T) {
 	}
 }
 
-func TestNewBgWorker_SymbolsDSNValidation(t *testing.T) {
+func TestNewBgWorker_Validation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -106,9 +106,9 @@ func TestNewBgWorker_SymbolsDSNValidation(t *testing.T) {
 		{
 			name: "symbols_dsn without symbols_query returns error",
 			config: map[string]interface{}{
-				"api_key":     "test-key",
-				"data_types":  []string{"bars"},
-				"symbols_dsn": "postgres://localhost/test",
+				"api_key":       "test-key",
+				"ws_data_types": []string{"1Min"},
+				"symbols_dsn":   "postgres://localhost/test",
 			},
 			expectError: "symbols_query is required when symbols_dsn is set",
 		},
@@ -116,7 +116,7 @@ func TestNewBgWorker_SymbolsDSNValidation(t *testing.T) {
 			name: "symbols_dsn with empty symbols_query returns error",
 			config: map[string]interface{}{
 				"api_key":       "test-key",
-				"data_types":    []string{"bars"},
+				"ws_data_types": []string{"1Min"},
 				"symbols_dsn":   "postgres://localhost/test",
 				"symbols_query": "",
 			},
@@ -126,7 +126,7 @@ func TestNewBgWorker_SymbolsDSNValidation(t *testing.T) {
 			name: "invalid dsn returns connection error",
 			config: map[string]interface{}{
 				"api_key":       "test-key",
-				"data_types":    []string{"bars"},
+				"ws_data_types": []string{"1Min"},
 				"symbols_dsn":   "postgres://invalid:5432/nonexistent?connect_timeout=1",
 				"symbols_query": "SELECT symbol FROM symbols",
 			},
@@ -135,19 +135,37 @@ func TestNewBgWorker_SymbolsDSNValidation(t *testing.T) {
 		{
 			name: "static symbols without dsn works",
 			config: map[string]interface{}{
-				"api_key":    "test-key",
-				"data_types": []string{"bars"},
-				"symbols":    []string{"AAPL", "MSFT"},
+				"api_key":       "test-key",
+				"ws_data_types": []string{"1Min"},
+				"symbols":       []string{"AAPL", "MSFT"},
 			},
 			expectError: "",
 		},
 		{
-			name: "no data_types returns error",
+			name: "no ws_data_types defaults to 1Min",
 			config: map[string]interface{}{
 				"api_key": "test-key",
 				"symbols": []string{"AAPL"},
 			},
-			expectError: "at least one valid data_type is required",
+			expectError: "",
+		},
+		{
+			name: "invalid ws_data_type returns error",
+			config: map[string]interface{}{
+				"api_key":       "test-key",
+				"ws_data_types": []string{"invalid"},
+				"symbols":       []string{"AAPL"},
+			},
+			expectError: "invalid ws_data_type",
+		},
+		{
+			name: "valid ws_data_types",
+			config: map[string]interface{}{
+				"api_key":       "test-key",
+				"ws_data_types": []string{"1Min", "1Sec", "quotes", "trades"},
+				"symbols":       []string{"AAPL"},
+			},
+			expectError: "",
 		},
 	}
 

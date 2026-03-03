@@ -76,17 +76,36 @@ attrgroup_types:
     record_type: variable
 
 triggers:
+  - module: stream.so
+    on: "*/1Sec/*"
+    config:
+      filter: "nasdaq"
+
+  - module: stream.so
+    on: "*/1Min/*"
+    config:
+      filter: "nasdaq"
+
+  # Stage 1: TRADE -> 1Sec OHLCV bars
+  - module: ondiskagg.so
+    on: "*/1Sec/TRADE"
+    config:
+      destinations:
+        - 1Sec
+
+  # Stage 2: 1Sec -> 1Min OHLCV bars
+  - module: ondiskagg.so
+    on: "*/1Sec/OHLCV"
+    config:
+      destinations:
+        - 1Min
+
+  # Stage 3: 1Min -> 1D OHLCV bars
   - module: ondiskagg.so
     on: "*/1Min/OHLCV"
     config:
-      filter: "nasdaq"
       destinations:
         - 1D
-
-  - module: stream.so
-    on: "*/*/*"
-    config:
-      filter: "nasdaq"
 
 bgworkers:
   - module: massive.so
@@ -94,18 +113,21 @@ bgworkers:
     config:
       api_key: "FIXME"
       base_url: "https://api.massive.com"
-#      ws_server: "wss://socket.massive.com"
-      ws_server: "wss://delayed.massive.com/stocks"
-#      ws_server: "ws://127.0.0.1:8765"
-      data_types:
-        - bars
-      ws_frequencies:
-#        - 1Sec
-        - 1Min
+      ws_server: "wss://socket.massive.com"  # "wss://delayed.massive.com/stocks" | "ws://127.0.0.1:8765"
+      # ws_data_types controls real-time WebSocket streaming.
+      ws_data_types:
+        - quotes
+        - trades
+        - 1Sec
+        - 1Min  # default if none specified
       symbols:
         - AAPL
         - SPY
+      # query_start controls backfill independently of streaming.
+      # Keys can be quotes, trades, or timeframes (eg 1Min, 5Min, 1H, 1D)
       query_start:
+#        quotes: "2024-01-01"
+#        trades: "2024-01-01"
         1Min: "2024-01-01"
         1D: "2024-01-01"
       backfill_batch_size: 50000

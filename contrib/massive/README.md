@@ -21,12 +21,11 @@ configuration file under `bgworkers`.
 | `api_key`             | string            | (required)                 | Your Massive API key                                                                      |
 | `base_url`            | string            | `https://api.massive.com`  | REST API base URL                                                                         |
 | `ws_server`           | string            | `wss://socket.massive.com` | WebSocket server URL                                                                      |
-| `data_types`          | []string          | (required)                 | Data types to subscribe to: `bars`, `quotes`, `trades`                                    |
+| `ws_data_types`       | []string          | `["1Min"]`                 | Data types to stream via WebSocket: `1Min`, `1Sec`, `quotes`, `trades`                    |
 | `symbols`             | []string          | `["*"]`                    | Symbols to subscribe to (use `*` for all)                                                 |
 | `symbols_dsn`         | string            | (none)                     | PostgreSQL connection string for dynamic symbol lookup (overrides `symbols` if set)       |
 | `symbols_query`       | string            | (none)                     | SQL query returning a single column of symbols (required when `symbols_dsn` is set)       |
-| `query_start`         | map[string]string | (none)                     | Start dates per frequency. Keys are timeframes (e.g., `1Min`, `1D`) or `trades`/`quotes`. |
-| `ws_frequencies`      | []string          | `["1Min"]`                 | Bar timeframes to stream (e.g., `["1Sec", "1Min"]`)                                       |
+| `query_start`         | map[string]string | (none)                     | Start dates per frequency for backfill. Keys are timeframes (e.g., `1Min`, `1D`) or `trades`/`quotes`. |
 | `backfill_batch_size` | int               | `50000`                    | Pagination limit for REST API backfill                                                    |
 | `backfill_adjusted`   | bool              | `true`                     | Whether backfilled bars are split-adjusted                                                |
 
@@ -39,16 +38,21 @@ bgworkers:
     config:
       api_key: your_api_key
       ws_server: wss://socket.massive.com
-      data_types: ["bars", "trades"]
+      # Stream 1-second bars, 1-minute bars, and trades in real-time
+      ws_data_types: ["1Sec", "1Min", "trades"]
       symbols:
         - AAPL
         - SPY
-      ws_frequencies: ["1Sec", "1Min"]
+      # Backfill is controlled separately via query_start
       query_start:
         1Min: "2024-01-01"
         1D: "2020-01-01"
         trades: "2024-06-01"
 ```
+
+Note: `ws_data_types` controls real-time WebSocket streaming, while `query_start`
+controls which data types are backfilled. They are independent - you can stream
+`1Min` bars without backfilling them, or backfill `1D` bars without streaming them.
 
 ### Dynamic Symbols from PostgreSQL
 
@@ -61,7 +65,7 @@ bgworkers:
     name: Massive
     config:
       api_key: your_api_key
-      data_types: ["bars"]
+      ws_data_types: ["1Min"]
       # Query symbols from PostgreSQL instead of using static list
       symbols_dsn: "postgres://user:password@localhost:5432/mydb?sslmode=disable"
       symbols_query: "SELECT symbol FROM tracked_symbols WHERE active = true"
@@ -90,7 +94,7 @@ bgworkers:
     name: Massive
     config:
       api_key: your_api_key
-      data_types: ["bars"]
+      ws_data_types: ["1Min"]
       symbols_dsn: "postgres://user:password@localhost:5432/mydb?sslmode=disable"
       # Query returns (symbol, listing_date) pairs
       symbols_query: "SELECT symbol, listing_date FROM tracked_symbols WHERE active = true"

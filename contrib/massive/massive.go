@@ -74,11 +74,11 @@ var json = jsoniter.ConfigCompatibleWithStandardLibrary
 // real-time market data from the Massive WebSocket API, with optional
 // backfill from the REST API on startup.
 type MassiveFetcher struct {
-	config massiveconfig.FetcherConfig
-	types  map[string]struct{} // bars, quotes, trades
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	config      massiveconfig.FetcherConfig
+	wsDataTypes map[string]struct{} // 1Min, 1Sec, trades, quotes
+	ctx         context.Context
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 // NewBgWorker returns a new instance of MassiveFetcher.
@@ -128,23 +128,27 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 		}
 	}
 
-	t := map[string]struct{}{}
-	for _, dt := range config.DataTypes {
-		if dt == "bars" || dt == "quotes" || dt == "trades" {
-			t[dt] = struct{}{}
+	// Parse and validate ws_data_types.
+	wsDataTypes := map[string]struct{}{}
+	if len(config.WSDataTypes) == 0 {
+		// Default to 1Min if not specified.
+		wsDataTypes["1Min"] = struct{}{}
+	} else {
+		for _, dt := range config.WSDataTypes {
+			if !massiveconfig.ValidWSDataTypes[dt] {
+				return nil, fmt.Errorf("invalid ws_data_type %q: must be one of 1Min, 1Sec, trades, quotes", dt)
+			}
+			wsDataTypes[dt] = struct{}{}
 		}
-	}
-	if len(t) == 0 {
-		return nil, fmt.Errorf("at least one valid data_type is required (bars, quotes, trades)")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &MassiveFetcher{
-		config: config,
-		types:  t,
-		ctx:    ctx,
-		cancel: cancel,
+		config:      config,
+		wsDataTypes: wsDataTypes,
+		ctx:         ctx,
+		cancel:      cancel,
 	}, nil
 }
 
@@ -187,27 +191,22 @@ func (mf *MassiveFetcher) Run() {
 		wsQueryStart = mf.config.WSQueryStart
 	}
 
-	for dataType := range mf.types {
+	for dataType := range mf.wsDataTypes {
 		switch dataType {
-		case "bars":
-			// Start a stream for each configured ws_frequency.
-			wsFrequencies := mf.config.WSFrequencies
-			if len(wsFrequencies) == 0 {
-				wsFrequencies = []string{"1Min"} // default to 1Min
-			}
-			for _, freq := range wsFrequencies {
-				prefix, ok := wsFrequencyToPrefix[freq]
-				if !ok {
-					log.Error("[massive] invalid ws_frequency %q: only 1Min and 1Sec are supported for WebSocket streaming", freq)
-					continue
-				}
-				handler := handlers.MakeBarsHandler(freq)
-				mf.wg.Add(1)
-				go func(p Prefix, h func([]byte)) {
-					defer mf.wg.Done()
-					mf.streamForever(wsServer, mf.config.APIKey, p, mf.config.Symbols, wsQueryStart, h)
-				}(prefix, handler)
-			}
+		case "1Min":
+			handler := handlers.MakeBarsHandler("1Min")
+			mf.wg.Add(1)
+			go func() {
+				defer mf.wg.Done()
+				mf.streamForever(wsServer, mf.config.APIKey, PrefixAggMinute, mf.config.Symbols, wsQueryStart, handler)
+			}()
+		case "1Sec":
+			handler := handlers.MakeBarsHandler("1Sec")
+			mf.wg.Add(1)
+			go func() {
+				defer mf.wg.Done()
+				mf.streamForever(wsServer, mf.config.APIKey, PrefixAggSecond, mf.config.Symbols, wsQueryStart, handler)
+			}()
 		case "quotes":
 			mf.wg.Add(1)
 			go func() {
@@ -318,10 +317,6 @@ func (mf *MassiveFetcher) runBackfill() error {
 
 			switch key {
 			case "trades":
-				// Only process if trades is in data_types.
-				if _, ok := mf.types["trades"]; !ok {
-					continue
-				}
 				tbk := io.NewTimeBucketKey(models.TradeBucketKey(symbol))
 				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended)
 				if decision.skip {
@@ -337,10 +332,6 @@ func (mf *MassiveFetcher) runBackfill() error {
 					log.Warn("[massive] failed to backfill trades for %s: %v", symbol, err)
 				}
 			case "quotes":
-				// Only process if quotes is in data_types.
-				if _, ok := mf.types["quotes"]; !ok {
-					continue
-				}
 				tbk := io.NewTimeBucketKey(models.QuoteBucketKey(symbol))
 				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended)
 				if decision.skip {
@@ -357,10 +348,6 @@ func (mf *MassiveFetcher) runBackfill() error {
 				}
 			default:
 				// Assume it's a bar timeframe (e.g., "1Min", "5Min", "1H", "1D").
-				// Only process if bars is in data_types.
-				if _, ok := mf.types["bars"]; !ok {
-					continue
-				}
 				tf := key
 				// Use regular market hours for daily+ timeframes, extended hours for intraday.
 				end := endExtended

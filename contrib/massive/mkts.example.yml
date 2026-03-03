@@ -18,7 +18,10 @@ bgworkers:
       api_key: your_massive_api_key
       base_url: https://api.massive.com
       ws_server: wss://socket.massive.com
-      data_types: [ 'bars', 'trades' ]
+      # ws_data_types controls real-time WebSocket streaming.
+      # Supported values: 1Min, 1Sec, quotes, trades
+      # Defaults to [ '1Min' ] if not specified.
+      ws_data_types: [ '1Min', 'trades' ]
       # Option 1: Static symbol list
       symbols:
         - AAPL
@@ -30,10 +33,7 @@ bgworkers:
       # The query can return 2 columns: (symbol, listing_date)
       # If listing_date is more recent than query_start, backfill uses listing_date
       # symbols_query: "SELECT symbol, listing_date FROM tracked_symbols WHERE active = true"
-      # WebSocket streaming frequencies for bars (only 1Min and 1Sec are supported).
-      # Defaults to [ '1Min' ] if not specified.
-      ws_frequencies: [ '1Min' ]
-      # Set query_start to backfill historical data on startup.
+      # query_start controls backfill independently of streaming.
       # Keys are timeframes (1Min, 5Min, 1H, 1D, etc.) or 'trades'/'quotes'.
       # All keys will be backfilled; use ondiskagg trigger for aggregations.
       # Omit to skip backfill and only stream real-time data.

@@ -37,8 +37,11 @@ type FetcherConfig struct {
 	BaseURL string `json:"base_url"`
 	// WSServer is the WebSocket server URL (defaults to "wss://socket.massive.com").
 	WSServer string `json:"ws_server"`
-	// DataTypes is a list of data types to subscribe to (bars, quotes, trades).
-	DataTypes []string `json:"data_types"`
+	// WSDataTypes is a list of data types to stream via WebSocket.
+	// Supported values: "1Min", "1Sec", "trades", "quotes".
+	// Defaults to ["1Min"] if not specified.
+	// Example: ["1Min", "quotes"] streams 1-minute bars and NBBO quotes.
+	WSDataTypes []string `json:"ws_data_types"`
 	// Symbols is a list of stock ticker symbols to subscribe to.
 	// Use ["*"] to subscribe to all tickers.
 	Symbols []string `json:"symbols"`
@@ -61,10 +64,6 @@ type FetcherConfig struct {
 	// This is only sent when the ws_server host is localhost or 127.0.0.1.
 	// If empty, the stream starts from real-time.
 	WSQueryStart string `json:"ws_query_start"`
-	// WSFrequencies is a list of bar timeframes for WebSocket streaming subscriptions
-	// (e.g., ["1Min"]). This only affects real-time data, not backfilling.
-	// If empty, defaults to ["1Min"].
-	WSFrequencies []string `json:"ws_frequencies"`
 	// SymbolsDSN is an optional PostgreSQL connection string for fetching symbols
 	// dynamically at startup. If set, symbols are queried from the database and
 	// the static Symbols field is ignored.
@@ -81,6 +80,14 @@ type FetcherConfig struct {
 	// SymbolInfos is populated at runtime from either Symbols (converted to SymbolInfo with nil dates)
 	// or from the database query results. This field is not parsed from config.
 	SymbolInfos []SymbolInfo `json:"-"`
+}
+
+// ValidWSDataTypes is the set of valid values for WSDataTypes.
+var ValidWSDataTypes = map[string]bool{
+	"1Min":   true,
+	"1Sec":   true,
+	"trades": true,
+	"quotes": true,
 }
 
 // FetchSymbolsFromDB queries PostgreSQL for the list of symbols to track.
