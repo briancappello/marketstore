@@ -302,12 +302,44 @@ func (w *Writer) WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) error {
 				continue
 			}
 
+			// Get input data shapes
+			inputShapes := cs.GetDataShapes()
+
+			// Check if there's a configured schema for this attrgroup
+			attrGroupName := tbk.GetItemInCategory("AttributeGroup")
+			configSchema := getAttrGroupSchemaFromConfig(attrGroupName)
+
+			var finalShapes []io.DataShape
+			if configSchema != nil {
+				// Merge config schema with input shapes
+				mergedShapes, coercions, mergeErr := io.MergeSchemaWithInput(configSchema, inputShapes)
+				if mergeErr != nil {
+					return fmt.Errorf("schema merge for %s: %w", tbk, mergeErr)
+				}
+				finalShapes = mergedShapes
+
+				// Log coercions at debug level - user configured these intentionally
+				for colName, types := range coercions {
+					log.Debug("[%s] coercing column %s from %s to configured type %s",
+						tbk.GetItemKey(), colName, types[0].String(), types[1].String())
+				}
+
+				// Use configured record type if not explicitly set by caller
+				if !isVariableLength && configSchema.RecordType == io.VARIABLE {
+					recordType = io.VARIABLE
+				} else if isVariableLength && configSchema.RecordType == io.FIXED {
+					log.Warn("[%s] config specifies fixed record type, but caller requested variable", tbk.GetItemKey())
+				}
+			} else {
+				finalShapes = inputShapes
+			}
+
 			year := int16(t[0].Year())
 			tbi = io.NewTimeBucketInfo(
 				*tf,
 				tbk.GetPathToYearFiles(w.rootCatDir.GetPath()),
 				"Created By Writer", year,
-				cs.GetDataShapes(), recordType)
+				finalShapes, recordType)
 
 			/*
 				Verify there is an available TimeBucket for the destination
@@ -370,4 +402,19 @@ func WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) (err error) {
 	}
 
 	return writer.WriteCSM(csm, isVariableLength)
+}
+
+// getAttrGroupSchemaFromConfig looks up the attrgroup schema from the global config.
+// Returns nil if no config is defined for the given attrgroup name.
+func getAttrGroupSchemaFromConfig(attrGroupName string) *io.AttrGroupSchema {
+	cfg, ok := utils.InstanceConfig.AttrGroupTypes[attrGroupName]
+	if !ok {
+		return nil
+	}
+
+	// Convert AttrGroupConfig to io.AttrGroupTypeConfig interface
+	configTypes := make(map[string]io.AttrGroupTypeConfig)
+	configTypes[attrGroupName] = cfg
+
+	return io.GetAttrGroupSchema(attrGroupName, configTypes)
 }

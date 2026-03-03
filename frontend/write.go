@@ -51,7 +51,7 @@ func (s *DataService) Write(_ *http.Request, reqs *MultiWriteRequest, response *
 }
 
 /*
-	Create: Creates a new time bucket in the DB
+Create: Creates a new time bucket in the DB
 */
 type CreateRequest struct {
 	// bucket key string. e.g. "TSLA/1Min/OHLC"
@@ -61,6 +61,9 @@ type CreateRequest struct {
 	// a list of column names
 	ColumnNames      []string `msgpack:"column_names"`
 	IsVariableLength bool     `msgpack:"is_variable_length"`
+	// OverrideSchema, if true, allows the request to override the attrgroup_types
+	// config schema. If false (default), config schema takes precedence when defined.
+	OverrideSchema bool `msgpack:"override_schema"`
 }
 
 type MultiCreateRequest struct {
@@ -96,6 +99,10 @@ func (s *DataService) Create(_ *http.Request, reqs *MultiCreateRequest, response
 			continue
 		}
 
+		// --- Check for attrgroup config schema
+		attrGroupName := tbk.GetItemInCategory("AttributeGroup")
+		configSchema := getAttrGroupSchemaFromConfig(attrGroupName)
+
 		// --- Record Type
 		var recordType io.EnumRecordType
 		if req.IsVariableLength {
@@ -105,15 +112,57 @@ func (s *DataService) Create(_ *http.Request, reqs *MultiCreateRequest, response
 		}
 
 		// --- DataShapes
-		dsv := make([]io.DataShape, len(req.ColumnNames))
-		for i, name := range req.ColumnNames {
-			t, ok := io.TypeStrToElemType(req.ColumnTypes[i])
-			if !ok {
-				response.appendResponse(fmt.Errorf("unexpected data type:%v", req.ColumnTypes[i]))
-				return nil
+		var dsv []io.DataShape
+
+		// Determine schema source based on request and config
+		hasRequestSchema := len(req.ColumnNames) > 0
+		hasConfigSchema := configSchema != nil
+
+		switch {
+		case hasRequestSchema && (!hasConfigSchema || req.OverrideSchema):
+			// Use request schema (either no config exists, or override is requested)
+			dsv = make([]io.DataShape, len(req.ColumnNames))
+			for i, name := range req.ColumnNames {
+				t, ok := io.TypeStrToElemType(req.ColumnTypes[i])
+				if !ok {
+					response.appendResponse(fmt.Errorf("unexpected data type:%v", req.ColumnTypes[i]))
+					return nil
+				}
+				dsv[i] = io.DataShape{Name: name, Type: t}
 			}
 
-			dsv[i] = io.DataShape{Name: name, Type: t}
+		case hasConfigSchema && !hasRequestSchema:
+			// Use config schema as the source
+			dsv = configSchema.DataShapes
+			recordType = configSchema.RecordType
+
+		case hasConfigSchema && hasRequestSchema && !req.OverrideSchema:
+			// Merge: config takes precedence for defined columns, request adds extras
+			requestShapes := make([]io.DataShape, len(req.ColumnNames))
+			for i, name := range req.ColumnNames {
+				t, ok := io.TypeStrToElemType(req.ColumnTypes[i])
+				if !ok {
+					response.appendResponse(fmt.Errorf("unexpected data type:%v", req.ColumnTypes[i]))
+					return nil
+				}
+				requestShapes[i] = io.DataShape{Name: name, Type: t}
+			}
+
+			mergedShapes, _, mergeErr := io.MergeSchemaWithInput(configSchema, requestShapes)
+			if mergeErr != nil {
+				response.appendResponse(fmt.Errorf("schema merge failed: %w", mergeErr))
+				continue
+			}
+			dsv = mergedShapes
+			// Use config record type unless explicitly overridden by request
+			if !req.IsVariableLength {
+				recordType = configSchema.RecordType
+			}
+
+		default:
+			// No schema from either source
+			response.appendResponse(fmt.Errorf("no schema provided and no config found for attrgroup %q", attrGroupName))
+			continue
 		}
 
 		tbinfo := io.NewTimeBucketInfo(*tf, tbk.GetPathToYearFiles(s.rootDir), "Default", year, dsv, recordType)
@@ -226,6 +275,21 @@ func (mr *MultiServerResponse) appendResponse(err error) {
 			utils.GitHash,
 		},
 	)
+}
+
+// getAttrGroupSchemaFromConfig looks up the attrgroup schema from the global config.
+// Returns nil if no config is defined for the given attrgroup name.
+func getAttrGroupSchemaFromConfig(attrGroupName string) *io.AttrGroupSchema {
+	cfg, ok := utils.InstanceConfig.AttrGroupTypes[attrGroupName]
+	if !ok {
+		return nil
+	}
+
+	// Convert AttrGroupConfig to io.AttrGroupTypeConfig interface
+	configTypes := make(map[string]io.AttrGroupTypeConfig)
+	configTypes[attrGroupName] = cfg
+
+	return io.GetAttrGroupSchema(attrGroupName, configTypes)
 }
 
 func (mg *MultiGetInfoResponse) appendResponse(tbi *io.TimeBucketInfo, err error) {

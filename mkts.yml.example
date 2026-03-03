@@ -6,6 +6,75 @@ stop_grace_period: 0
 wal_rotate_interval: 5
 timezone: "America/New_York"
 
+# attrgroup_types defines schema templates for attribute groups.
+# When a bucket is created with a matching attrgroup name (e.g., AAPL/1Min/OHLCV),
+# the configured schema is used as the default. This ensures consistent data types
+# across all buckets of the same type.
+#
+# Behavior:
+# - Columns defined here use the configured types
+# - Extra columns from feeders are kept with their inferred types (with a warning)
+# - If a feeder sends a column with an incompatible type, an error is raised
+# - record_type can be "fixed" (default) or "variable"
+#
+# Supported column types:
+#   float32, float64, int16, int32, int64,
+#   uint8, uint16, uint32, uint64, byte, bool, string16
+#
+attrgroup_types:
+  OHLCV:
+    columns:
+      Open: float32
+      High: float32
+      Low: float32
+      Close: float32
+      Volume: int64
+    record_type: fixed
+
+  # TRADE - Individual trade executions (used by models/trade.go and massive plugin)
+  # Full trade data with exchange, tape ID, and up to 4 condition codes
+  TRADE:
+    columns:
+      Nanoseconds: int32
+      Price: float64
+      Size: uint64
+      Exchange: byte
+      TapeID: byte
+      Cond1: byte
+      Cond2: byte
+      Cond3: byte
+      Cond4: byte
+    record_type: variable
+
+  # TICK - Simplified tick data (used by xignitefeeder, alpacabkfeeder)
+  # Contains combined quote + trade snapshot with OHLCV for the period
+  # Schema varies by feeder; this is the xignitefeeder schema:
+  TICK:
+    columns:
+      Ask: float32
+      AskSize: float32
+      Bid: float32
+      BidSize: float32
+      Last: float32
+      LastSize: float32
+      DateTime: int64
+      Open: float32
+      High: float32
+      Low: float32
+      Close: float32
+      Volume: int64
+      PreviousClose: float32
+    record_type: fixed
+
+  QUOTE:
+    columns:
+      Nanoseconds: int32
+      BidPrice: float64
+      AskPrice: float64
+      BidSize: uint64
+      AskSize: uint64
+    record_type: variable
+
 triggers:
   - module: ondiskagg.so
     on: "*/1Min/OHLCV"

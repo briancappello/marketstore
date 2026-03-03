@@ -42,6 +42,25 @@ type BgWorkerSetting struct {
 	Config map[string]interface{}
 }
 
+// AttrGroupConfig defines the schema template for an attribute group.
+// When a bucket is created with a matching attrgroup name, this schema
+// is used as the default. Columns defined here will use the configured types,
+// while extra columns from feeders will use their inferred types.
+type AttrGroupConfig struct {
+	Columns    map[string]string // column name -> type string (e.g., "float32", "int64")
+	RecordType string            // "fixed" or "variable", defaults to "fixed"
+}
+
+// GetColumns returns the column name to type mapping.
+func (c *AttrGroupConfig) GetColumns() map[string]string {
+	return c.Columns
+}
+
+// GetRecordType returns the record type string.
+func (c *AttrGroupConfig) GetRecordType() string {
+	return c.RecordType
+}
+
 type MktsConfig struct {
 	// RootDirectory is the absolute path to the data directory
 	RootDirectory              string
@@ -60,11 +79,12 @@ type MktsConfig struct {
 	WALBypass                  bool
 	// NoBackfill disables automatic backfill on startup for background workers
 	// like massive. Set via --no-backfill CLI flag.
-	NoBackfill  bool
-	StartTime   time.Time
-	Replication ReplicationSetting
-	Triggers    []*TriggerSetting
-	BgWorkers   []*BgWorkerSetting
+	NoBackfill     bool
+	StartTime      time.Time
+	Replication    ReplicationSetting
+	Triggers       []*TriggerSetting
+	BgWorkers      []*BgWorkerSetting
+	AttrGroupTypes map[string]*AttrGroupConfig // attrgroup name -> schema config
 }
 
 const (
@@ -102,8 +122,9 @@ func NewDefaultConfig(rootDir string) *MktsConfig {
 			RetryInterval:     10 * time.Second,
 			RetryBackoffCoeff: 2,
 		},
-		Triggers:  nil,
-		BgWorkers: nil,
+		Triggers:       nil,
+		BgWorkers:      nil,
+		AttrGroupTypes: make(map[string]*AttrGroupConfig),
 	}
 }
 
@@ -146,6 +167,10 @@ type aux struct {
 		Name   string                 `yaml:"name"`
 		Config map[string]interface{} `yaml:"config"`
 	} `yaml:"bgworkers"`
+	AttrGroupTypes map[string]struct {
+		Columns    map[string]string `yaml:"columns"`
+		RecordType string            `yaml:"record_type"`
+	} `yaml:"attrgroup_types"`
 }
 
 func ParseConfig(data []byte) (*MktsConfig, error) {
@@ -292,5 +317,56 @@ func ParseConfig(data []byte) (*MktsConfig, error) {
 		m.BgWorkers = append(m.BgWorkers, bgWorkerSetting)
 	}
 
+	// Parse and validate attrgroup_types
+	for name, agCfg := range a.AttrGroupTypes {
+		if len(agCfg.Columns) == 0 {
+			return nil, fmt.Errorf("attrgroup_types[%s]: must define at least one column", name)
+		}
+
+		// Validate column types
+		for colName, colType := range agCfg.Columns {
+			if !isValidElementTypeName(colType) {
+				return nil, fmt.Errorf("attrgroup_types[%s].columns[%s]: invalid type %q", name, colName, colType)
+			}
+		}
+
+		// Validate record type
+		recordType := agCfg.RecordType
+		if recordType == "" {
+			recordType = "fixed" // default
+		}
+		recordType = strings.ToLower(recordType)
+		if recordType != "fixed" && recordType != "variable" {
+			return nil, fmt.Errorf("attrgroup_types[%s].record_type: must be 'fixed' or 'variable', got %q", name, agCfg.RecordType)
+		}
+
+		m.AttrGroupTypes[name] = &AttrGroupConfig{
+			Columns:    agCfg.Columns,
+			RecordType: recordType,
+		}
+	}
+
 	return m, nil
+}
+
+// validElementTypeNames contains all valid type names for column definitions.
+// This must match the names in utils/io/datatypes.go attributeMap.
+var validElementTypeNames = map[string]bool{
+	"float32":  true,
+	"int32":    true,
+	"float64":  true,
+	"int64":    true,
+	"byte":     true,
+	"bool":     true,
+	"int16":    true,
+	"uint8":    true,
+	"uint16":   true,
+	"uint32":   true,
+	"uint64":   true,
+	"string16": true,
+}
+
+// isValidElementTypeName checks if a type name is valid for column definitions.
+func isValidElementTypeName(name string) bool {
+	return validElementTypeNames[strings.ToLower(name)]
 }

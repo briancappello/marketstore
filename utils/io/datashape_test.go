@@ -38,7 +38,7 @@ func TestDSVSerialize(t *testing.T) {
 
 			serialized, err := io.DSVToBytes(dsv)
 			if err != nil {
-				t.Fatalf("failed to serialize DSV: " + err.Error())
+				t.Fatalf("failed to serialize DSV: %v", err)
 			}
 
 			deserialized, _ := io.DSVFromBytes(serialized)

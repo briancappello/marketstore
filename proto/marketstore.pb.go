@@ -359,12 +359,14 @@ func (x *NumpyDataset) GetDataShapes() []*DataShape {
 }
 
 type CreateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"` // a time bucket key
-	DataShapes    []*DataShape           `protobuf:"bytes,2,rep,name=data_shapes,json=dataShapes,proto3" json:"data_shapes,omitempty"`
-	RowType       string                 `protobuf:"bytes,3,opt,name=row_type,json=rowType,proto3" json:"row_type,omitempty"` // fixed or variable
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Key        string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"` // a time bucket key
+	DataShapes []*DataShape           `protobuf:"bytes,2,rep,name=data_shapes,json=dataShapes,proto3" json:"data_shapes,omitempty"`
+	RowType    string                 `protobuf:"bytes,3,opt,name=row_type,json=rowType,proto3" json:"row_type,omitempty"` // fixed or variable
+	// If true, the request schema overrides any configured attrgroup_types schema.
+	OverrideSchema bool `protobuf:"varint,4,opt,name=override_schema,json=overrideSchema,proto3" json:"override_schema,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CreateRequest) Reset() {
@@ -416,6 +418,13 @@ func (x *CreateRequest) GetRowType() string {
 		return x.RowType
 	}
 	return ""
+}
+
+func (x *CreateRequest) GetOverrideSchema() bool {
+	if x != nil {
+		return x.OverrideSchema
+	}
+	return false
 }
 
 type MultiCreateRequest struct {
