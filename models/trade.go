@@ -137,7 +137,7 @@ func (model *Trade) GetCs() *io.ColumnSeries {
 // BuildCsm prepares an io.ColumnSeriesMap object and populates it's columns with the contents of the internal buffers
 // it is included in the .Write() method
 // so use only when you need to work with the ColumnSeriesMap before writing it to disk.
-func (model *Trade) buildCsm() *io.ColumnSeriesMap {
+func (model *Trade) BuildCsm() *io.ColumnSeriesMap {
 	csm := io.NewColumnSeriesMap()
 	csm.AddColumnSeries(*model.Tbk, model.GetCs())
 	return &csm
@@ -146,7 +146,7 @@ func (model *Trade) buildCsm() *io.ColumnSeriesMap {
 // Write persist the internal buffers to disk.
 func (model *Trade) Write() error {
 	start := time.Now()
-	csm := model.buildCsm()
+	csm := model.BuildCsm()
 	err := executor.WriteCSM(*csm, true)
 	model.WriteTime = time.Since(start)
 	if err != nil {

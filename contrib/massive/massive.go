@@ -322,7 +322,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 				}
 				log.Info("[massive] %s backfilling trades from %s to %s",
 					symbol, decision.start.Format(time.RFC3339), endExtended.Format(time.RFC3339))
-				if err := backfill.Trades(mf.ctx, client, symbol, decision.start, endExtended, batchSize, writerWP); err != nil {
+				if err := backfill.Trades(mf.ctx, client, symbol, decision.start, endExtended, batchSize, writerWP, nil); err != nil {
 					if err == context.Canceled {
 						writerWP.CloseAndWait()
 						return err
@@ -337,7 +337,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 				}
 				log.Info("[massive] %s backfilling quotes from %s to %s",
 					symbol, decision.start.Format(time.RFC3339), endExtended.Format(time.RFC3339))
-				if err := backfill.Quotes(mf.ctx, client, symbol, decision.start, endExtended, batchSize, writerWP); err != nil {
+				if err := backfill.Quotes(mf.ctx, client, symbol, decision.start, endExtended, batchSize, writerWP, nil); err != nil {
 					if err == context.Canceled {
 						writerWP.CloseAndWait()
 						return err
@@ -359,7 +359,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 				}
 				log.Info("[massive] %s backfilling %s from %s to %s",
 					symbol, tf, decision.start.Format(time.RFC3339), end.Format(time.RFC3339))
-				if err := backfill.Bars(mf.ctx, client, symbol, tf, decision.start, end, batchSize, adjusted, writerWP); err != nil {
+				if err := backfill.Bars(mf.ctx, client, symbol, tf, decision.start, end, batchSize, adjusted, writerWP, nil); err != nil {
 					if err == context.Canceled {
 						writerWP.CloseAndWait()
 						return err

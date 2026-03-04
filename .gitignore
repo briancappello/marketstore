@@ -9,6 +9,7 @@ coverage.txt
 *.pyc
 mktsdb/
 build/
+backfiller
 marketstore
 marketstore_test
 *.exe

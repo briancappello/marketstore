@@ -11,9 +11,11 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
+	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/models"
 	modelsenum "github.com/alpacahq/marketstore/v4/models/enum"
 	"github.com/alpacahq/marketstore/v4/utils"
+	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
@@ -118,6 +120,7 @@ func splitDateRange(from, to time.Time, timeframe string) []dateRange {
 // bar frequency (e.g., "1Min", "5Min", "1H", "1D").
 // Date ranges are split into chunks and fetched in parallel for improved throughput.
 // Returns context.Canceled if the context is cancelled during the operation.
+// If writer is nil, data is written directly to disk via executor.WriteCSM.
 func Bars(
 	ctx context.Context,
 	client *http.Client,
@@ -127,6 +130,7 @@ func Bars(
 	limit int,
 	adjusted bool,
 	writerWP *worker.Pool,
+	writer Writer,
 ) error {
 	// Check for cancellation at start.
 	select {
@@ -154,7 +158,7 @@ func Bars(
 	if len(chunks) == 1 {
 		// Single chunk: fetch directly without parallelization overhead.
 		return fetchAndWriteBars(ctx, client, symbol, timeframe, apiTimespan, multiplier,
-			from, to, limit, adjusted, writerWP)
+			from, to, limit, adjusted, writerWP, writer)
 	}
 
 	// Fetch chunks in parallel.
@@ -254,12 +258,20 @@ func Bars(
 	}
 
 	writerWP.Do(func() {
-		if err := model.Write(); err != nil {
+		if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol); err != nil {
 			log.Error("[massive] failed to write %s bars for %s: %v", timeframe, symbol, err)
 		}
 	})
 
 	return nil
+}
+
+// writeModel writes a model's CSM using the provided writer, or falls back to direct disk write.
+func writeModel(csm *io.ColumnSeriesMap, writer Writer, dataType, symbol string) error {
+	if writer != nil {
+		return writer.WriteCSM(*csm, false)
+	}
+	return executor.WriteCSM(*csm, false)
 }
 
 // fetchAndWriteBars is a helper for single-chunk bar fetches (no parallelization).
@@ -272,6 +284,7 @@ func fetchAndWriteBars(
 	limit int,
 	adjusted bool,
 	writerWP *worker.Pool,
+	writer Writer,
 ) error {
 	// Check for cancellation.
 	select {
@@ -306,7 +319,7 @@ func fetchAndWriteBars(
 	}
 
 	writerWP.Do(func() {
-		if err := model.Write(); err != nil {
+		if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol); err != nil {
 			log.Error("[massive] failed to write %s bars for %s: %v", timeframe, symbol, err)
 		}
 	})
@@ -356,6 +369,7 @@ func timeframeToAPI(timeframe string) (apiTimespan string, multiplier int, err e
 // for each market day in the from/to range and writes them to MarketStore.
 // Days are fetched in parallel for improved throughput on I/O-bound workloads.
 // Returns context.Canceled if the context is cancelled during the operation.
+// If writer is nil, data is written directly to disk via executor.WriteCSM.
 func Trades(
 	ctx context.Context,
 	client *http.Client,
@@ -363,6 +377,7 @@ func Trades(
 	from, to time.Time,
 	limit int,
 	writerWP *worker.Pool,
+	writer Writer,
 ) error {
 	// Check for cancellation at start.
 	select {
@@ -486,7 +501,7 @@ func Trades(
 	}
 
 	writerWP.Do(func() {
-		if err := model.Write(); err != nil {
+		if err := writeModel(model.BuildCsm(), writer, "trades", symbol); err != nil {
 			log.Error("[massive] failed to write trades for %s: %v", symbol, err)
 		}
 	})
@@ -498,6 +513,7 @@ func Trades(
 // for each market day in the from/to range and writes them to MarketStore.
 // Days are fetched in parallel for improved throughput on I/O-bound workloads.
 // Returns context.Canceled if the context is cancelled during the operation.
+// If writer is nil, data is written directly to disk via executor.WriteCSM.
 func Quotes(
 	ctx context.Context,
 	client *http.Client,
@@ -505,6 +521,7 @@ func Quotes(
 	from, to time.Time,
 	limit int,
 	writerWP *worker.Pool,
+	writer Writer,
 ) error {
 	// Check for cancellation at start.
 	select {
@@ -626,7 +643,7 @@ func Quotes(
 	}
 
 	writerWP.Do(func() {
-		if err := model.Write(); err != nil {
+		if err := writeModel(model.BuildCsm(), writer, "quotes", symbol); err != nil {
 			log.Error("[massive] failed to write quotes for %s: %v", symbol, err)
 		}
 	})

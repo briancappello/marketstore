@@ -80,6 +80,7 @@ var (
 	batchSize      int
 	adjusted       bool
 	configFilePath string
+	grpcAddress    string
 
 	// symbolInfos holds resolved symbols with optional listing dates.
 	// Populated either from database (symbols_dsn) or API (glob pattern).
@@ -108,13 +109,54 @@ func init() {
 		"request split-adjusted price data")
 	flag.StringVar(&configFilePath, "config", "mkts.yml",
 		"path to the mkts.yml config file (default: mkts.yml in current directory)")
+	flag.StringVar(&grpcAddress, "grpc", "",
+		"gRPC server address (e.g., localhost:5995). If set, writes data via RPC instead of direct disk access.")
 
 	flag.Parse()
 }
 
 func main() {
-	// Load and parse config file first to get defaults.
-	instanceMeta, massiveConfig := initWriter()
+	// Set up context with signal handling for graceful shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle Ctrl+C and SIGTERM for graceful shutdown.
+	// First signal initiates graceful shutdown, second signal forces exit.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		log.Info("[massive] received signal %v, initiating shutdown...", sig)
+		cancel()
+		// Wait for second signal to force exit.
+		sig = <-sigChan
+		log.Info("[massive] received second signal %v, forcing exit", sig)
+		os.Exit(1)
+	}()
+
+	// Initialize writer based on mode (RPC vs direct disk).
+	var writer backfill.Writer
+	var instanceMeta *executor.InstanceMetadata
+	var massiveConfig *massiveconfig.FetcherConfig
+
+	if grpcAddress != "" {
+		// RPC mode: connect to running MarketStore server.
+		log.Info("[massive] using gRPC mode, connecting to %s", grpcAddress)
+		rpcWriter, err := backfill.NewRPCWriter(ctx, grpcAddress)
+		if err != nil {
+			log.Error("[massive] failed to connect to gRPC server: %v", err)
+			os.Exit(1)
+		}
+		defer rpcWriter.Close()
+		writer = rpcWriter
+
+		// Still load config for defaults (symbols, api_key, etc.)
+		massiveConfig = loadConfigOnly()
+	} else {
+		// Direct disk mode: initialize executor.
+		instanceMeta, massiveConfig = initWriter()
+		writer = &backfill.DirectWriter{}
+	}
 
 	// Apply config defaults for flags not explicitly set.
 	applyConfigDefaults(massiveConfig)
@@ -173,24 +215,6 @@ func main() {
 		log.Info("[massive] selected %d symbols", len(symbolInfos))
 	}
 
-	// Set up context with signal handling for graceful shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle Ctrl+C and SIGTERM for graceful shutdown.
-	// First signal initiates graceful shutdown, second signal forces exit.
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigChan
-		log.Info("[massive] received signal %v, initiating shutdown...", sig)
-		cancel()
-		// Wait for second signal to force exit.
-		sig = <-sigChan
-		log.Info("[massive] received second signal %v, forcing exit", sig)
-		os.Exit(1)
-	}()
-
 	startTime := time.Now()
 
 	// Process each key in fromDates. Keys are either timeframes (e.g., "1Min", "1D")
@@ -200,7 +224,9 @@ func main() {
 		select {
 		case <-ctx.Done():
 			log.Info("[massive] backfill cancelled")
-			instanceMeta.WALFile.Shutdown()
+			if instanceMeta != nil {
+				instanceMeta.WALFile.Shutdown()
+			}
 			os.Exit(0)
 		default:
 		}
@@ -214,7 +240,7 @@ func main() {
 		switch key {
 		case "trades":
 			runBackfill(ctx, "trades", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
-				if err := backfill.Trades(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP); err != nil {
+				if err := backfill.Trades(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP, writer); err != nil {
 					if err == context.Canceled {
 						return
 					}
@@ -223,7 +249,7 @@ func main() {
 			})
 		case "quotes":
 			runBackfill(ctx, "quotes", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
-				if err := backfill.Quotes(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP); err != nil {
+				if err := backfill.Quotes(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP, writer); err != nil {
 					if err == context.Canceled {
 						return
 					}
@@ -234,7 +260,7 @@ func main() {
 			// Assume it's a bar timeframe (e.g., "1Min", "5Min", "1H", "1D").
 			timeframe := key
 			runBackfill(ctx, timeframe+" bars", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
-				if err := backfill.Bars(ctx, client, symInfo.Symbol, timeframe, effectiveStart, end, batchSize, adjusted, writerWP); err != nil {
+				if err := backfill.Bars(ctx, client, symInfo.Symbol, timeframe, effectiveStart, end, batchSize, adjusted, writerWP, writer); err != nil {
 					if err == context.Canceled {
 						return
 					}
@@ -244,7 +270,9 @@ func main() {
 		}
 	}
 
-	instanceMeta.WALFile.Shutdown()
+	if instanceMeta != nil {
+		instanceMeta.WALFile.Shutdown()
+	}
 	log.Info("[massive] backfill complete in %s", time.Since(startTime))
 }
 
@@ -358,11 +386,23 @@ func runBackfill(ctx context.Context, name string, symbols []massiveconfig.Symbo
 	writerWP.CloseAndWait()
 }
 
-// resolveSymbolInfos resolves symbols from database (if configured) or API (glob pattern).
+// resolveSymbolInfos resolves symbols from CLI flag, database, or API.
+// Priority: CLI -symbols flag > database (symbols_dsn) > API glob pattern.
 // Database resolution returns symbols with optional listing dates.
 // API resolution returns symbols without listing dates.
 func resolveSymbolInfos(client *http.Client, cfg *massiveconfig.FetcherConfig) []massiveconfig.SymbolInfo {
-	// Priority 1: Database query (with potential listing dates).
+	// Priority 1: CLI -symbols flag (explicit override).
+	if symbols != "" {
+		symbolList := resolveSymbolsFromAPI(client, symbols)
+		// Convert to SymbolInfo without listing dates.
+		result := make([]massiveconfig.SymbolInfo, len(symbolList))
+		for i, sym := range symbolList {
+			result[i] = massiveconfig.SymbolInfo{Symbol: sym}
+		}
+		return result
+	}
+
+	// Priority 2: Database query (with potential listing dates).
 	if cfg != nil && cfg.SymbolsDSN != "" {
 		if cfg.SymbolsQuery == "" {
 			log.Error("[massive] symbols_query is required when symbols_dsn is set")
@@ -377,10 +417,14 @@ func resolveSymbolInfos(client *http.Client, cfg *massiveconfig.FetcherConfig) [
 		return infos
 	}
 
-	// Priority 2: CLI -symbols flag or config symbols (via glob pattern against API).
-	pattern := symbols
-	if pattern == "" {
-		pattern = "*"
+	// Priority 3: Config symbols or wildcard (via glob pattern against API).
+	pattern := "*"
+	if cfg != nil && len(cfg.Symbols) > 0 {
+		if len(cfg.Symbols) == 1 {
+			pattern = cfg.Symbols[0]
+		} else {
+			pattern = "{" + strings.Join(cfg.Symbols, ",") + "}"
+		}
 	}
 	symbolList := resolveSymbolsFromAPI(client, pattern)
 
@@ -420,6 +464,24 @@ func resolveSymbolsFromAPI(client *http.Client, pattern string) []string {
 
 	sort.Strings(result)
 	return result
+}
+
+// loadConfigOnly loads the config file to extract massive bgworker settings
+// without initializing the disk writer. Used in RPC mode.
+func loadConfigOnly() *massiveconfig.FetcherConfig {
+	data, err := os.ReadFile(configFilePath)
+	if err != nil {
+		log.Error("[massive] failed to read config: %v", err)
+		os.Exit(1)
+	}
+
+	config, err := utils.ParseConfig(data)
+	if err != nil {
+		log.Error("[massive] failed to parse config: %v", err)
+		os.Exit(1)
+	}
+
+	return findMassiveBgWorkerConfig(config)
 }
 
 func initWriter() (*executor.InstanceMetadata, *massiveconfig.FetcherConfig) {
