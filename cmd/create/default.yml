@@ -40,14 +40,6 @@ wal_rotate_interval: 5
 #     name: GdaxFetcher
 #     config:
 #       query_start: "2017-09-01 00:00"
-#   - module: polygon.so
-#         name: Polygon
-#         config:
-#             api_key: your_api_key
-#             base_url: https://api.polygon.io
-#             symbols:
-#                 - AAPL
-#                 - SPY
 #   - module: bitmexfeeder.so
 #     name: BitmexFeeder
 #     config:

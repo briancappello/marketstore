@@ -7,8 +7,6 @@ and optionally backfills historical data from the
 It runs as a goroutine behind the MarketStore process and writes incoming bars,
 trades, and quotes directly to disk.
 
-This plugin replaces the legacy Polygon fetcher (`contrib/polygon`).
-
 ## Configuration
 
 `massive.so` is built as a plugin, so you configure it in the MarketStore

@@ -106,8 +106,8 @@ func init() {
 		"override Massive API base URL (default from config or https://api.massive.com)")
 	flag.BoolVar(&adjusted, "adjusted", true,
 		"request split-adjusted price data")
-	flag.StringVar(&configFilePath, "config", "/etc/mkts.yml",
-		"path to the mkts.yml config file")
+	flag.StringVar(&configFilePath, "config", "mkts.yml",
+		"path to the mkts.yml config file (default: mkts.yml in current directory)")
 
 	flag.Parse()
 }
@@ -178,12 +178,17 @@ func main() {
 	defer cancel()
 
 	// Handle Ctrl+C and SIGTERM for graceful shutdown.
+	// First signal initiates graceful shutdown, second signal forces exit.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigChan
 		log.Info("[massive] received signal %v, initiating shutdown...", sig)
 		cancel()
+		// Wait for second signal to force exit.
+		sig = <-sigChan
+		log.Info("[massive] received second signal %v, forcing exit", sig)
+		os.Exit(1)
 	}()
 
 	startTime := time.Now()
@@ -439,6 +444,7 @@ func initWriter() (*executor.InstanceMetadata, *massiveconfig.FetcherConfig) {
 	cfg := utils.NewDefaultConfig(rootDir)
 	cfg.WALRotateInterval = config.WALRotateInterval
 	cfg.WALBypass = true
+	cfg.BackgroundSync = false
 	c := di.NewContainer(cfg)
 
 	// Load ondiskagg triggers if configured.
