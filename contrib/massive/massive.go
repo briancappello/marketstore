@@ -153,7 +153,8 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 }
 
 // Run starts the Massive data fetcher. If query_start is configured, it first
-// backfills historical data from the REST API, then starts WebSocket streaming.
+// starts WebSocket streaming immediately, then backfills historical data concurrently.
+// This ensures no real-time data is missed even during long backfills.
 func (mf *MassiveFetcher) Run() {
 	api.SetAPIKey(mf.config.APIKey)
 
@@ -161,25 +162,28 @@ func (mf *MassiveFetcher) Run() {
 		api.SetBaseURL(mf.config.BaseURL)
 	}
 
-	// Run backfill if query_start is set and backfill is not disabled.
+	// Start WebSocket streaming immediately to avoid missing real-time data.
+	mf.startStreaming()
+
+	// Run backfill concurrently if query_start is set and backfill is not disabled.
+	// Any overlap with streaming data is harmless - duplicate writes are idempotent.
 	if len(mf.config.QueryStart) > 0 {
 		if utils.InstanceConfig.NoBackfill {
 			log.Info("[massive] backfill disabled via --no-backfill flag, skipping")
 		} else if err := mf.runBackfill(); err != nil {
 			log.Info("[massive] backfill stopped: %v", err)
-			return
 		}
 	}
 
-	// Check if context was cancelled during backfill.
-	select {
-	case <-mf.ctx.Done():
-		log.Info("[massive] shutdown requested, skipping WebSocket streaming")
-		return
-	default:
-	}
+	// Wait for context cancellation.
+	<-mf.ctx.Done()
+	log.Info("[massive] shutdown requested, waiting for goroutines to finish...")
+	mf.wg.Wait()
+	log.Info("[massive] shutdown complete")
+}
 
-	// Start WebSocket streaming.
+// startStreaming launches WebSocket streaming goroutines for all configured data types.
+func (mf *MassiveFetcher) startStreaming() {
 	wsServer := mf.config.WSServer
 	if wsServer == "" {
 		wsServer = defaultWSServer
@@ -221,12 +225,6 @@ func (mf *MassiveFetcher) Run() {
 			}()
 		}
 	}
-
-	// Wait for context cancellation.
-	<-mf.ctx.Done()
-	log.Info("[massive] shutdown requested, waiting for goroutines to finish...")
-	mf.wg.Wait()
-	log.Info("[massive] shutdown complete")
 }
 
 // Shutdown cancels the context and stops all background operations.

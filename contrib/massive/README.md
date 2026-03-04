@@ -130,10 +130,14 @@ python ../fin/fin/ws/data_server.py
 
 ### Automatic (in-process)
 
-Set `query_start` in the plugin config. On startup, the plugin backfills
-historical data for all configured symbols from `query_start` to now, then
-starts streaming. Note: wildcard (`*`) symbols are not supported for
-in-process backfill - use the standalone backfiller CLI instead.
+Set `query_start` in the plugin config. On startup, the plugin starts
+WebSocket streaming immediately, then backfills historical data concurrently
+for all configured symbols from `query_start` to now. This ensures no
+real-time data is missed even during long backfills. Any overlap between
+backfill and streaming data is harmless since duplicate writes are idempotent.
+
+Note: wildcard (`*`) symbols are not supported for in-process backfill - use
+the standalone backfiller CLI instead.
 
 ### Standalone CLI
 
