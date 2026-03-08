@@ -51,6 +51,10 @@ var (
 	configFilePath string
 	// noBackfill disables automatic backfill on startup for background workers.
 	noBackfill bool
+	// listenPort overrides the listen_port from the config file.
+	listenPort string
+	// grpcListenPort overrides the grpc_listen_port from the config file.
+	grpcListenPort string
 )
 
 // nolint:gochecknoinits // cobra's standard way to initialize flags
@@ -58,6 +62,8 @@ func init() {
 	utils.InstanceConfig.StartTime = time.Now()
 	Cmd.Flags().StringVarP(&configFilePath, "config", "c", defaultConfigFilePath, configDesc)
 	Cmd.Flags().BoolVar(&noBackfill, "no-backfill", false, "disable automatic backfill on startup for background workers")
+	Cmd.Flags().StringVar(&listenPort, "listen-port", "", "override the listen_port defined in the config file")
+	Cmd.Flags().StringVar(&grpcListenPort, "grpc-listen-port", "", "override the grpc_listen_port defined in the config file")
 }
 
 // executeStart implements the start command.
@@ -85,6 +91,23 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	}
 	// Apply CLI flags that override config file settings.
 	config.NoBackfill = noBackfill
+
+	if cmd.Flags().Changed("listen-port") {
+		config.ListenURL = replacePort(config.ListenURL, listenPort)
+		log.Info("overriding listen port from CLI flag: %v", config.ListenURL)
+	}
+
+	if cmd.Flags().Changed("grpc-listen-port") {
+		if config.GRPCListenURL != "" {
+			config.GRPCListenURL = replacePort(config.GRPCListenURL, grpcListenPort)
+		} else {
+			// GRPCListenURL was not set in config; construct it using the same
+			// host as the main listen URL.
+			config.GRPCListenURL = replacePort(config.ListenURL, grpcListenPort)
+		}
+		log.Info("overriding gRPC listen port from CLI flag: %v", config.GRPCListenURL)
+	}
+
 	utils.InstanceConfig = *config // TODO: remove the singleton instance
 
 	// New gRPC stream server for replication.
@@ -209,6 +232,16 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// replacePort replaces the port in a host:port address string, preserving the host.
+func replacePort(hostPort, newPort string) string {
+	host, _, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		// If parsing fails, treat the whole thing as host-only.
+		return net.JoinHostPort(hostPort, newPort)
+	}
+	return net.JoinHostPort(host, newPort)
 }
 
 func shutdown() {
