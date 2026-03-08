@@ -18,7 +18,8 @@ mod tests {
     #[test]
     fn test_subscribe_message_serialization() {
         let message = crate::models::SubscribeMessage {
-            streams: vec![
+            action: "subscribe".to_string(),
+            tbks: vec![
                 "BTCUSDT/1Min/OHLCV".to_string(),
                 "ETHUSDT/1Min/OHLCV".to_string(),
             ],
@@ -27,7 +28,8 @@ mod tests {
         let msgpack_data = rmp_serde::to_vec(&message).unwrap();
         let deserialized: crate::models::SubscribeMessage = rmp_serde::from_slice(&msgpack_data).unwrap();
         
-        assert_eq!(message.streams, deserialized.streams);
+        assert_eq!(message.action, deserialized.action);
+        assert_eq!(message.tbks, deserialized.tbks);
     }
 
     #[test]

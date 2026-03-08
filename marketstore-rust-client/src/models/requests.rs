@@ -1,5 +1,5 @@
 use crate::error::{MarketStoreError, Result};
-use crate::models::{OHLCVData, DataShape};
+use crate::models::{DataShape, OHLCVData};
 
 #[derive(Debug, Clone)]
 pub struct QueryRequest {
@@ -33,48 +33,48 @@ impl QueryRequestBuilder {
         self.symbol = Some(symbol.to_string());
         self
     }
-    
+
     pub fn timeframe(mut self, timeframe: &str) -> Self {
         self.timeframe = Some(timeframe.to_string());
         self
     }
-    
+
     pub fn attr_group(mut self, attr_group: &str) -> Self {
         self.attr_group = Some(attr_group.to_string());
         self
     }
-    
+
     pub fn start_time(mut self, start_time: i64) -> Self {
         self.start_time = Some(start_time);
         self
     }
-    
+
     pub fn end_time(mut self, end_time: i64) -> Self {
         self.end_time = Some(end_time);
         self
     }
-    
+
     pub fn limit(mut self, limit: i32) -> Self {
         self.limit = Some(limit);
         self
     }
-    
+
     pub fn columns(mut self, columns: Vec<String>) -> Self {
         self.columns = columns;
         self
     }
-    
+
     pub fn build(self) -> Result<QueryRequest> {
-        let symbol = self.symbol.ok_or_else(|| {
-            MarketStoreError::InvalidData("Symbol is required".to_string())
-        })?;
-        let timeframe = self.timeframe.ok_or_else(|| {
-            MarketStoreError::InvalidData("Timeframe is required".to_string())
-        })?;
+        let symbol = self
+            .symbol
+            .ok_or_else(|| MarketStoreError::InvalidData("Symbol is required".to_string()))?;
+        let timeframe = self
+            .timeframe
+            .ok_or_else(|| MarketStoreError::InvalidData("Timeframe is required".to_string()))?;
         let attr_group = self.attr_group.ok_or_else(|| {
             MarketStoreError::InvalidData("Attribute group is required".to_string())
         })?;
-        
+
         Ok(QueryRequest {
             destination: format!("{}/{}/{}", symbol, timeframe, attr_group),
             epoch_start: self.start_time,
@@ -114,7 +114,12 @@ pub struct CreateRequest {
 }
 
 impl CreateRequest {
-    pub fn new(symbol: &str, timeframe: &str, attr_group: &str, data_shapes: Vec<DataShape>) -> Self {
+    pub fn new(
+        symbol: &str,
+        timeframe: &str,
+        attr_group: &str,
+        data_shapes: Vec<DataShape>,
+    ) -> Self {
         Self {
             symbol: symbol.to_string(),
             timeframe: timeframe.to_string(),
@@ -143,21 +148,21 @@ impl DestroyRequest {
 
 #[derive(Debug, Clone)]
 pub struct StreamSubscription {
-    pub streams: Vec<String>,
+    pub tbks: Vec<String>,
 }
 
 impl StreamSubscription {
     pub fn new() -> Self {
-        Self { streams: Vec::new() }
+        Self { tbks: Vec::new() }
     }
-    
+
     pub fn add_stream(mut self, stream: &str) -> Self {
-        self.streams.push(stream.to_string());
+        self.tbks.push(stream.to_string());
         self
     }
-    
+
     pub fn add_streams(mut self, streams: Vec<String>) -> Self {
-        self.streams.extend(streams);
+        self.tbks.extend(streams);
         self
     }
-} 
+}

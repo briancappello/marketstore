@@ -19,7 +19,8 @@ impl WebSocketClient {
     
     pub async fn subscribe(&mut self, subscription: StreamSubscription) -> Result<()> {
         let message = SubscribeMessage {
-            streams: subscription.streams,
+            action: "subscribe".to_string(),
+            tbks: subscription.tbks,
         };
         
         let msgpack_data = rmp_serde::to_vec(&message)?;

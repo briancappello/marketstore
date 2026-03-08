@@ -14,10 +14,10 @@ stream.so comes with the server by default, so you can simply configure it
 in MarketStore configuration file.  
 
 ### Options
-Name | Type | Default | Description
---- | --- | --- | ---
-on | string | none | The file glob pattern to match on
-filter | string | none | Filters pushes to '1D' timeframes and above based on market hours. Only 'nasdaq' is supported at this time.
+| Name   | Type   | Default | Description                                                                                                 |
+|--------|--------|---------|-------------------------------------------------------------------------------------------------------------|
+| on     | string | none    | The file glob pattern to match on                                                                           |
+| filter | string | none    | Filters pushes to '1D' timeframes and above based on market hours. Only 'nasdaq' is supported at this time. | 
 
 ### Example
 Add the following to your config file:
@@ -48,9 +48,9 @@ Subscribing with the included GoLang MarketStore client is as simple as:
 ```
 handler := func(pl stream.Payload) error { fmt.Println(string(pl.Data)) }
 cancelC := make(chan struct{})
-streams := []string{"BTC-USD/*/*", "ETH-USD/1Min/OHLCV"}
+tbks := []string{"BTC-USD/*/*", "ETH-USD/1Min/OHLCV"}
 
-done, err := client.Subscribe(handler, cancelC, streams)
+done, err := client.Subscribe(handler, cancelC, tbks...)
 
 if err != nil {
     panic(err)
@@ -64,15 +64,15 @@ as follows.
 
 ```
 <Connection Made on "/ws">
-Client: {"streams": ["BTC-USD/*/*", "ETH-USD/1Min/OHLCV"]}
-Server: {"streams": ["BTC-USD/*/*", "ETH-USD/1Min/OHLCV"]}
-Server: {"key": "ETH-USD/1Min/OHLCV", "data": {'Low': 1088.54, 'Close': 1088.54, 'Volume': 23.002666809999997, 'Epoch': 1516368000, 'Open': 1088.54, 'High': 1088.55}}
-Server: {'key': 'BTC/1Min/OHLCV', 'data': {'Epoch': 1516386000, 'Open': 11301.01, 'High': 11301.01, 'Low': 11300.0, 'Close': 11301.01, 'Volume': 28.9793876}}
+Client: {"action": "subscribe", "tbks": ["BTC-USD/*/*", "ETH-USD/1Min/OHLCV"]}
+Server: {"action": "subscribe", "tbks": ["BTC-USD/*/*", "ETH-USD/1Min/OHLCV"]}
+Server: {"key": "ETH-USD/1Min/OHLCV", "data": {"Low": 1088.54, "Close": 1088.54, "Volume": 23.002666809999997, "Epoch": 1516368000, "Open": 1088.54, "High": 1088.55}}
+Server: {"key": "BTC/1Min/OHLCV", "data": {"Epoch": 1516386000, "Open": 11301.01, "High": 11301.01, "Low": 11300.0, "Close": 11301.01, "Volume": 28.9793876}}
 ...
 ```
 
-If an error occurs during the "streams" request (i.e. the streams format is not
-valid), it will return error as below.
+If an error occurs during the subscribe request (i.e. the stream format is not
+valid or the action is unrecognized), the server will return an error:
 
 ```
 Server: {"error": "error message for details"}

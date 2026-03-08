@@ -57,7 +57,7 @@ func TestStream(t *testing.T) {
 		streamCount[key] = 0
 	}
 
-	buf, err := msgpack.Marshal(stream.SubscribeMessage{Streams: streamKeys})
+	buf, err := msgpack.Marshal(stream.SubscribeMessage{Action: "subscribe", TBKs: streamKeys})
 	assert.Nil(t, err)
 
 	assert.Nil(t, conn.WriteMessage(websocket.BinaryMessage, buf))
@@ -65,11 +65,12 @@ func TestStream(t *testing.T) {
 	_, buf, err = conn.ReadMessage()
 	assert.Nil(t, err)
 
-	subRespMsg := &stream.SubscribeMessage{}
+	subRespMsg := &stream.SubscribedMessage{}
 	err = msgpack.Unmarshal(buf, subRespMsg)
 	assert.Nil(t, err)
 
-	assert.Equal(t, len(subRespMsg.Streams), len(streamKeys))
+	assert.Equal(t, "subscribed", subRespMsg.Action)
+	assert.Equal(t, len(subRespMsg.TBKs), len(streamKeys))
 
 	bufC := make(chan []byte, 1)
 	go readRoutine(conn, bufC)

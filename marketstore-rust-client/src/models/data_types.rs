@@ -73,10 +73,11 @@ pub struct StreamPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeMessage {
-    pub streams: Vec<String>,
+    pub action: String,
+    pub tbks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorMessage {
     pub error: String,
-} 
+}

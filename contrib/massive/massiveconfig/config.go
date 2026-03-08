@@ -59,11 +59,6 @@ type FetcherConfig struct {
 	// BackfillAdjusted controls whether backfilled bars are split-adjusted.
 	// Defaults to true.
 	BackfillAdjusted *bool `json:"backfill_adjusted"`
-	// WSQueryStart is an optional date (YYYY-MM-DD) sent in the WebSocket
-	// subscribe message to request historical replay from the server.
-	// This is only sent when the ws_server host is localhost or 127.0.0.1.
-	// If empty, the stream starts from real-time.
-	WSQueryStart string `json:"ws_query_start"`
 	// SymbolsDSN is an optional PostgreSQL connection string for fetching symbols
 	// dynamically at startup. If set, symbols are queried from the database and
 	// the static Symbols field is ignored.

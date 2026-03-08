@@ -13,7 +13,6 @@
 // A plugin can push a message by calling `Push`.  Each message data should be
 // enclosed by the structure with "key" (TimeBucketKey string) and "data" (opaque)
 // fields.
-//
 package stream
 
 import (
@@ -103,7 +102,15 @@ func (s *Subscriber) Subscribed(itemKey string) bool {
 // SubscribeMessage is an inbound message for the client
 // to subscribe to streams.
 type SubscribeMessage struct {
-	Streams []string `msgpack:"streams"`
+	Action string   `msgpack:"action"`
+	TBKs   []string `msgpack:"tbks"`
+}
+
+// SubscribedMessage is the ack sent back to the client after a
+// successful subscribe. The Action field is always "subscribed".
+type SubscribedMessage struct {
+	Action string   `msgpack:"action"`
+	TBKs   []string `msgpack:"tbks"`
 }
 
 // ErrorMessage is used to report errors when a client
@@ -119,23 +126,26 @@ func (s *Subscriber) handleOutbound(buf []byte) error {
 	return s.c.WriteMessage(websocket.BinaryMessage, buf)
 }
 
-func (s *Subscriber) handleInbound(msg SubscribeMessage) error {
-	if len(msg.Streams) > 0 {
+func (s *Subscriber) handleInbound(msg SubscribeMessage) ([]string, error) {
+	if msg.Action != "subscribe" {
+		return nil, fmt.Errorf("unknown action: %q (expected \"subscribe\")", msg.Action)
+	}
+	if len(msg.TBKs) > 0 {
 		// prevents concurrent read/write of stream map
 		s.Lock()
 		defer s.Unlock()
 
 		// validate each stream before modifying the subscriber's stream map
 		m := map[string]struct{}{}
-		for _, stream := range msg.Streams {
+		for _, stream := range msg.TBKs {
 			if !validStream(stream) {
-				return fmt.Errorf("%s is an invalid stream", stream)
+				return nil, fmt.Errorf("%s is an invalid stream", stream)
 			}
 			m[stream] = struct{}{}
 		}
 		s.streams = m
 	}
-	return nil
+	return msg.TBKs, nil
 }
 
 func validStream(stream string) bool {
@@ -180,11 +190,17 @@ func (s *Subscriber) consume() {
 				log.Error("failed to unmarshal inbound stream message (%v)", err)
 				continue
 			}
-			if err := s.handleInbound(m); err != nil {
-				buf, _ = msgpack.Marshal(ErrorMessage{Error: err.Error()})
-			}
-			if err := s.handleOutbound(buf); err != nil {
-				log.Error("failed to send stream message (%v)", err)
+			tbks, inboundErr := s.handleInbound(m)
+			if inboundErr != nil {
+				errBuf, _ := msgpack.Marshal(ErrorMessage{Error: inboundErr.Error()})
+				if err := s.handleOutbound(errBuf); err != nil {
+					log.Error("failed to send stream error message (%v)", err)
+				}
+			} else {
+				ack, _ := msgpack.Marshal(SubscribedMessage{Action: "subscribed", TBKs: tbks})
+				if err := s.handleOutbound(ack); err != nil {
+					log.Error("failed to send stream subscribed ack (%v)", err)
+				}
 			}
 		case websocket.CloseMessage:
 			// Acknowledge the close frame as required by RFC 6455 (§ 5.5.1)

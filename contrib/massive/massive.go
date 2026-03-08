@@ -1,18 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
-	jsoniter "github.com/json-iterator/go"
+	jsonit "github.com/json-iterator/go"
+	massivews "github.com/massive-com/client-go/v3/websocket"
 
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
@@ -30,45 +29,34 @@ import (
 )
 
 const (
-	defaultWSServer  = "wss://socket.massive.com"
-	defaultWSPath    = "/stocks"
-	maxRecvMsgSize   = 2048000
-	pingInterval     = 10 * time.Second
-	reconnectBackoff = time.Second
-	dateFormat       = "2006-01-02"
+	dateFormat = "2006-01-02"
 
 	defaultBackfillBatchSize = 50000
 	backfillHTTPTimeout      = 30 * time.Second
 	maxConnsPerHost          = 100
 )
 
-// Prefix represents a Massive WebSocket event type prefix used for subscriptions.
-type Prefix string
-
-const (
-	// PrefixAggMinute subscribes to per-minute aggregate bars (AM.*).
-	PrefixAggMinute Prefix = "AM."
-	// PrefixAggSecond subscribes to per-second aggregate bars (A.*).
-	PrefixAggSecond Prefix = "A."
-	// PrefixTrade subscribes to tick-level trades.
-	PrefixTrade Prefix = "T."
-	// PrefixQuote subscribes to NBBO quotes.
-	PrefixQuote Prefix = "Q."
-)
-
-// wsFrequencyToPrefix maps MarketStore timeframe strings to WebSocket prefixes.
-// Only 1Min and 1Sec are supported for WebSocket streaming.
-var wsFrequencyToPrefix = map[string]Prefix{
-	"1Min": PrefixAggMinute,
-	"1Sec": PrefixAggSecond,
+// wsDataTypeToTopic maps our config data type names to upstream WebSocket topics.
+var wsDataTypeToTopic = map[string]massivews.Topic{
+	"1Min":   massivews.StocksMinAggs,
+	"1Sec":   massivews.StocksSecAggs,
+	"trades": massivews.StocksTrades,
+	"quotes": massivews.StocksQuotes,
 }
+
+// wsLogger adapts the MarketStore log package to the upstream client's Logger interface.
+type wsLogger struct{}
+
+func (l *wsLogger) Debugf(template string, args ...any) { log.Debug("[massive/ws] "+template, args...) }
+func (l *wsLogger) Infof(template string, args ...any)  { log.Info("[massive/ws] "+template, args...) }
+func (l *wsLogger) Errorf(template string, args ...any) { log.Error("[massive/ws] "+template, args...) }
 
 // Use jsoniter because it supports marshal/unmarshal of map[interface{}]interface{} type.
 // When the config file contains nested structures like query_start: {1Min: "2024-01-01"},
 // the standard "encoding/json" library cannot marshal the structure because the config
 // is parsed from a YAML file to map[string]interface{}, and nested maps become
 // map[interface{}]interface{} which encoding/json doesn't support.
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
+var jsonAPI = jsonit.ConfigCompatibleWithStandardLibrary
 
 // MassiveFetcher is a MarketStore background worker that streams
 // real-time market data from the Massive WebSocket API, with optional
@@ -84,9 +72,9 @@ type MassiveFetcher struct {
 // NewBgWorker returns a new instance of MassiveFetcher.
 // nolint:deadcode // plugin interface
 func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
-	data, _ := json.Marshal(conf)
+	data, _ := jsonAPI.Marshal(conf)
 	config := massiveconfig.FetcherConfig{}
-	if err := json.Unmarshal(data, &config); err != nil {
+	if err := jsonAPI.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("parse massive config: %w", err)
 	}
 
@@ -183,47 +171,94 @@ func (mf *MassiveFetcher) Run() {
 }
 
 // startStreaming launches WebSocket streaming goroutines for all configured data types.
+// Each data type gets its own upstream massivews.Client instance with automatic
+// reconnection, exponential backoff, and auth failure detection.
 func (mf *MassiveFetcher) startStreaming() {
-	wsServer := mf.config.WSServer
-	if wsServer == "" {
-		wsServer = defaultWSServer
+	feed := massivews.Feed(massivews.RealTime)
+	if mf.config.WSServer != "" {
+		feed = massivews.Feed(mf.config.WSServer)
 	}
 
-	// Only pass ws_query_start to the subscribe message when the server is local.
-	wsQueryStart := ""
-	if mf.config.WSQueryStart != "" && isLocalHost(wsServer) {
-		wsQueryStart = mf.config.WSQueryStart
+	// Map data types to their handlers.
+	dataTypeHandlers := map[string]func([]byte){
+		"1Min":   handlers.MakeBarsHandler("1Min"),
+		"1Sec":   handlers.MakeBarsHandler("1Sec"),
+		"trades": handlers.TradeHandler,
+		"quotes": handlers.QuoteHandler,
 	}
 
 	for dataType := range mf.wsDataTypes {
-		switch dataType {
-		case "1Min":
-			handler := handlers.MakeBarsHandler("1Min")
-			mf.wg.Add(1)
-			go func() {
-				defer mf.wg.Done()
-				mf.streamForever(wsServer, mf.config.APIKey, PrefixAggMinute, mf.config.Symbols, wsQueryStart, handler)
-			}()
-		case "1Sec":
-			handler := handlers.MakeBarsHandler("1Sec")
-			mf.wg.Add(1)
-			go func() {
-				defer mf.wg.Done()
-				mf.streamForever(wsServer, mf.config.APIKey, PrefixAggSecond, mf.config.Symbols, wsQueryStart, handler)
-			}()
-		case "quotes":
-			mf.wg.Add(1)
-			go func() {
-				defer mf.wg.Done()
-				mf.streamForever(wsServer, mf.config.APIKey, PrefixQuote, mf.config.Symbols, wsQueryStart, handlers.QuoteHandler)
-			}()
-		case "trades":
-			mf.wg.Add(1)
-			go func() {
-				defer mf.wg.Done()
-				mf.streamForever(wsServer, mf.config.APIKey, PrefixTrade, mf.config.Symbols, wsQueryStart, handlers.TradeHandler)
-			}()
+		topic, ok := wsDataTypeToTopic[dataType]
+		if !ok {
+			log.Error("[massive] unknown data type %q, skipping", dataType)
+			continue
 		}
+
+		handler := dataTypeHandlers[dataType]
+
+		client, err := massivews.New(massivews.Config{
+			APIKey:  mf.config.APIKey,
+			Feed:    feed,
+			Market:  massivews.Stocks,
+			RawData: true,
+			Log:     &wsLogger{},
+			ReconnectCallback: func(err error) {
+				if err != nil {
+					log.Warn("[massive] reconnecting %s: %v", dataType, err)
+				} else {
+					log.Info("[massive] reconnected %s", dataType)
+				}
+			},
+		})
+		if err != nil {
+			log.Error("[massive] failed to create WebSocket client for %s: %v", dataType, err)
+			continue
+		}
+
+		// Subscribe to the topic with configured symbols.
+		tickers := mf.config.Symbols
+		if len(tickers) == 0 {
+			tickers = []string{"*"}
+		}
+		if err := client.Subscribe(topic, tickers...); err != nil {
+			log.Error("[massive] failed to subscribe %s: %v", dataType, err)
+			client.Close()
+			continue
+		}
+
+		if err := client.Connect(); err != nil {
+			log.Error("[massive] failed to connect %s: %v", dataType, err)
+			client.Close()
+			continue
+		}
+
+		log.Info("[massive] streaming %s (%d symbols)", dataType, len(tickers))
+
+		mf.wg.Add(1)
+		go func(dt string, c *massivews.Client, h func([]byte)) {
+			defer mf.wg.Done()
+			defer c.Close()
+
+			for {
+				select {
+				case <-mf.ctx.Done():
+					log.Info("[massive] stopping stream for %s", dt)
+					return
+				case err := <-c.Error():
+					log.Error("[massive] fatal error on %s: %v", dt, err)
+					return
+				case msg, ok := <-c.Output():
+					if !ok {
+						log.Info("[massive] output channel closed for %s", dt)
+						return
+					}
+					// In RawData mode, output is json.RawMessage (individual messages).
+					if raw, ok := msg.(json.RawMessage); ok {
+						h([]byte(raw))
+					}
+				}
+			}
+		}(dataType, client, handler)
 	}
 }
 
@@ -465,243 +500,6 @@ func isDailyOrLonger(tf string) bool {
 		strings.HasSuffix(tf, "W") ||
 		strings.HasSuffix(tf, "M") ||
 		strings.HasSuffix(tf, "Y")
-}
-
-// buildSubScope builds the comma-separated subscription string.
-// e.g. "AM.AAPL,AM.MSFT" or "AM.*"
-func buildSubScope(prefix Prefix, symbols []string) string {
-	if len(symbols) == 0 {
-		symbols = []string{"*"}
-	}
-	var buf bytes.Buffer
-	for i, sym := range symbols {
-		buf.WriteString(string(prefix) + sym)
-		if i < len(symbols)-1 {
-			buf.WriteString(",")
-		}
-	}
-	return buf.String()
-}
-
-// formatScopeForLog returns a human-readable description of the subscription scope.
-// If there are more than 10 symbols, it returns a count instead of listing them all.
-func formatScopeForLog(prefix Prefix, symbols []string) string {
-	if len(symbols) == 0 || (len(symbols) == 1 && symbols[0] == "*") {
-		return string(prefix) + "*"
-	}
-	if len(symbols) > 10 {
-		return fmt.Sprintf("%s<%d symbols>", prefix, len(symbols))
-	}
-	return buildSubScope(prefix, symbols)
-}
-
-// streamForever connects to the Massive WebSocket API and processes messages,
-// reconnecting automatically on any failure. It exits when the context is cancelled.
-func (mf *MassiveFetcher) streamForever(server, apiKey string, prefix Prefix, symbols []string, wsQueryStart string, handler func([]byte)) {
-	scope := buildSubScope(prefix, symbols)
-	scopeLog := formatScopeForLog(prefix, symbols)
-	for {
-		select {
-		case <-mf.ctx.Done():
-			log.Info("[massive] stopping stream for %s", scopeLog)
-			return
-		default:
-		}
-
-		err := mf.stream(server, apiKey, scope, scopeLog, wsQueryStart, handler)
-		if err != nil {
-			// Don't log if we're shutting down.
-			select {
-			case <-mf.ctx.Done():
-				log.Info("[massive] stopping stream for %s", scopeLog)
-				return
-			default:
-				log.Warn("[massive] stream disconnected, reconnecting... {scope:%s, error:%v}", scopeLog, err)
-			}
-		}
-
-		// Wait before reconnecting, but check for cancellation.
-		select {
-		case <-mf.ctx.Done():
-			log.Info("[massive] stopping stream for %s", scopeLog)
-			return
-		case <-time.After(reconnectBackoff):
-		}
-	}
-}
-
-// stream runs a single WebSocket session: connect, authenticate, subscribe, read.
-// It returns when the context is cancelled or an error occurs.
-func (mf *MassiveFetcher) stream(server, apiKey, scope, scopeLog, wsQueryStart string, handler func([]byte)) error {
-	conn, err := connect(server, apiKey)
-	if err != nil {
-		return fmt.Errorf("connect: %w", err)
-	}
-	defer conn.Close()
-
-	if err := authenticate(conn, apiKey); err != nil {
-		return fmt.Errorf("auth: %w", err)
-	}
-
-	if err := subscribe(conn, scope, scopeLog, wsQueryStart); err != nil {
-		return fmt.Errorf("subscribe: %w", err)
-	}
-
-	log.Info("[massive] streaming {scope:%s}", scopeLog)
-
-	conn.SetReadLimit(maxRecvMsgSize)
-
-	// Set up ping/pong handling to keep the connection alive.
-	// The pong handler resets the read deadline when we receive a pong from the server.
-	// The gorilla/websocket library automatically sends pong responses to server pings,
-	// but we need to send our own pings to detect dead connections.
-	conn.SetPongHandler(func(appData string) error {
-		return conn.SetReadDeadline(time.Now().Add(2 * pingInterval))
-	})
-
-	// Start a goroutine to send periodic pings to the server.
-	pingDone := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(pingInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
-					return
-				}
-			case <-mf.ctx.Done():
-				return
-			case <-pingDone:
-				return
-			}
-		}
-	}()
-	defer close(pingDone)
-
-	// Set initial read deadline.
-	if err := conn.SetReadDeadline(time.Now().Add(2 * pingInterval)); err != nil {
-		return fmt.Errorf("set read deadline: %w", err)
-	}
-
-	for {
-		// Check for context cancellation.
-		select {
-		case <-mf.ctx.Done():
-			return mf.ctx.Err()
-		default:
-		}
-
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			return fmt.Errorf("read: %w", err)
-		}
-
-		// Reset read deadline after receiving any message.
-		if err := conn.SetReadDeadline(time.Now().Add(2 * pingInterval)); err != nil {
-			return fmt.Errorf("set read deadline: %w", err)
-		}
-
-		handler(msg)
-	}
-}
-
-func connect(server, apiKey string) (*websocket.Conn, error) {
-	u, err := url.Parse(server)
-	if err != nil {
-		return nil, fmt.Errorf("parse server URL: %w", err)
-	}
-
-	// Only append default path if server URL has no path or just "/"
-	if u.Path == "" || u.Path == "/" {
-		u.Path = defaultWSPath
-	}
-
-	q := u.Query()
-	q.Set("apiKey", apiKey)
-	u.RawQuery = q.Encode()
-
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 5 * time.Second
-
-	conn, resp, err := dialer.Dial(u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	const statusSwitchingProtocols = http.StatusSwitchingProtocols
-	if resp.StatusCode != statusSwitchingProtocols {
-		conn.Close()
-		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
-	}
-
-	// Read the initial "connected" status message.
-	_, msg, err := conn.ReadMessage()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("read connected message: %w", err)
-	}
-	if !strings.Contains(string(msg), "connected") {
-		conn.Close()
-		return nil, fmt.Errorf("unexpected connect response: %s", string(msg))
-	}
-
-	return conn, nil
-}
-
-func authenticate(conn *websocket.Conn, apiKey string) error {
-	authMsg := fmt.Sprintf(`{"action":"auth","params":"%s"}`, apiKey)
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(authMsg)); err != nil {
-		return fmt.Errorf("send auth: %w", err)
-	}
-
-	_, msg, err := conn.ReadMessage()
-	if err != nil {
-		return fmt.Errorf("read auth response: %w", err)
-	}
-
-	if !strings.Contains(string(msg), "auth_success") && !strings.Contains(string(msg), "authenticated") {
-		return fmt.Errorf("auth failed: %s", string(msg))
-	}
-
-	log.Info("[massive] authenticated successfully")
-	return nil
-}
-
-func subscribe(conn *websocket.Conn, scope, scopeLog, wsQueryStart string) error {
-	var subMsg string
-	if wsQueryStart != "" {
-		subMsg = fmt.Sprintf(`{"action":"subscribe","params":"%s","date":"%s"}`, scope, wsQueryStart)
-	} else {
-		subMsg = fmt.Sprintf(`{"action":"subscribe","params":"%s"}`, scope)
-	}
-
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(subMsg)); err != nil {
-		return fmt.Errorf("send subscribe: %w", err)
-	}
-
-	_, msg, err := conn.ReadMessage()
-	if err != nil {
-		return fmt.Errorf("read subscribe response: %w", err)
-	}
-
-	if !strings.Contains(string(msg), "success") {
-		return fmt.Errorf("subscription failed: %s", string(msg))
-	}
-
-	log.Info("[massive] subscribed to %s", scopeLog)
-	return nil
-}
-
-// isLocalHost returns true if the given WebSocket server URL points to
-// localhost or 127.0.0.1.
-func isLocalHost(server string) bool {
-	u, err := url.Parse(server)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	return host == "localhost" || host == "127.0.0.1"
 }
 
 func main() {}

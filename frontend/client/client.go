@@ -159,7 +159,7 @@ func (cl *Client) Subscribe(
 		return nil, err
 	}
 
-	buf, err := msgpack.Marshal(stream.SubscribeMessage{Streams: streams})
+	buf, err := msgpack.Marshal(stream.SubscribeMessage{Action: "subscribe", TBKs: streams})
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +176,7 @@ func (cl *Client) Subscribe(
 			_ = conn.Close()
 			return nil, fmt.Errorf("marketstore stream subscribe failed:%w", err)
 		}
-		if !streamsEqual(streams, subRespMsg.Streams) {
+		if !streamsEqual(streams, subRespMsg.TBKs) {
 			_ = conn.Close()
 			return nil, fmt.Errorf("marketstore stream subscribe failed")
 		}
