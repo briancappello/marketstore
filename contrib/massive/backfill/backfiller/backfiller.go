@@ -81,6 +81,7 @@ var (
 	adjusted       bool
 	configFilePath string
 	grpcAddress    string
+	noRPC          bool
 
 	// symbolInfos holds resolved symbols with optional listing dates.
 	// Populated either from database (symbols_dsn) or API (glob pattern).
@@ -109,8 +110,10 @@ func init() {
 		"request split-adjusted price data")
 	flag.StringVar(&configFilePath, "config", "mkts.yml",
 		"path to the mkts.yml config file (default: mkts.yml in current directory)")
-	flag.StringVar(&grpcAddress, "grpc", "",
-		"gRPC server address (e.g., localhost:5995). If set, writes data via RPC instead of direct disk access.")
+	flag.StringVar(&grpcAddress, "grpc", "localhost:5995",
+		"gRPC server address for writing data (default: localhost:5995)")
+	flag.BoolVar(&noRPC, "no-rpc", false,
+		"write directly to the filesystem instead of via gRPC to a running server")
 
 	flag.Parse()
 }
@@ -139,8 +142,13 @@ func main() {
 	var instanceMeta *executor.InstanceMetadata
 	var massiveConfig *massiveconfig.FetcherConfig
 
-	if grpcAddress != "" {
-		// RPC mode: connect to running MarketStore server.
+	if noRPC {
+		// Direct disk mode: initialize executor and write to filesystem.
+		log.Info("[massive] using direct disk mode (--no-rpc)")
+		instanceMeta, massiveConfig = initWriter()
+		writer = &backfill.DirectWriter{}
+	} else {
+		// RPC mode (default): connect to running MarketStore server.
 		log.Info("[massive] using gRPC mode, connecting to %s", grpcAddress)
 		rpcWriter, err := backfill.NewRPCWriter(ctx, grpcAddress)
 		if err != nil {
@@ -152,10 +160,6 @@ func main() {
 
 		// Still load config for defaults (symbols, api_key, etc.)
 		massiveConfig = loadConfigOnly()
-	} else {
-		// Direct disk mode: initialize executor.
-		instanceMeta, massiveConfig = initWriter()
-		writer = &backfill.DirectWriter{}
 	}
 
 	// Apply config defaults for flags not explicitly set.
