@@ -31,7 +31,7 @@ attrgroup_types:
       Volume: int64
     record_type: fixed
 
-  # TRADE - Individual trade executions (used by models/trade.go and massive plugin)
+  # TRADE - Individual trade executions (used by massive plugin)
   # Full trade data with exchange, tape ID, and up to 4 condition codes
   TRADE:
     columns:
@@ -45,26 +45,6 @@ attrgroup_types:
       Cond3: byte
       Cond4: byte
     record_type: variable
-
-  # TICK - Simplified tick data (used by xignitefeeder, alpacabkfeeder)
-  # Contains combined quote + trade snapshot with OHLCV for the period
-  # Schema varies by feeder; this is the xignitefeeder schema:
-  TICK:
-    columns:
-      Ask: float32
-      AskSize: float32
-      Bid: float32
-      BidSize: float32
-      Last: float32
-      LastSize: float32
-      DateTime: int64
-      Open: float32
-      High: float32
-      Low: float32
-      Close: float32
-      Volume: int64
-      PreviousClose: float32
-    record_type: fixed
 
   QUOTE:
     columns:
@@ -108,6 +88,9 @@ triggers:
         - 1D
 
 bgworkers:
+  - name: StreamReplay
+    module: streamreplay.so
+
   - module: massive.so
     name: Massive
     config:
@@ -123,6 +106,9 @@ bgworkers:
       symbols:
         - AAPL
         - SPY
+      symbols_dsn: "postgres://FIXME_USER:FIXME_PW@127.0.0.1:5432/fin?sslmode=disable"
+      symbols_query: "SELECT ticker, listed FROM asset WHERE is_active = TRUE AND delisted IS NULL"
+
       # query_start controls backfill independently of streaming.
       # Keys can be quotes, trades, or timeframes (eg 1Min, 5Min, 1H, 1D)
       query_start:
