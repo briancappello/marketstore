@@ -64,9 +64,14 @@ if [[ "$CURRENT_BRANCH" != "master" ]]; then
     [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
 fi
 
-# Ensure working tree is clean (avoid deploying uncommitted changes)
-if ! git -C "$DEV_DIR" diff --quiet || ! git -C "$DEV_DIR" diff --cached --quiet; then
-    echo "ERROR: You have uncommitted changes in the dev repo."
+# Ensure source files are clean (avoid deploying uncommitted changes to code).
+# Only check files that affect the built binary — Go source, protobuf, modules, Makefiles.
+SOURCE_PATTERNS=('*.go' '*.proto' 'go.mod' 'go.sum' 'Makefile')
+DIRTY_SRC="$(git -C "$DEV_DIR" diff --name-only -- "${SOURCE_PATTERNS[@]}"
+            git -C "$DEV_DIR" diff --cached --name-only -- "${SOURCE_PATTERNS[@]}")"
+if [[ -n "$DIRTY_SRC" ]]; then
+    echo "ERROR: You have uncommitted changes to source files:"
+    echo "$DIRTY_SRC" | sed 's/^/         /'
     echo "       Commit or stash them before deploying."
     exit 1
 fi
