@@ -220,6 +220,7 @@ func (wf *WALFileType) QueueWriteCommand(wc *wal.WriteCommand) {
 }
 
 // FlushToWAL A.k.a. Commit transaction.
+//
 //	Here we flush the contents of the write cache to:
 //	- Primary storage via the OS write cache - data is visible to readers
 //	- WAL file with synchronization to physical storage - in case we need to recover from a crash
@@ -703,6 +704,9 @@ func (wf *WALFileType) CanWrite(callersInstanceID int64) (bool, error) {
 
 func sanityCheckValue(fp *os.File, value int64) (isSane bool) {
 	const safetyFactor = 1000
+	if value <= 0 {
+		return false
+	}
 	// As a sanity check, get the file size to ensure that TGLen is reasonable prior to buffer allocations
 	fstat, _ := fp.Stat()
 	sanityLen := safetyFactor * fstat.Size()

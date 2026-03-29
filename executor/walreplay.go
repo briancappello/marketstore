@@ -216,6 +216,7 @@ func (wf *WALFileType) replayTGData(tgID int64, wtSets []wal.WTSet) (err error) 
 }
 
 // fullRead checks an error to see if we have read only partial data.
+// Returns true only when there is no error and reading should continue.
 func fullRead(err error) bool {
 	if err == nil {
 		return true
@@ -233,7 +234,7 @@ func fullRead(err error) bool {
 	}
 
 	log.Error(io.GetCallerFileContext(0) + ": Uncorrectable IO error in WAL Replay")
-	return true
+	return false
 }
 
 // readMessageID reads 1 byte from the current offset of WALfile and return it as a MessageID.

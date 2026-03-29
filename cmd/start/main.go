@@ -124,9 +124,6 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	start := time.Now()
 
 	executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
-	if err != nil {
-		return fmt.Errorf("craete new instance setup: %w", err)
-	}
 
 	go metrics.StartDiskUsageMonitor(metrics.TotalDiskUsageBytes, config.RootDirectory, diskUsageMonitorInterval)
 
@@ -137,7 +134,7 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	// init replication client
 	go func() {
 		log.Info("initializing replication client")
-		err = c.GetReplicationClientWithRetry().Run(globalCtx)
+		err := c.GetReplicationClientWithRetry().Run(globalCtx)
 		if err != nil {
 			log.Error("Unable to startup Replication", err)
 			return
@@ -168,7 +165,7 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 		log.Info("launching utility service...")
 		uah := frontend.NewUtilityAPIHandlers(config.StartTime)
 		go func() {
-			err = uah.Handle(config.UtilitiesURL)
+			err := uah.Handle(config.UtilitiesURL)
 			if err != nil {
 				log.Error("utility API handle error: %v", err.Error())
 			}
@@ -181,13 +178,13 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	// Serve.
 	log.Info("launching tcp listener for all services...")
 	if config.GRPCListenURL != "" {
-		grpcLn, err2 := net.Listen("tcp", config.GRPCListenURL)
-		if err2 != nil {
-			return fmt.Errorf("failed to start GRPC server - error: %w", err2)
+		grpcLn, err := net.Listen("tcp", config.GRPCListenURL)
+		if err != nil {
+			return fmt.Errorf("failed to start GRPC server - error: %w", err)
 		}
 		go func() {
-			err3 := c.GetGRPCServer().Serve(grpcLn)
-			if err3 != nil {
+			err := c.GetGRPCServer().Serve(grpcLn)
+			if err != nil {
 				log.Error("gRPC server error: %v", err.Error())
 				c.GetGRPCServer().GracefulStop()
 			}
@@ -202,9 +199,9 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 			switch s {
 			case syscall.SIGUSR1:
 				log.Info("dumping stack traces due to SIGUSR1 request")
-				err2 := pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
-				if err2 != nil {
-					log.Error("failed to write goroutine pprof: %w", err)
+				err := pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+				if err != nil {
+					log.Error("failed to write goroutine pprof: %v", err)
 					return
 				}
 			case syscall.SIGINT, syscall.SIGTERM:

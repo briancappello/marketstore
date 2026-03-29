@@ -1,4 +1,4 @@
-.PHONY: plugins
+.PHONY: plugins deploy
 
 GOFLAGS=""
 GOPATH0 := $(firstword $(subst :, ,$(GOPATH)))
@@ -83,6 +83,9 @@ runimage:
 
 stopimage:
 	make -C tests/integ clean IMAGE_NAME=alpacamarkets/marketstore.test
+
+deploy:
+	bash deploy.sh
 
 push:
 	docker build --build-arg tag=$(DOCKER_TAG) -t alpacamarkets/marketstore:$(DOCKER_TAG) -t alpacamarkets/marketstore:latest .
