@@ -3,6 +3,7 @@ package frontend_test
 import (
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -166,6 +167,33 @@ func TestListSymbols_TBKFormat(t *testing.T) {
 	assert.Nil(t, err)
 	// 3 symbols * 6 timeframes = 18 TBKs
 	assert.Len(t, response.Results, 18)
+}
+
+func TestListSymbols_FilterByDateWithNonUTCTimezone(t *testing.T) {
+	// The server uses InstanceConfig.Timezone for on-disk index calculations.
+	// When configured with a non-UTC timezone (e.g. America/New_York), the
+	// date filter in ListSymbols must construct day boundaries in that same
+	// timezone so the file offset scan hits the correct records.
+	origTZ := utils.InstanceConfig.Timezone
+	loc, err := time.LoadLocation("America/New_York")
+	assert.Nil(t, err)
+	utils.InstanceConfig.Timezone = loc
+	defer func() { utils.InstanceConfig.Timezone = origTZ }()
+
+	service := setupListSymbols(t)
+
+	req := &frontend.ListSymbolsRequest{
+		Timeframe: "1D",
+		Date:      "2001-06-15",
+	}
+	var response frontend.ListSymbolsResponse
+	err = service.ListSymbols(nil, req, &response)
+
+	assert.Nil(t, err)
+	assert.Len(t, response.Results, 3)
+	assert.Contains(t, response.Results, "EURUSD")
+	assert.Contains(t, response.Results, "USDJPY")
+	assert.Contains(t, response.Results, "NZDUSD")
 }
 
 func TestListSymbols_ResultsAreSorted(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alpacahq/marketstore/v4/catalog"
+	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 )
 
@@ -138,8 +139,12 @@ func attrGroupHasDataForDate(attrDir *catalog.Directory, date *time.Time) (bool,
 // for the given date. It reads the index field of records within the date range
 // and returns true as soon as it finds a non-zero index.
 func fileHasDataForDate(tbi *io.TimeBucketInfo, date time.Time) (bool, error) {
-	// Calculate day boundaries in UTC
-	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	// Calculate day boundaries in the system timezone so that TimeToOffset
+	// (which converts to the system timezone internally) maps to the correct
+	// day-of-year index.  Using UTC here would shift the window by the UTC
+	// offset, causing lookups to miss the target day.
+	tz := utils.InstanceConfig.Timezone
+	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, tz)
 	dayEnd := dayStart.Add(24 * time.Hour)
 
 	// Access tbi metadata - this triggers lazy loading via GetTimeframe/GetRecordLength
