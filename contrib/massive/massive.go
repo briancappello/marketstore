@@ -351,7 +351,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 			switch key {
 			case "trades":
 				tbk := io.NewTimeBucketKey(models.TradeBucketKey(symbol))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended)
+				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended, "trades")
 				if decision.skip {
 					continue
 				}
@@ -366,7 +366,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 				}
 			case "quotes":
 				tbk := io.NewTimeBucketKey(models.QuoteBucketKey(symbol))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended)
+				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended, "quotes")
 				if decision.skip {
 					continue
 				}
@@ -388,7 +388,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 					end = endRegular
 				}
 				tbk := io.NewTimeBucketKey(models.BarBucketKey(symbol, tf))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, end)
+				decision := mf.determineBackfillStart(tbk, effectiveStart, end, tf)
 				if decision.skip {
 					continue
 				}
@@ -454,22 +454,35 @@ func findLastTimestamp(tbk *io.TimeBucketKey) time.Time {
 	return ts[0]
 }
 
+// tickTolerance is the tolerance used for trades and quotes when deciding
+// whether backfill data is up to date. Tick data has no fixed period, so
+// we use a small fixed window: if the last tick is within this duration of
+// the session close, we consider the data complete.
+const tickTolerance = 1 * time.Minute
+
 // backfillDecision contains the result of determineBackfillStart.
 type backfillDecision struct {
 	start time.Time // When to start backfilling from
 	skip  bool      // If true, skip backfilling entirely
 }
 
-// determineBackfillStart checks for existing data and returns the appropriate start time.
+// determineBackfillStart checks for existing data and returns the appropriate
+// start time for backfill.
+//
+// The dataType parameter is used to determine whether the data is "up to date":
+//   - For bar timeframes (e.g., "1Min", "1D"), the last bar in a session starts
+//     one period before close, so a small gap between lastTS and end is expected.
+//   - For tick data ("trades", "quotes"), there is no fixed period; a 1-minute
+//     tolerance is used instead.
 //
 // Logic:
-//   - No data exists: backfill from effectiveStart (the earlier of query_start and
-//     listing date) up to end.
-//   - Data exists: assume the earliest data is already correct; only backfill from
-//     the latest written timestamp up to end.
+//   - No data exists: backfill from effectiveStart.
+//   - Data exists and up to date: skip.
+//   - Data exists but behind: backfill from lastTS + 1ns.
 func (mf *MassiveFetcher) determineBackfillStart(
 	tbk *io.TimeBucketKey,
 	effectiveStart, end time.Time,
+	dataType string,
 ) backfillDecision {
 	lastTS := findLastTimestamp(tbk)
 
@@ -482,12 +495,86 @@ func (mf *MassiveFetcher) determineBackfillStart(
 		start = lastTS.Add(time.Nanosecond)
 	}
 
-	// Skip if already up to date or start is beyond end.
-	if !start.Before(end) {
+	if isUpToDate(lastTS, effectiveStart, end, dataType, calendar.Nasdaq.Tz()) {
 		return backfillDecision{start: start, skip: true}
 	}
 
 	return backfillDecision{start: start, skip: false}
+}
+
+// isUpToDate determines whether existing data is sufficiently current that
+// backfill can be skipped. This is a pure function with no database
+// dependency, making it easy to test.
+//
+// The logic varies by data type:
+//   - Intraday bars (< 1D): the last bar of a session starts one timeframe
+//     period before close. If lastTS >= end - period, data is up to date.
+//   - Daily+ bars (1D, 1W, 1M, 1Y): the bar epoch is at a canonical time
+//     (e.g., midnight) that may be far from the close time. Instead of a
+//     duration tolerance, we compare calendar periods in the market timezone:
+//     same date for 1D, same ISO week for 1W, same month for 1M, same year
+//     for 1Y.
+//   - Tick data (trades, quotes): no fixed period; uses a small constant
+//     tolerance (tickTolerance).
+//
+// If lastTS is zero (no data), the function returns false (not up to date)
+// unless effectiveStart is at or past end (listing date in the future).
+func isUpToDate(lastTS, effectiveStart, end time.Time, dataType string, marketTZ *time.Location) bool {
+	// Compute the start time the same way determineBackfillStart does.
+	var start time.Time
+	if lastTS.IsZero() {
+		start = effectiveStart
+	} else {
+		start = lastTS.Add(time.Nanosecond)
+	}
+
+	// If start is already at or past end, nothing to fetch regardless of type.
+	if !start.Before(end) {
+		return true
+	}
+
+	// No data on disk — need to backfill (the start < end check above already
+	// handles the future-listing-date case).
+	if lastTS.IsZero() {
+		return false
+	}
+
+	if isDailyOrLonger(dataType) {
+		return isDailyUpToDate(lastTS, end, dataType, marketTZ)
+	}
+
+	// For intraday bars, use the timeframe duration as tolerance.
+	// For tick data, use the fixed tick tolerance.
+	tolerance := tickTolerance
+	if dataType != "trades" && dataType != "quotes" {
+		if tf := utils.TimeframeFromString(dataType); tf != nil {
+			tolerance = tf.Duration
+		}
+	}
+
+	return !lastTS.Before(end.Add(-tolerance))
+}
+
+// isDailyUpToDate checks whether the last written bar falls in the same
+// calendar period as end, using the market timezone for date comparisons.
+//
+// For 1D bars, "same period" means same calendar date.
+// For 1W bars, same ISO week. For 1M, same month. For 1Y, same year.
+func isDailyUpToDate(lastTS, end time.Time, dataType string, marketTZ *time.Location) bool {
+	cd, err := utils.CandleDurationFromString(dataType)
+	if err != nil {
+		// Unknown timeframe — fall back to not skipping so we don't miss data.
+		return false
+	}
+
+	// Both times must be in the market timezone so that date extraction
+	// (Year/Month/Day, ISOWeek) is correct. A daily bar stored as
+	// 2026-04-02T04:00:00Z is midnight ET — same date as an April 2 close.
+	// But 2026-04-02T03:00:00Z is 11 PM ET on April 1 — a different date.
+	lastLocal := lastTS.In(marketTZ)
+	endLocal := end.In(marketTZ)
+
+	return cd.Truncate(lastLocal).Equal(cd.Truncate(endLocal))
 }
 
 // isDailyOrLonger returns true if the timeframe represents daily or longer periods.

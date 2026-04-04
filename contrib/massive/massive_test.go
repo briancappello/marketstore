@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	massivews "github.com/massive-com/client-go/v3/websocket"
 	"github.com/stretchr/testify/assert"
@@ -131,6 +132,293 @@ func TestNewBgWorker_Validation(t *testing.T) {
 				require.NoError(t, err)
 				assert.NotNil(t, worker)
 			}
+		})
+	}
+}
+
+func TestIsUpToDate(t *testing.T) {
+	t.Parallel()
+
+	ny, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+
+	// Helper to build ET times concisely.
+	et := func(year, month, day, hour, min, sec int) time.Time {
+		return time.Date(year, time.Month(month), day, hour, min, sec, 0, ny)
+	}
+
+	// effectiveStart is only used when lastTS is zero (no data on disk).
+	// For most tests it can be an arbitrary old date.
+	oldStart := et(2024, 1, 1, 0, 0, 0)
+
+	// A future effectiveStart (listing date hasn't happened yet).
+	futureStart := et(2027, 6, 1, 0, 0, 0)
+
+	zero := time.Time{} // no data on disk
+
+	tests := []struct {
+		name           string
+		lastTS         time.Time
+		effectiveStart time.Time
+		end            time.Time
+		dataType       string
+		want           bool // true = up to date (skip backfill)
+	}{
+		// ---------------------------------------------------------------
+		// A. Intraday bars: tolerance = timeframe duration
+		// ---------------------------------------------------------------
+		{
+			name:           "1Min up to date",
+			lastTS:         et(2026, 4, 2, 19, 59, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Min",
+			want:           true,
+		},
+		{
+			name:           "1Min one bar behind",
+			lastTS:         et(2026, 4, 2, 19, 58, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Min",
+			want:           false,
+		},
+		{
+			name:           "5Min up to date",
+			lastTS:         et(2026, 4, 2, 19, 55, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "5Min",
+			want:           true,
+		},
+		{
+			name:           "5Min one bar behind",
+			lastTS:         et(2026, 4, 2, 19, 50, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "5Min",
+			want:           false,
+		},
+		{
+			name:           "1H up to date",
+			lastTS:         et(2026, 4, 2, 19, 0, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1H",
+			want:           true,
+		},
+		{
+			name:           "1Sec up to date",
+			lastTS:         et(2026, 4, 2, 19, 59, 59),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Sec",
+			want:           true,
+		},
+		{
+			name:           "1Min early close day with extended hours",
+			lastTS:         et(2026, 11, 27, 16, 59, 0), // day after Thanksgiving, early close 13:00 + 4h = 17:00
+			effectiveStart: oldStart,
+			end:            et(2026, 11, 27, 17, 0, 0),
+			dataType:       "1Min",
+			want:           true,
+		},
+		{
+			name:           "1Min no data on disk",
+			lastTS:         zero,
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Min",
+			want:           false,
+		},
+
+		// ---------------------------------------------------------------
+		// B. Daily+ bars: calendar-date comparison in market TZ
+		// ---------------------------------------------------------------
+		{
+			name:           "1D up to date same date",
+			lastTS:         et(2026, 4, 2, 0, 0, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0),
+			dataType:       "1D",
+			want:           true,
+		},
+		{
+			name:           "1D missing latest day",
+			lastTS:         et(2026, 4, 1, 0, 0, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0),
+			dataType:       "1D",
+			want:           false,
+		},
+		{
+			name:           "1D weekend restart (Fri holiday, data through Thu)",
+			lastTS:         et(2026, 4, 2, 0, 0, 0), // Thursday
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0), // LatestMarketTimeRegular on Saturday walks back to Thursday
+			dataType:       "1D",
+			want:           true,
+		},
+		{
+			name:           "1D early close day",
+			lastTS:         et(2026, 11, 27, 0, 0, 0), // day after Thanksgiving
+			effectiveStart: oldStart,
+			end:            et(2026, 11, 27, 13, 0, 0), // early close at 13:00
+			dataType:       "1D",
+			want:           true,
+		},
+		{
+			name:           "1D no data on disk",
+			lastTS:         zero,
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0),
+			dataType:       "1D",
+			want:           false,
+		},
+		{
+			name:           "1W same ISO week",
+			lastTS:         et(2026, 3, 30, 0, 0, 0), // Monday of week 14
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0), // Thursday of same week
+			dataType:       "1W",
+			want:           true,
+		},
+		{
+			name:           "1W previous week",
+			lastTS:         et(2026, 3, 23, 0, 0, 0), // Monday of week 13
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0), // Thursday of week 14
+			dataType:       "1W",
+			want:           false,
+		},
+		{
+			name:           "1M same month",
+			lastTS:         et(2026, 4, 1, 0, 0, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0),
+			dataType:       "1M",
+			want:           true,
+		},
+		{
+			name:           "1M previous month",
+			lastTS:         et(2026, 3, 1, 0, 0, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0),
+			dataType:       "1M",
+			want:           false,
+		},
+
+		// ---------------------------------------------------------------
+		// C. Tick data: tolerance = 1 minute
+		// ---------------------------------------------------------------
+		{
+			name:           "trades within tolerance",
+			lastTS:         et(2026, 4, 2, 19, 59, 30),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "trades",
+			want:           true,
+		},
+		{
+			name:           "trades outside tolerance",
+			lastTS:         et(2026, 4, 2, 19, 58, 30),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "trades",
+			want:           false,
+		},
+		{
+			name:           "quotes within tolerance",
+			lastTS:         et(2026, 4, 2, 19, 59, 45),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "quotes",
+			want:           true,
+		},
+		{
+			name:           "trades no data on disk",
+			lastTS:         zero,
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "trades",
+			want:           false,
+		},
+
+		// ---------------------------------------------------------------
+		// D. Edge cases
+		// ---------------------------------------------------------------
+		{
+			name:           "lastTS exactly equals end",
+			lastTS:         et(2026, 4, 2, 20, 0, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Min",
+			want:           true,
+		},
+		{
+			name:           "lastTS after end",
+			lastTS:         et(2026, 4, 2, 20, 1, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Min",
+			want:           true,
+		},
+		{
+			// A daily bar stored as 2026-04-02T04:00:00Z = 2026-04-02T00:00:00 ET.
+			// The end is April 2 16:00 ET. Same date in ET → up to date.
+			name:           "1D UTC epoch maps to same ET date",
+			lastTS:         time.Date(2026, 4, 2, 4, 0, 0, 0, time.UTC),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0),
+			dataType:       "1D",
+			want:           true,
+		},
+		{
+			// A daily bar stored as 2026-04-02T03:00:00Z = 2026-04-01T23:00:00 ET.
+			// The end is April 2 16:00 ET. Different dates in ET → not up to date.
+			name:           "1D UTC epoch maps to previous ET date",
+			lastTS:         time.Date(2026, 4, 2, 3, 0, 0, 0, time.UTC),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 16, 0, 0),
+			dataType:       "1D",
+			want:           false,
+		},
+		{
+			// Boundary: lastTS is exactly at end - tolerance for 1Min.
+			// end - 1min = 19:59:00, lastTS = 19:59:00 → lastTS >= end - tolerance → up to date.
+			name:           "1Min boundary exactly at tolerance",
+			lastTS:         et(2026, 4, 2, 19, 59, 0),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Min",
+			want:           true,
+		},
+		{
+			// Boundary: lastTS is 1ns before the tolerance threshold.
+			// end - 1min = 19:59:00, lastTS = 19:58:59.999999999 → not up to date.
+			name:           "1Min boundary 1ns before tolerance",
+			lastTS:         et(2026, 4, 2, 19, 59, 0).Add(-time.Nanosecond),
+			effectiveStart: oldStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Min",
+			want:           false,
+		},
+		{
+			name:           "no data but effectiveStart is in the future (listing date)",
+			lastTS:         zero,
+			effectiveStart: futureStart,
+			end:            et(2026, 4, 2, 20, 0, 0),
+			dataType:       "1Min",
+			want:           true, // effectiveStart > end → nothing to fetch
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isUpToDate(tt.lastTS, tt.effectiveStart, tt.end, tt.dataType, ny)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
