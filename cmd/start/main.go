@@ -158,7 +158,7 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	http.Handle("/metrics", promhttp.Handler())
 
 	// Initialize any provided bgWorker plugins.
-	RunBgWorkers(config.BgWorkers)
+	bgWorkers := RunBgWorkers(config.BgWorkers)
 
 	if config.UtilitiesURL != "" {
 		// Start utility endpoints.
@@ -191,6 +191,10 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 		}()
 	}
 
+	// Use an explicit http.Server so we can call Shutdown() during
+	// graceful stop instead of abruptly killing connections.
+	httpServer := &http.Server{Addr: config.ListenURL}
+
 	// Spawn a goroutine and listen for a signal.
 	const defaultSignalChanLen = 10
 	signalChan := make(chan os.Signal, defaultSignalChanLen)
@@ -206,25 +210,55 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 				}
 			case syscall.SIGINT, syscall.SIGTERM:
 				log.Info("initiating graceful shutdown due to '%v' request", s)
+
+				// Stop accepting new gRPC requests and drain in-flight RPCs.
 				c.GetGRPCServer().GracefulStop()
 				log.Info("shutdown grpc API server...")
+
+				// Cancel the global context (used by replication client, etc.).
 				globalCancel()
+
 				if c.GetGRPCReplicationServer() != nil {
 					c.GetGRPCReplicationServer().Stop() // gRPC stream connection doesn't close by GracefulStop()
 				}
 				log.Info("shutdown grpc Replication server...")
 
+				// Disable query access so new requests are rejected.
 				atomic.StoreUint32(&frontend.Queryable, uint32(0))
-				log.Info("waiting a grace period of %v to shutdown...", config.StopGracePeriod)
-				time.Sleep(config.StopGracePeriod)
+
+				// Signal all background workers to stop. Workers with
+				// outbound connections (e.g. massive websocket clients)
+				// will cancel their contexts and close connections.
+				log.Info("shutting down background workers...")
+				ShutdownBgWorkers(bgWorkers)
+
+				// Close all inbound websocket subscriber connections with
+				// a proper close frame so clients see code 1000 (normal).
+				log.Info("shutting down websocket stream subscribers...")
+				stream.Shutdown()
+
+				// Shut down the HTTP server. This stops the listener and
+				// waits up to StopGracePeriod for active connections
+				// (including upgraded websockets) to drain.
+				log.Info("shutting down HTTP server (grace period: %v)...", config.StopGracePeriod)
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), config.StopGracePeriod)
+				if err := httpServer.Shutdown(shutdownCtx); err != nil {
+					log.Error("HTTP server shutdown error: %v", err)
+				}
+				shutdownCancel()
+
+				// Final WAL flush.
 				c.GetInitWALFile().Shutdown()
-				shutdown()
+				log.Info("exiting...")
+
+				// httpServer.Shutdown causes ListenAndServe to return
+				// http.ErrServerClosed, which we handle below.
 			}
 		}
 	}()
 	signal.Notify(signalChan, syscall.SIGUSR1, syscall.SIGINT, syscall.SIGTERM)
 
-	if err := http.ListenAndServe(config.ListenURL, nil); err != nil {
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("failed to start server - error: %w", err)
 	}
 
@@ -239,9 +273,4 @@ func replacePort(hostPort, newPort string) string {
 		return net.JoinHostPort(hostPort, newPort)
 	}
 	return net.JoinHostPort(host, newPort)
-}
-
-func shutdown() {
-	log.Info("exiting...")
-	os.Exit(0)
 }

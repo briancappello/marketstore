@@ -22,6 +22,10 @@ type Worker struct {
 	Interval          int
 }
 
+// Shutdown is a no-op. The Xignite worker uses only short-lived HTTP requests
+// with no persistent connections to clean up.
+func (w *Worker) Shutdown() {}
+
 // Run runs forever to get quotes data for each symbol in the target exchanges using Xignite API periodically,
 // and writes the data to the local marketstore server.
 func (w *Worker) Run() {

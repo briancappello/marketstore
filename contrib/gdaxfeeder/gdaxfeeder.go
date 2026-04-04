@@ -163,6 +163,10 @@ func findLastTimestamp(tbk *io.TimeBucketKey) time.Time {
 	return ts[0]
 }
 
+// Shutdown is a no-op. The GDAX worker uses only short-lived HTTP requests
+// with no persistent connections to clean up.
+func (gd *GdaxFetcher) Shutdown() {}
+
 // Run () runs forever to get public historical rate for each configured symbol,
 // and writes in marketstore data format.  In case any error including rate limit
 // is returned from GDAX, it waits for a minute.

@@ -48,6 +48,11 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 	}, nil
 }
 
+// Shutdown is a no-op. The PolyIEX worker's outbound WebSocket connections are
+// managed by the api.Stream function with no cancellation mechanism. They will
+// be closed at the OS level when the process exits.
+func (pf *PolyIEXFetcher) Shutdown() {}
+
 // Run is the bgworker main entry point.
 func (pf *PolyIEXFetcher) Run() {
 	// configure api package

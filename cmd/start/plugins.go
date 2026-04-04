@@ -7,21 +7,32 @@ import (
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
-func RunBgWorkers(bgWorkers []*utils.BgWorkerSetting) {
+// RunBgWorkers initializes and starts all configured background worker plugins.
+// It returns the list of successfully created workers so the caller can shut
+// them down during server shutdown.
+func RunBgWorkers(bgWorkers []*utils.BgWorkerSetting) []bgworker.BgWorker {
 	log.Info("InitializeBgWorkers")
+	var workers []bgworker.BgWorker
 	for _, bgWorkerSetting := range bgWorkers {
 		// bgWorkerSetting may contain sensitive data such as a password or token.
 		log.Debug("bgWorkerSetting = %v", bgWorkerSetting)
 		bgWorker := NewBgWorker(bgWorkerSetting)
 		if bgWorker != nil {
-			// we should probably keep track of this process status
-			// and may want to kill it or get info.  utils.Process may help
-			// but will figure it out later.
 			log.Info("Start running BgWorker %s...", bgWorkerSetting.Name)
+			workers = append(workers, bgWorker)
 			go bgWorker.Run()
 		}
 	}
 	log.Info("InitializeBgWorkers Done")
+	return workers
+}
+
+// ShutdownBgWorkers calls Shutdown on each background worker, giving each
+// a chance to close connections and release resources.
+func ShutdownBgWorkers(workers []bgworker.BgWorker) {
+	for _, w := range workers {
+		w.Shutdown()
+	}
 }
 
 func NewBgWorker(s *utils.BgWorkerSetting) bgworker.BgWorker {

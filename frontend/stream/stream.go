@@ -158,6 +158,7 @@ func validStream(stream string) bool {
 
 func (s *Subscriber) consume() {
 	defer func() {
+		s.c.Close()
 		metrics.WSConnections.Dec()
 		catalog.Remove(s)
 		s.done <- struct{}{}
@@ -280,6 +281,33 @@ func Initialize() {
 	catalog = NewCatalog()
 
 	go stream()
+}
+
+// Shutdown sends a WebSocket close frame to every connected subscriber
+// and closes the underlying connections. It should be called during server
+// shutdown so that clients receive a clean close (code 1000) rather than
+// an abrupt TCP teardown.
+func Shutdown() {
+	if catalog == nil {
+		return
+	}
+
+	catalog.RLock()
+	subs := make([]*Subscriber, 0, len(catalog.subs))
+	for s := range catalog.subs {
+		subs = append(subs, s)
+	}
+	catalog.RUnlock()
+
+	for _, s := range subs {
+		// Send a close frame so the client sees code 1000 (normal closure).
+		_ = s.c.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "server shutting down"),
+			time.Now().Add(time.Second),
+		)
+		s.c.Close()
+	}
 }
 
 // Handler hooks into the HTTP interface and handles the incoming

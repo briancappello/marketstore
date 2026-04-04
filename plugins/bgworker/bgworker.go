@@ -10,17 +10,24 @@
 // internal API.  It is often better to just let it go.
 //
 // Configuration is as follows.
-//  bgworkers:
-//    - module: xxxWorker.so
-//      name: datafeed
-//      config: <according to the plulgin>
+//
+//	bgworkers:
+//	  - module: xxxWorker.so
+//	    name: datafeed
+//	    config: <according to the plulgin>
 package bgworker
 
 import "fmt"
 
-// BgWorker implements Run().  It will be running under a separate goroutine.
+// BgWorker is the interface that background worker plugins must implement.
+// Run is called in a separate goroutine and should block until the worker
+// is done (typically by waiting on a context or channel).
+// Shutdown is called during server shutdown to signal the worker to stop.
+// Implementations that have no cleanup to perform should provide an explicit
+// no-op Shutdown with a comment explaining why.
 type BgWorker interface {
 	Run()
+	Shutdown()
 }
 
 // SymbolLoader is an interface to retrieve symbol object from plugin.

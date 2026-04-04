@@ -95,6 +95,10 @@ func (f *IEXFetcher) UpdateSymbolList(ctx context.Context) {
 	}
 }
 
+// Shutdown is a no-op. The IEX worker uses only short-lived HTTP requests
+// with no persistent connections to clean up.
+func (f *IEXFetcher) Shutdown() {}
+
 func (f *IEXFetcher) Run() {
 	ctx := context.Background()
 	// batchify the symbols & queue the batches

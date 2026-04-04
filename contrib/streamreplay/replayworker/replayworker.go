@@ -70,6 +70,11 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 	return w, nil
 }
 
+// Shutdown is a no-op. The replay worker serves inbound WebSocket connections
+// that are tied to the HTTP server's lifecycle; they will be closed when the
+// HTTP server shuts down.
+func (w *ReplayWorker) Shutdown() {}
+
 // Run blocks forever. The actual work is done in per-connection goroutines
 // spawned by the HTTP handler.
 func (w *ReplayWorker) Run() {

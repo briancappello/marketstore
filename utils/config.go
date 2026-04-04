@@ -103,7 +103,7 @@ func NewDefaultConfig(rootDir string) *MktsConfig {
 		GRPCMaxRecvMsgSize:         1024 * megabyteToByte, // 1024MB
 		UtilitiesURL:               "",
 		Timezone:                   time.UTC,
-		StopGracePeriod:            0,
+		StopGracePeriod:            5 * time.Second,
 		WALRotateInterval:          defaultWALRotateInterval,
 		DisableVariableCompression: false,
 		InitCatalog:                true,
