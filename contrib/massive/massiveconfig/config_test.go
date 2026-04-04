@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEffectiveBackfillStart(t *testing.T) {
@@ -111,23 +112,139 @@ func TestParseListingDate(t *testing.T) {
 func TestSymbolInfo(t *testing.T) {
 	t.Parallel()
 
-	// Test that SymbolInfo can hold both symbols with and without dates.
+	// Test that SymbolInfo can hold symbols with and without dates and IDs.
 	listingDate := time.Date(2021, 5, 1, 0, 0, 0, 0, time.UTC)
 
-	symbolWithDate := SymbolInfo{
+	symbolWithAll := SymbolInfo{
 		Symbol:      "COIN",
+		ID:          42,
 		ListingDate: &listingDate,
 	}
 
-	symbolWithoutDate := SymbolInfo{
-		Symbol:      "AAPL",
-		ListingDate: nil,
+	symbolMinimal := SymbolInfo{
+		Symbol: "AAPL",
 	}
 
-	assert.Equal(t, "COIN", symbolWithDate.Symbol)
-	assert.NotNil(t, symbolWithDate.ListingDate)
-	assert.Equal(t, listingDate, *symbolWithDate.ListingDate)
+	assert.Equal(t, "COIN", symbolWithAll.Symbol)
+	assert.Equal(t, int64(42), symbolWithAll.ID)
+	assert.NotNil(t, symbolWithAll.ListingDate)
+	assert.Equal(t, listingDate, *symbolWithAll.ListingDate)
 
-	assert.Equal(t, "AAPL", symbolWithoutDate.Symbol)
-	assert.Nil(t, symbolWithoutDate.ListingDate)
+	assert.Equal(t, "AAPL", symbolMinimal.Symbol)
+	assert.Equal(t, int64(0), symbolMinimal.ID)
+	assert.Nil(t, symbolMinimal.ListingDate)
+}
+
+func TestValidateConfig(t *testing.T) {
+	t.Parallel()
+
+	fullSyncQuery := SyncQuerySet{
+		Read:        "SELECT oldest, newest FROM sync WHERE id = $1",
+		WriteOldest: "UPDATE sync SET oldest = $2 WHERE id = $1",
+		WriteNewest: "UPDATE sync SET newest = $2 WHERE id = $1",
+	}
+
+	tests := []struct {
+		name        string
+		config      FetcherConfig
+		expectError string
+	}{
+		{
+			name: "valid config with sync_queries",
+			config: FetcherConfig{
+				SymbolsDSN:   "postgres://localhost/test",
+				SymbolsQuery: "SELECT id, ticker, listed FROM asset",
+				QueryStart:   map[string]string{"1Min": "2024-01-01", "1D": "2020-01-01"},
+				SyncQueries: map[string]SyncQuerySet{
+					"1Min": fullSyncQuery,
+					"1D":   fullSyncQuery,
+				},
+			},
+		},
+		{
+			name: "missing symbols_query when dsn is set",
+			config: FetcherConfig{
+				SymbolsDSN: "postgres://localhost/test",
+			},
+			expectError: "symbols_query is required when symbols_dsn is set",
+		},
+		{
+			name: "missing sync_queries entry for query_start key",
+			config: FetcherConfig{
+				SymbolsDSN:   "postgres://localhost/test",
+				SymbolsQuery: "SELECT id, ticker, listed FROM asset",
+				QueryStart:   map[string]string{"1Min": "2024-01-01", "1D": "2020-01-01"},
+				SyncQueries: map[string]SyncQuerySet{
+					"1Min": fullSyncQuery,
+					// Missing "1D"
+				},
+			},
+			expectError: "sync_queries entry required for query_start key \"1D\"",
+		},
+		{
+			name: "empty read query in sync_queries",
+			config: FetcherConfig{
+				SymbolsDSN:   "postgres://localhost/test",
+				SymbolsQuery: "SELECT id, ticker, listed FROM asset",
+				QueryStart:   map[string]string{"1Min": "2024-01-01"},
+				SyncQueries: map[string]SyncQuerySet{
+					"1Min": {Read: "", WriteOldest: "UPDATE ...", WriteNewest: "UPDATE ..."},
+				},
+			},
+			expectError: "sync_queries[\"1Min\"].read is required",
+		},
+		{
+			name: "empty write_oldest in sync_queries",
+			config: FetcherConfig{
+				SymbolsDSN:   "postgres://localhost/test",
+				SymbolsQuery: "SELECT id, ticker, listed FROM asset",
+				QueryStart:   map[string]string{"1Min": "2024-01-01"},
+				SyncQueries: map[string]SyncQuerySet{
+					"1Min": {Read: "SELECT ...", WriteOldest: "", WriteNewest: "UPDATE ..."},
+				},
+			},
+			expectError: "sync_queries[\"1Min\"].write_oldest is required",
+		},
+		{
+			name: "empty write_newest in sync_queries",
+			config: FetcherConfig{
+				SymbolsDSN:   "postgres://localhost/test",
+				SymbolsQuery: "SELECT id, ticker, listed FROM asset",
+				QueryStart:   map[string]string{"1Min": "2024-01-01"},
+				SyncQueries: map[string]SyncQuerySet{
+					"1Min": {Read: "SELECT ...", WriteOldest: "UPDATE ...", WriteNewest: ""},
+				},
+			},
+			expectError: "sync_queries[\"1Min\"].write_newest is required",
+		},
+		{
+			name: "no dsn means no validation needed",
+			config: FetcherConfig{
+				QueryStart: map[string]string{"1Min": "2024-01-01"},
+				// No SymbolsDSN, so SyncQueries is not required.
+			},
+		},
+		{
+			name: "dsn with no query_start means no sync_queries needed",
+			config: FetcherConfig{
+				SymbolsDSN:   "postgres://localhost/test",
+				SymbolsQuery: "SELECT id, ticker, listed FROM asset",
+				// No QueryStart, so SyncQueries is not required.
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateConfig(&tt.config)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

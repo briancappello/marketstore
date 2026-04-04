@@ -2,7 +2,7 @@ root_directory: data
 listen_port: 5993
 grpc_listen_port: 5995
 log_level: info
-stop_grace_period: 0
+stop_grace_period: 5
 wal_rotate_interval: 5
 timezone: "America/New_York"
 
@@ -107,7 +107,7 @@ bgworkers:
         - AAPL
         - SPY
       symbols_dsn: "postgres://FIXME_USER:FIXME_PW@127.0.0.1:5432/fin?sslmode=disable"
-      symbols_query: "SELECT ticker, listed FROM asset WHERE is_active = TRUE AND delisted IS NULL"
+      symbols_query: "SELECT id, ticker, listed FROM asset WHERE is_active = TRUE AND delisted IS NULL"
 
       # query_start controls backfill independently of streaming.
       # Keys can be quotes, trades, or timeframes (eg 1Min, 5Min, 1H, 1D)
@@ -118,3 +118,47 @@ bgworkers:
         1D: "2024-01-01"
       backfill_batch_size: 50000
       backfill_adjusted: true
+
+      # sync_queries tracks backfill coverage in PostgreSQL so the backfiller
+      # knows exactly what has already been fetched from the API. Each key must
+      # match a key in query_start. Queries use $1 = asset_id (the id column
+      # from symbols_query) and $2 = timestamp.
+      #
+      # The read query must return two nullable TIMESTAMPTZ columns: (oldest, newest).
+      # Together they define the confirmed sync window [oldest, newest]:
+      #   - If newest >= latest market close: forward backfill is skipped.
+      #   - If oldest <= query_start: backward backfill is skipped.
+      #   - If query_start is moved earlier: the gap from query_start to oldest is backfilled.
+      #
+      # The write queries use LEAST/GREATEST with COALESCE to handle the initial
+      # NULL case and to ensure the window only expands, never shrinks.
+      #
+      # This example uses the fin database schema (asset_data_vendor table).
+      # You can use any schema — the plugin only executes these SQL strings.
+      sync_queries:
+        1Min:
+          read: >
+            SELECT minutely_oldest, minutely_newest
+            FROM asset_data_vendor
+            WHERE asset_id = $1 AND data_vendor_id = (SELECT id FROM data_vendor WHERE key = 'massive')
+          write_oldest: >
+            UPDATE asset_data_vendor
+            SET minutely_oldest = COALESCE(LEAST(minutely_oldest, $2), $2)
+            WHERE asset_id = $1 AND data_vendor_id = (SELECT id FROM data_vendor WHERE key = 'massive')
+          write_newest: >
+            UPDATE asset_data_vendor
+            SET minutely_newest = COALESCE(GREATEST(minutely_newest, $2), $2)
+            WHERE asset_id = $1 AND data_vendor_id = (SELECT id FROM data_vendor WHERE key = 'massive')
+        1D:
+          read: >
+            SELECT daily_oldest, daily_newest
+            FROM asset_data_vendor
+            WHERE asset_id = $1 AND data_vendor_id = (SELECT id FROM data_vendor WHERE key = 'massive')
+          write_oldest: >
+            UPDATE asset_data_vendor
+            SET daily_oldest = COALESCE(LEAST(daily_oldest, $2), $2)
+            WHERE asset_id = $1 AND data_vendor_id = (SELECT id FROM data_vendor WHERE key = 'massive')
+          write_newest: >
+            UPDATE asset_data_vendor
+            SET daily_newest = COALESCE(GREATEST(daily_newest, $2), $2)
+            WHERE asset_id = $1 AND data_vendor_id = (SELECT id FROM data_vendor WHERE key = 'massive')

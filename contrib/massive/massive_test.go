@@ -76,9 +76,19 @@ func TestNewBgWorker_Validation(t *testing.T) {
 				"api_key":       "test-key",
 				"ws_data_types": []string{"1Min"},
 				"symbols_dsn":   "postgres://invalid:5432/nonexistent?connect_timeout=1",
-				"symbols_query": "SELECT symbol FROM symbols",
+				"symbols_query": "SELECT id, symbol, listed FROM symbols",
 			},
 			expectError: "fetch symbols from database: connect to postgres:",
+		},
+		{
+			name: "query_start with dsn but missing sync_queries returns error",
+			config: map[string]interface{}{
+				"api_key":       "test-key",
+				"symbols_dsn":   "postgres://localhost/test",
+				"symbols_query": "SELECT id, ticker, listed FROM asset",
+				"query_start":   map[string]interface{}{"1Min": "2024-01-01"},
+			},
+			expectError: "sync_queries entry required for query_start key",
 		},
 		{
 			name: "static symbols without dsn works",

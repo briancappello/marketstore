@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	jsonit "github.com/json-iterator/go"
 	massivews "github.com/massive-com/client-go/v3/websocket"
 
@@ -78,11 +79,13 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 		return nil, fmt.Errorf("parse massive config: %w", err)
 	}
 
+	// Validate config consistency (sync_queries required for each query_start key, etc.).
+	if err := massiveconfig.ValidateConfig(&config); err != nil {
+		return nil, err
+	}
+
 	// Fetch symbols from PostgreSQL if configured, otherwise use static Symbols list.
 	if config.SymbolsDSN != "" {
-		if config.SymbolsQuery == "" {
-			return nil, fmt.Errorf("symbols_query is required when symbols_dsn is set")
-		}
 		symbolInfos, err := massiveconfig.FetchSymbolsFromDB(config.SymbolsDSN, config.SymbolsQuery)
 		if err != nil {
 			return nil, fmt.Errorf("fetch symbols from database: %w", err)
@@ -109,7 +112,7 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 			log.Info("[massive] loaded %d symbols from database", len(symbolInfos))
 		}
 	} else {
-		// Convert static Symbols to SymbolInfos (no listing dates).
+		// Convert static Symbols to SymbolInfos (no listing dates, no IDs).
 		config.SymbolInfos = make([]massiveconfig.SymbolInfo, len(config.Symbols))
 		for i, sym := range config.Symbols {
 			config.SymbolInfos[i] = massiveconfig.SymbolInfo{Symbol: sym}
@@ -268,9 +271,17 @@ func (mf *MassiveFetcher) Shutdown() {
 }
 
 // runBackfill performs a historical data backfill from the Massive REST API
-// for all configured data types and symbols. On subsequent restarts, backfill
-// resumes from the last written timestamp for each symbol/datatype combination.
-// Backfill runs up to the latest market trading time (not wall-clock time).
+// for all configured data types and symbols.
+//
+// The backfill uses sync timestamps stored in PostgreSQL (via sync_queries) to
+// track confirmed coverage for each symbol and data type. On each run, it checks
+// for two types of gaps:
+//   - Forward gap: new market data exists past the newest sync timestamp.
+//   - Backward gap: query_start was moved earlier than the oldest sync timestamp.
+//
+// After each successful backfill for a symbol+datatype, the sync timestamp is
+// immediately updated in PostgreSQL so that a restart does not re-fetch the same data.
+//
 // Returns context.Canceled if shutdown was requested during backfill.
 func (mf *MassiveFetcher) runBackfill() error {
 	// Use the latest market trading time as the end boundary, not wall-clock time.
@@ -291,12 +302,27 @@ func (mf *MassiveFetcher) runBackfill() error {
 		adjusted = *mf.config.BackfillAdjusted
 	}
 
-	client := &http.Client{
+	httpClient := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConnsPerHost: maxConnsPerHost,
 			MaxConnsPerHost:     maxConnsPerHost,
 		},
 		Timeout: backfillHTTPTimeout,
+	}
+
+	// Open a single database connection for sync reads/writes throughout the backfill.
+	// This avoids 11K+ connect/disconnect cycles for large symbol lists.
+	var pgConn *pgx.Conn
+	hasSyncQueries := len(mf.config.SyncQueries) > 0 && mf.config.SymbolsDSN != ""
+	if hasSyncQueries {
+		ctx, cancel := context.WithTimeout(mf.ctx, massiveconfig.DBQueryTimeout)
+		var err error
+		pgConn, err = pgx.Connect(ctx, mf.config.SymbolsDSN)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("connect to postgres for sync: %w", err)
+		}
+		defer pgConn.Close(context.Background())
 	}
 
 	writerWP := worker.NewWorkerPool(mf.ctx, 1)
@@ -341,73 +367,189 @@ func (mf *MassiveFetcher) runBackfill() error {
 			// Apply per-symbol listing date override if available and more recent.
 			effectiveStart := massiveconfig.EffectiveBackfillStart(configStart, symInfo.ListingDate)
 
+			// Use regular market hours for daily+ timeframes, extended hours for intraday.
+			end := endExtended
+			if isDailyOrLonger(key) {
+				end = endRegular
+			}
+
 			// Check if effectiveStart is in the future (listing date not yet reached).
-			if effectiveStart.After(endExtended) {
-				log.Info("[massive] %s listing date %s is in the future, skipping backfill",
-					symbol, effectiveStart.Format(dateFormat))
+			if effectiveStart.After(end) {
 				continue
 			}
 
-			switch key {
-			case "trades":
-				tbk := io.NewTimeBucketKey(models.TradeBucketKey(symbol))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended, "trades")
-				if decision.skip {
-					continue
-				}
-				log.Info("[massive] %s backfilling trades from %s to %s",
-					symbol, decision.start.Format(time.RFC3339), endExtended.Format(time.RFC3339))
-				if err := backfill.Trades(mf.ctx, client, symbol, decision.start, endExtended, batchSize, writerWP, nil); err != nil {
-					if err == context.Canceled {
-						writerWP.CloseAndWait()
-						return err
-					}
-					log.Warn("[massive] failed to backfill trades for %s: %v", symbol, err)
-				}
-			case "quotes":
-				tbk := io.NewTimeBucketKey(models.QuoteBucketKey(symbol))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, endExtended, "quotes")
-				if decision.skip {
-					continue
-				}
-				log.Info("[massive] %s backfilling quotes from %s to %s",
-					symbol, decision.start.Format(time.RFC3339), endExtended.Format(time.RFC3339))
-				if err := backfill.Quotes(mf.ctx, client, symbol, decision.start, endExtended, batchSize, writerWP, nil); err != nil {
-					if err == context.Canceled {
-						writerWP.CloseAndWait()
-						return err
-					}
-					log.Warn("[massive] failed to backfill quotes for %s: %v", symbol, err)
-				}
-			default:
-				// Assume it's a bar timeframe (e.g., "1Min", "5Min", "1H", "1D").
-				tf := key
-				// Use regular market hours for daily+ timeframes, extended hours for intraday.
-				end := endExtended
-				if isDailyOrLonger(tf) {
-					end = endRegular
-				}
-				tbk := io.NewTimeBucketKey(models.BarBucketKey(symbol, tf))
-				decision := mf.determineBackfillStart(tbk, effectiveStart, end, tf)
-				if decision.skip {
-					continue
-				}
-				log.Info("[massive] %s backfilling %s from %s to %s",
-					symbol, tf, decision.start.Format(time.RFC3339), end.Format(time.RFC3339))
-				if err := backfill.Bars(mf.ctx, client, symbol, tf, decision.start, end, batchSize, adjusted, writerWP, nil); err != nil {
-					if err == context.Canceled {
-						writerWP.CloseAndWait()
-						return err
-					}
-					log.Warn("[massive] failed to backfill %s bars for %s: %v", tf, symbol, err)
-				}
+			// Read the sync window from the database.
+			var sw massiveconfig.SyncWindow
+			syncQueries, haveSQ := mf.config.SyncQueries[key]
+			if haveSQ && pgConn != nil && symInfo.ID != 0 {
+				sw = massiveconfig.ReadSyncWindow(mf.ctx, pgConn, syncQueries.Read, symInfo.ID)
 			}
+
+			// --- Forward gap: new market data since last sync ---
+			mf.backfillForward(httpClient, pgConn, writerWP, symInfo, key, effectiveStart, end, sw, syncQueries, batchSize, adjusted)
+
+			// --- Backward gap: query_start moved earlier than oldest sync ---
+			mf.backfillBackward(httpClient, pgConn, writerWP, symInfo, key, effectiveStart, sw, syncQueries, batchSize, adjusted)
 		}
 	}
 
 	writerWP.CloseAndWait()
 	log.Info("[massive] backfill complete")
 	return nil
+}
+
+// backfillForward handles the forward gap: fetching data from the newest sync
+// timestamp (or local data) up to the market close time.
+func (mf *MassiveFetcher) backfillForward(
+	httpClient *http.Client,
+	pgConn *pgx.Conn,
+	writerWP *worker.Pool,
+	symInfo massiveconfig.SymbolInfo,
+	dataType string,
+	effectiveStart, end time.Time,
+	sw massiveconfig.SyncWindow,
+	syncQueries massiveconfig.SyncQuerySet,
+	batchSize int,
+	adjusted bool,
+) {
+	symbol := symInfo.Symbol
+
+	// If sync says we're caught up, skip.
+	if sw.Newest != nil && !sw.Newest.Before(end) {
+		return
+	}
+
+	// Determine where to start the forward backfill.
+	// Priority: sync newest > local lastTS > effectiveStart.
+	var forwardStart time.Time
+	if sw.Newest != nil {
+		forwardStart = sw.Newest.Add(time.Nanosecond)
+	} else {
+		// No sync record. Check local data as a fallback to avoid re-fetching
+		// data that's already on disk (e.g., first run with sync enabled on
+		// an existing database).
+		tbk := tbkForDataType(symbol, dataType)
+		lastTS := findLastTimestamp(tbk)
+		if !lastTS.IsZero() {
+			forwardStart = lastTS.Add(time.Nanosecond)
+		} else {
+			forwardStart = effectiveStart
+		}
+	}
+
+	if !forwardStart.Before(end) {
+		return
+	}
+
+	log.Info("[massive] %s backfilling %s from %s to %s",
+		symbol, dataType, forwardStart.Format(time.RFC3339), end.Format(time.RFC3339))
+
+	err := mf.executeBackfill(httpClient, writerWP, symbol, dataType, forwardStart, end, batchSize, adjusted)
+	if err != nil {
+		if err == context.Canceled {
+			return
+		}
+		log.Warn("[massive] failed to backfill %s %s: %v", symbol, dataType, err)
+		return
+	}
+
+	// Write the newest sync timestamp after successful backfill.
+	if pgConn != nil && syncQueries.WriteNewest != "" && symInfo.ID != 0 {
+		if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, pgConn, syncQueries.WriteNewest, symInfo.ID, end); writeErr != nil {
+			log.Warn("[massive] failed to write newest sync for %s %s: %v", symbol, dataType, writeErr)
+		}
+	}
+
+	// Also write oldest if this is the first sync (no prior record).
+	if sw.Oldest == nil && pgConn != nil && syncQueries.WriteOldest != "" && symInfo.ID != 0 {
+		writeStart := effectiveStart
+		if sw.Newest != nil {
+			// We only filled forward, oldest was already set or doesn't need to move.
+			writeStart = *sw.Newest
+		}
+		// On first sync, oldest = effectiveStart (the beginning of what we requested).
+		if sw.Newest == nil {
+			if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, pgConn, syncQueries.WriteOldest, symInfo.ID, writeStart); writeErr != nil {
+				log.Warn("[massive] failed to write oldest sync for %s %s: %v", symbol, dataType, writeErr)
+			}
+		}
+	}
+}
+
+// backfillBackward handles the backward gap: fetching data from effectiveStart
+// up to the oldest sync timestamp when query_start has been moved earlier.
+func (mf *MassiveFetcher) backfillBackward(
+	httpClient *http.Client,
+	pgConn *pgx.Conn,
+	writerWP *worker.Pool,
+	symInfo massiveconfig.SymbolInfo,
+	dataType string,
+	effectiveStart time.Time,
+	sw massiveconfig.SyncWindow,
+	syncQueries massiveconfig.SyncQuerySet,
+	batchSize int,
+	adjusted bool,
+) {
+	symbol := symInfo.Symbol
+
+	// Backward backfill only makes sense if we have an existing sync record
+	// and effectiveStart is earlier than our oldest coverage.
+	if sw.Oldest == nil || !effectiveStart.Before(*sw.Oldest) {
+		return
+	}
+
+	backwardEnd := *sw.Oldest
+
+	log.Info("[massive] %s backfilling %s backward from %s to %s",
+		symbol, dataType, effectiveStart.Format(time.RFC3339), backwardEnd.Format(time.RFC3339))
+
+	err := mf.executeBackfill(httpClient, writerWP, symbol, dataType, effectiveStart, backwardEnd, batchSize, adjusted)
+	if err != nil {
+		if err == context.Canceled {
+			return
+		}
+		log.Warn("[massive] failed to backfill %s %s backward: %v", symbol, dataType, err)
+		return
+	}
+
+	// Update the oldest sync timestamp.
+	if pgConn != nil && syncQueries.WriteOldest != "" && symInfo.ID != 0 {
+		if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, pgConn, syncQueries.WriteOldest, symInfo.ID, effectiveStart); writeErr != nil {
+			log.Warn("[massive] failed to write oldest sync for %s %s: %v", symbol, dataType, writeErr)
+		}
+	}
+}
+
+// executeBackfill dispatches a backfill request to the appropriate function
+// based on data type (trades, quotes, or bar timeframe).
+func (mf *MassiveFetcher) executeBackfill(
+	httpClient *http.Client,
+	writerWP *worker.Pool,
+	symbol, dataType string,
+	start, end time.Time,
+	batchSize int,
+	adjusted bool,
+) error {
+	switch dataType {
+	case "trades":
+		return backfill.Trades(mf.ctx, httpClient, symbol, start, end, batchSize, writerWP, nil)
+	case "quotes":
+		return backfill.Quotes(mf.ctx, httpClient, symbol, start, end, batchSize, writerWP, nil)
+	default:
+		return backfill.Bars(mf.ctx, httpClient, symbol, dataType, start, end, batchSize, adjusted, writerWP, nil)
+	}
+}
+
+// tbkForDataType returns the TimeBucketKey for a symbol and data type.
+func tbkForDataType(symbol, dataType string) *io.TimeBucketKey {
+	switch dataType {
+	case "trades":
+		return io.NewTimeBucketKey(models.TradeBucketKey(symbol))
+	case "quotes":
+		return io.NewTimeBucketKey(models.QuoteBucketKey(symbol))
+	default:
+		return io.NewTimeBucketKey(models.BarBucketKey(symbol, dataType))
+	}
 }
 
 // findLastTimestamp queries the database for the most recent timestamp in the
@@ -467,7 +609,8 @@ type backfillDecision struct {
 }
 
 // determineBackfillStart checks for existing data and returns the appropriate
-// start time for backfill.
+// start time for backfill. This is the fallback path used when sync queries
+// are not configured (static symbols without a database).
 //
 // The dataType parameter is used to determine whether the data is "up to date":
 //   - For bar timeframes (e.g., "1Min", "1D"), the last bar in a session starts
