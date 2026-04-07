@@ -3,14 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	jsonit "github.com/json-iterator/go"
 	massivews "github.com/massive-com/client-go/v3/websocket"
 
@@ -37,6 +39,11 @@ const (
 	maxConnsPerHost          = 100
 )
 
+// errConnectionLimit is returned by connectAndStream when the upstream server
+// rejects the connection due to exceeding the account's WebSocket connection
+// limit (close code 1008, policy violation).
+var errConnectionLimit = errors.New("connection limit exceeded")
+
 // wsDataTypeToTopic maps our config data type names to upstream WebSocket topics.
 var wsDataTypeToTopic = map[string]massivews.Topic{
 	"1Min":   massivews.StocksMinAggs,
@@ -45,12 +52,35 @@ var wsDataTypeToTopic = map[string]massivews.Topic{
 	"quotes": massivews.StocksQuotes,
 }
 
-// wsLogger adapts the MarketStore log package to the upstream client's Logger interface.
-type wsLogger struct{}
+// connAwareLogger adapts the MarketStore log package to the upstream client's
+// Logger interface. It monitors error messages for connection-limit patterns
+// (close code 1008, policy violation) and signals connLimitCh when detected.
+//
+// This is necessary because the upstream library logs connection-limit close
+// errors via c.log.Errorf() inside its close() method, but does NOT surface
+// them through the ReconnectCallback or Error channel. The ReconnectCallback
+// only fires when the TCP dial itself fails, not when the server accepts the
+// connection and then immediately kicks us with a close frame.
+type connAwareLogger struct {
+	connLimitCh chan struct{}
+}
 
-func (l *wsLogger) Debugf(template string, args ...any) { log.Debug("[massive/ws] "+template, args...) }
-func (l *wsLogger) Infof(template string, args ...any)  { log.Info("[massive/ws] "+template, args...) }
-func (l *wsLogger) Errorf(template string, args ...any) { log.Error("[massive/ws] "+template, args...) }
+func (l *connAwareLogger) Debugf(template string, args ...any) {
+	log.Debug("[massive/ws] "+template, args...)
+}
+func (l *connAwareLogger) Infof(template string, args ...any) {
+	log.Info("[massive/ws] "+template, args...)
+}
+func (l *connAwareLogger) Errorf(template string, args ...any) {
+	msg := fmt.Sprintf(template, args...)
+	if strings.Contains(msg, "policy violation") || strings.Contains(msg, "1008") {
+		select {
+		case l.connLimitCh <- struct{}{}:
+		default:
+		}
+	}
+	log.Error("[massive/ws] %s", msg)
+}
 
 // Use jsoniter because it supports marshal/unmarshal of map[interface{}]interface{} type.
 // When the config file contains nested structures like query_start: {1Min: "2024-01-01"},
@@ -174,8 +204,8 @@ func (mf *MassiveFetcher) Run() {
 }
 
 // startStreaming launches WebSocket streaming goroutines for all configured data types.
-// Each data type gets its own upstream massivews.Client instance with automatic
-// reconnection, exponential backoff, and auth failure detection.
+// Each data type gets its own long-lived goroutine that handles connection setup,
+// error detection, and automatic reconnection on a market-calendar-aware schedule.
 func (mf *MassiveFetcher) startStreaming() {
 	feed := massivews.Feed(massivews.RealTime)
 	if mf.config.WSServer != "" {
@@ -190,6 +220,11 @@ func (mf *MassiveFetcher) startStreaming() {
 		"quotes": handlers.QuoteHandler,
 	}
 
+	tickers := mf.config.Symbols
+	if len(tickers) == 0 {
+		tickers = []string{"*"}
+	}
+
 	for dataType := range mf.wsDataTypes {
 		topic, ok := wsDataTypeToTopic[dataType]
 		if !ok {
@@ -199,70 +234,171 @@ func (mf *MassiveFetcher) startStreaming() {
 
 		handler := dataTypeHandlers[dataType]
 
-		client, err := massivews.New(massivews.Config{
-			APIKey:  mf.config.APIKey,
-			Feed:    feed,
-			Market:  massivews.Stocks,
-			RawData: true,
-			Log:     &wsLogger{},
-			ReconnectCallback: func(err error) {
-				if err != nil {
-					log.Warn("[massive] reconnecting %s: %v", dataType, err)
-				} else {
-					log.Info("[massive] reconnected %s", dataType)
-				}
-			},
-		})
-		if err != nil {
-			log.Error("[massive] failed to create WebSocket client for %s: %v", dataType, err)
-			continue
-		}
-
-		// Subscribe to the topic with configured symbols.
-		tickers := mf.config.Symbols
-		if len(tickers) == 0 {
-			tickers = []string{"*"}
-		}
-		if err := client.Subscribe(topic, tickers...); err != nil {
-			log.Error("[massive] failed to subscribe %s: %v", dataType, err)
-			client.Close()
-			continue
-		}
-
-		if err := client.Connect(); err != nil {
-			log.Error("[massive] failed to connect %s: %v", dataType, err)
-			client.Close()
-			continue
-		}
-
-		log.Info("[massive] streaming %s (%d symbols)", dataType, len(tickers))
-
 		mf.wg.Add(1)
-		go func(dt string, c *massivews.Client, h func([]byte)) {
-			defer mf.wg.Done()
-			defer c.Close()
-
-			for {
-				select {
-				case <-mf.ctx.Done():
-					log.Info("[massive] stopping stream for %s", dt)
-					return
-				case err := <-c.Error():
-					log.Error("[massive] fatal error on %s: %v", dt, err)
-					return
-				case msg, ok := <-c.Output():
-					if !ok {
-						log.Info("[massive] output channel closed for %s", dt)
-						return
-					}
-					// In RawData mode, output is json.RawMessage (individual messages).
-					if raw, ok := msg.(json.RawMessage); ok {
-						h([]byte(raw))
-					}
-				}
-			}
-		}(dataType, client, handler)
+		go mf.streamWithRestart(dataType, topic, handler, feed, tickers)
 	}
+}
+
+// streamWithRestart is the outer retry loop for a single data type's WebSocket
+// stream. On any fatal error (including connection-limit rejections), it sleeps
+// until the next pre-market open (3:58 AM ET) and retries. On a successful
+// reconnect it also triggers a backfill to cover any data gap.
+func (mf *MassiveFetcher) streamWithRestart(
+	dataType string,
+	topic massivews.Topic,
+	handler func([]byte),
+	feed massivews.Feed,
+	tickers []string,
+) {
+	defer mf.wg.Done()
+
+	isReconnect := false
+	for {
+		err := mf.connectAndStream(dataType, topic, handler, feed, tickers, isReconnect)
+		if err == nil {
+			// Clean shutdown via context cancellation.
+			return
+		}
+
+		// Log differently for connection-limit vs other fatal errors.
+		if errors.Is(err, errConnectionLimit) {
+			log.Error("[massive] %s: connection limit reached, scheduling retry at next pre-market open", dataType)
+		} else {
+			log.Error("[massive] %s: stream failed (%v), scheduling retry at next pre-market open", dataType, err)
+		}
+
+		// Sleep until 3:58 AM ET on the next trading day.
+		wakeTime := nextPreMarketOpen(time.Now())
+		log.Info("[massive] %s: next reconnect attempt at %s", dataType, wakeTime.Format(time.RFC3339))
+
+		select {
+		case <-mf.ctx.Done():
+			return
+		case <-time.After(time.Until(wakeTime)):
+			log.Info("[massive] %s: waking up for scheduled reconnect", dataType)
+		}
+
+		isReconnect = true
+	}
+}
+
+// connectAndStream creates a WebSocket client for a single data type, subscribes,
+// connects, and processes messages until a fatal error or context cancellation.
+//
+// It returns:
+//   - nil on clean shutdown (context cancelled)
+//   - errConnectionLimit if the server rejected us for exceeding the connection limit
+//   - a wrapped error for any other fatal failure
+//
+// Connection-limit detection works through the logger: when the upstream library's
+// close() method logs an error containing "policy violation" or "1008", the
+// connAwareLogger signals a channel that the select loop monitors. This is the
+// only reliable detection point — the library's ReconnectCallback only fires when
+// the TCP dial fails, not when the server accepts and then kicks us with a close
+// frame.
+//
+// MaxRetries is intentionally not set, so the library uses its default 15-minute
+// exponential backoff. This allows transient network errors (close code 1006,
+// unexpected EOF) to recover automatically without falling through to the
+// wall-clock retry schedule.
+//
+// When isReconnect is true and the connection succeeds, a background backfill is
+// triggered to fill any data gap from the time the stream was down.
+func (mf *MassiveFetcher) connectAndStream(
+	dataType string,
+	topic massivews.Topic,
+	handler func([]byte),
+	feed massivews.Feed,
+	tickers []string,
+	isReconnect bool,
+) error {
+	connLimitCh := make(chan struct{}, 1)
+
+	client, err := massivews.New(massivews.Config{
+		APIKey:  mf.config.APIKey,
+		Feed:    feed,
+		Market:  massivews.Stocks,
+		RawData: true,
+		Log:     &connAwareLogger{connLimitCh: connLimitCh},
+		ReconnectCallback: func(err error) {
+			if err != nil {
+				log.Warn("[massive] reconnecting %s: %v", dataType, err)
+			} else {
+				log.Info("[massive] reconnected %s", dataType)
+			}
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create WebSocket client for %s: %w", dataType, err)
+	}
+	defer client.Close()
+
+	if err := client.Subscribe(topic, tickers...); err != nil {
+		return fmt.Errorf("subscribe %s: %w", dataType, err)
+	}
+
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("connect %s: %w", dataType, err)
+	}
+
+	log.Info("[massive] streaming %s (%d symbols)", dataType, len(tickers))
+
+	// On reconnect, backfill any data gap in the background.
+	if isReconnect && len(mf.config.QueryStart) > 0 && !utils.InstanceConfig.NoBackfill {
+		go func() {
+			log.Info("[massive] running gap-fill backfill after reconnect")
+			if err := mf.runBackfill(); err != nil && err != context.Canceled {
+				log.Warn("[massive] gap-fill backfill failed: %v", err)
+			}
+		}()
+	}
+
+	for {
+		select {
+		case <-mf.ctx.Done():
+			log.Info("[massive] stopping stream for %s", dataType)
+			return nil
+		case <-connLimitCh:
+			log.Error("[massive] connection limit detected for %s via server close frame", dataType)
+			return errConnectionLimit
+		case err := <-client.Error():
+			return fmt.Errorf("fatal error on %s: %w", dataType, err)
+		case msg, ok := <-client.Output():
+			if !ok {
+				log.Info("[massive] output channel closed for %s", dataType)
+				return fmt.Errorf("output channel closed for %s", dataType)
+			}
+			// In RawData mode, output is json.RawMessage (individual messages).
+			if raw, ok := msg.(json.RawMessage); ok {
+				handler([]byte(raw))
+			}
+		}
+	}
+}
+
+// nextPreMarketOpen returns 3:58 AM ET on the next applicable trading day.
+// If it is currently before 3:58 AM on a trading day, returns today's 3:58 AM.
+// Otherwise, returns 3:58 AM on the next trading day per the NASDAQ calendar.
+func nextPreMarketOpen(now time.Time) time.Time {
+	tz := calendar.Nasdaq.Tz()
+	local := now.In(tz)
+
+	// Pre-market opens at 4:00 AM ET; we connect 2 minutes early.
+	targetHour := 3
+	targetMin := 58
+
+	today358 := time.Date(local.Year(), local.Month(), local.Day(),
+		targetHour, targetMin, 0, 0, tz)
+
+	// If we haven't passed 3:58 AM today and today is a trading day, use today.
+	if local.Before(today358) && calendar.Nasdaq.IsMarketDay(local) {
+		return today358
+	}
+
+	// Otherwise, find the next trading day.
+	nextDay := calendar.Nasdaq.NextMarketDay(local)
+	return time.Date(nextDay.Year(), nextDay.Month(), nextDay.Day(),
+		targetHour, targetMin, 0, 0, tz)
 }
 
 // Shutdown cancels the context and stops all background operations.
@@ -310,89 +446,98 @@ func (mf *MassiveFetcher) runBackfill() error {
 		Timeout: backfillHTTPTimeout,
 	}
 
-	// Open a single database connection for sync reads/writes throughout the backfill.
-	// This avoids 11K+ connect/disconnect cycles for large symbol lists.
-	var pgConn *pgx.Conn
+	// Open a connection pool for sync reads/writes throughout the backfill.
+	// Using pgxpool.Pool instead of pgx.Conn so that multiple symbol-level
+	// goroutines can safely perform concurrent database operations.
+	var pgPool *pgxpool.Pool
 	hasSyncQueries := len(mf.config.SyncQueries) > 0 && mf.config.SymbolsDSN != ""
 	if hasSyncQueries {
 		ctx, cancel := context.WithTimeout(mf.ctx, massiveconfig.DBQueryTimeout)
 		var err error
-		pgConn, err = pgx.Connect(ctx, mf.config.SymbolsDSN)
+		pgPool, err = pgxpool.New(ctx, mf.config.SymbolsDSN)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("connect to postgres for sync: %w", err)
 		}
-		defer pgConn.Close(context.Background())
+		defer pgPool.Close()
 	}
 
+	parallelism := mf.config.BackfillParallelism
+	if parallelism <= 0 {
+		parallelism = runtime.NumCPU()
+	}
+
+	apiWP := worker.NewWorkerPool(mf.ctx, parallelism)
 	writerWP := worker.NewWorkerPool(mf.ctx, 1)
 
-	log.Info("[massive] starting backfill (extended hours end: %s, regular hours end: %s)",
-		endExtended.Format(time.RFC3339), endRegular.Format(time.RFC3339))
+	log.Info("[massive] starting backfill (%d symbol workers, extended hours end: %s, regular hours end: %s)",
+		parallelism, endExtended.Format(time.RFC3339), endRegular.Format(time.RFC3339))
 
 	for _, symInfo := range mf.config.SymbolInfos {
-		symbol := symInfo.Symbol
-
 		// Check for cancellation between symbols.
 		select {
 		case <-mf.ctx.Done():
+			apiWP.CloseAndWait()
 			writerWP.CloseAndWait()
 			return mf.ctx.Err()
 		default:
 		}
 
-		if symbol == "*" {
+		if symInfo.Symbol == "*" {
 			log.Warn("[massive] backfill with wildcard symbol is not supported, use the backfiller CLI instead")
 			continue
 		}
 
-		// Iterate over query_start keys to determine what to backfill.
-		// Keys are either timeframes (e.g., "1Min", "1D") for bars,
-		// or "trades"/"quotes" for tick data.
-		for key, startDateStr := range mf.config.QueryStart {
-			// Check for cancellation between data types.
-			select {
-			case <-mf.ctx.Done():
-				writerWP.CloseAndWait()
-				return mf.ctx.Err()
-			default:
+		currentSymInfo := symInfo
+		apiWP.Do(func() {
+			// Iterate over query_start keys to determine what to backfill.
+			// Keys are either timeframes (e.g., "1Min", "1D") for bars,
+			// or "trades"/"quotes" for tick data.
+			for key, startDateStr := range mf.config.QueryStart {
+				// Check for cancellation between data types.
+				select {
+				case <-mf.ctx.Done():
+					return
+				default:
+				}
+
+				configStart, err := time.ParseInLocation(dateFormat, startDateStr, calendar.Nasdaq.Tz())
+				if err != nil {
+					log.Error("[massive] invalid query_start date %q for %s: %v", startDateStr, key, err)
+					continue
+				}
+
+				// Apply per-symbol listing date override if available and more recent.
+				effectiveStart := massiveconfig.EffectiveBackfillStart(configStart, currentSymInfo.ListingDate)
+
+				// Use regular market hours for daily+ timeframes, extended hours for intraday.
+				end := endExtended
+				if isDailyOrLonger(key) {
+					end = endRegular
+				}
+
+				// Check if effectiveStart is in the future (listing date not yet reached).
+				if effectiveStart.After(end) {
+					continue
+				}
+
+				// Read the sync window from the database.
+				var sw massiveconfig.SyncWindow
+				syncQueries, haveSQ := mf.config.SyncQueries[key]
+				if haveSQ && pgPool != nil && currentSymInfo.ID != 0 {
+					sw = massiveconfig.ReadSyncWindow(mf.ctx, pgPool, syncQueries.Read, currentSymInfo.ID)
+				}
+
+				// --- Forward gap: new market data since last sync ---
+				mf.backfillForward(httpClient, pgPool, writerWP, currentSymInfo, key, effectiveStart, end, sw, syncQueries, batchSize, adjusted)
+
+				// --- Backward gap: query_start moved earlier than oldest sync ---
+				mf.backfillBackward(httpClient, pgPool, writerWP, currentSymInfo, key, effectiveStart, sw, syncQueries, batchSize, adjusted)
 			}
-
-			configStart, err := time.ParseInLocation(dateFormat, startDateStr, calendar.Nasdaq.Tz())
-			if err != nil {
-				log.Error("[massive] invalid query_start date %q for %s: %v", startDateStr, key, err)
-				continue
-			}
-
-			// Apply per-symbol listing date override if available and more recent.
-			effectiveStart := massiveconfig.EffectiveBackfillStart(configStart, symInfo.ListingDate)
-
-			// Use regular market hours for daily+ timeframes, extended hours for intraday.
-			end := endExtended
-			if isDailyOrLonger(key) {
-				end = endRegular
-			}
-
-			// Check if effectiveStart is in the future (listing date not yet reached).
-			if effectiveStart.After(end) {
-				continue
-			}
-
-			// Read the sync window from the database.
-			var sw massiveconfig.SyncWindow
-			syncQueries, haveSQ := mf.config.SyncQueries[key]
-			if haveSQ && pgConn != nil && symInfo.ID != 0 {
-				sw = massiveconfig.ReadSyncWindow(mf.ctx, pgConn, syncQueries.Read, symInfo.ID)
-			}
-
-			// --- Forward gap: new market data since last sync ---
-			mf.backfillForward(httpClient, pgConn, writerWP, symInfo, key, effectiveStart, end, sw, syncQueries, batchSize, adjusted)
-
-			// --- Backward gap: query_start moved earlier than oldest sync ---
-			mf.backfillBackward(httpClient, pgConn, writerWP, symInfo, key, effectiveStart, sw, syncQueries, batchSize, adjusted)
-		}
+		})
 	}
 
+	apiWP.CloseAndWait()
 	writerWP.CloseAndWait()
 	log.Info("[massive] backfill complete")
 	return nil
@@ -402,7 +547,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 // timestamp (or local data) up to the market close time.
 func (mf *MassiveFetcher) backfillForward(
 	httpClient *http.Client,
-	pgConn *pgx.Conn,
+	db massiveconfig.PGDB,
 	writerWP *worker.Pool,
 	symInfo massiveconfig.SymbolInfo,
 	dataType string,
@@ -449,19 +594,24 @@ func (mf *MassiveFetcher) backfillForward(
 		if err == context.Canceled {
 			return
 		}
+		if errors.Is(err, api.ErrAuthFailed) {
+			log.Error("[massive] API authentication failed, stopping backfill: %v", err)
+			mf.cancel()
+			return
+		}
 		log.Warn("[massive] failed to backfill %s %s: %v", symbol, dataType, err)
 		return
 	}
 
 	// Write the newest sync timestamp after successful backfill.
-	if pgConn != nil && syncQueries.WriteNewest != "" && symInfo.ID != 0 {
-		if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, pgConn, syncQueries.WriteNewest, symInfo.ID, end); writeErr != nil {
+	if db != nil && syncQueries.WriteNewest != "" && symInfo.ID != 0 {
+		if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, db, syncQueries.WriteNewest, symInfo.ID, end); writeErr != nil {
 			log.Warn("[massive] failed to write newest sync for %s %s: %v", symbol, dataType, writeErr)
 		}
 	}
 
 	// Also write oldest if this is the first sync (no prior record).
-	if sw.Oldest == nil && pgConn != nil && syncQueries.WriteOldest != "" && symInfo.ID != 0 {
+	if sw.Oldest == nil && db != nil && syncQueries.WriteOldest != "" && symInfo.ID != 0 {
 		writeStart := effectiveStart
 		if sw.Newest != nil {
 			// We only filled forward, oldest was already set or doesn't need to move.
@@ -469,7 +619,7 @@ func (mf *MassiveFetcher) backfillForward(
 		}
 		// On first sync, oldest = effectiveStart (the beginning of what we requested).
 		if sw.Newest == nil {
-			if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, pgConn, syncQueries.WriteOldest, symInfo.ID, writeStart); writeErr != nil {
+			if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, db, syncQueries.WriteOldest, symInfo.ID, writeStart); writeErr != nil {
 				log.Warn("[massive] failed to write oldest sync for %s %s: %v", symbol, dataType, writeErr)
 			}
 		}
@@ -480,7 +630,7 @@ func (mf *MassiveFetcher) backfillForward(
 // up to the oldest sync timestamp when query_start has been moved earlier.
 func (mf *MassiveFetcher) backfillBackward(
 	httpClient *http.Client,
-	pgConn *pgx.Conn,
+	db massiveconfig.PGDB,
 	writerWP *worker.Pool,
 	symInfo massiveconfig.SymbolInfo,
 	dataType string,
@@ -508,13 +658,18 @@ func (mf *MassiveFetcher) backfillBackward(
 		if err == context.Canceled {
 			return
 		}
+		if errors.Is(err, api.ErrAuthFailed) {
+			log.Error("[massive] API authentication failed, stopping backfill: %v", err)
+			mf.cancel()
+			return
+		}
 		log.Warn("[massive] failed to backfill %s %s backward: %v", symbol, dataType, err)
 		return
 	}
 
 	// Update the oldest sync timestamp.
-	if pgConn != nil && syncQueries.WriteOldest != "" && symInfo.ID != 0 {
-		if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, pgConn, syncQueries.WriteOldest, symInfo.ID, effectiveStart); writeErr != nil {
+	if db != nil && syncQueries.WriteOldest != "" && symInfo.ID != 0 {
+		if writeErr := massiveconfig.WriteSyncTimestamp(mf.ctx, db, syncQueries.WriteOldest, symInfo.ID, effectiveStart); writeErr != nil {
 			log.Warn("[massive] failed to write oldest sync for %s %s: %v", symbol, dataType, writeErr)
 		}
 	}

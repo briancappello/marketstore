@@ -1,12 +1,16 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	massivews "github.com/massive-com/client-go/v3/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 )
 
 func TestWSDataTypeToTopic(t *testing.T) {
@@ -36,11 +40,60 @@ func TestWSDataTypeToTopic(t *testing.T) {
 	assert.Len(t, wsDataTypeToTopic, 4)
 }
 
-func TestWSLogger(t *testing.T) {
+func TestConnAwareLogger(t *testing.T) {
 	t.Parallel()
 
-	// Verify wsLogger satisfies the upstream Logger interface.
-	var _ massivews.Logger = &wsLogger{}
+	// Verify connAwareLogger satisfies the upstream Logger interface.
+	var _ massivews.Logger = &connAwareLogger{}
+
+	t.Run("signals channel on policy violation", func(t *testing.T) {
+		t.Parallel()
+		ch := make(chan struct{}, 1)
+		l := &connAwareLogger{connLimitCh: ch}
+		l.Errorf("r/w threads closed: connection closed unexpectedly: websocket: close 1008 (policy violation)")
+		select {
+		case <-ch:
+			// Expected: channel was signaled.
+		default:
+			t.Error("expected connLimitCh to be signaled for policy violation error")
+		}
+	})
+
+	t.Run("signals channel on 1008 close code", func(t *testing.T) {
+		t.Parallel()
+		ch := make(chan struct{}, 1)
+		l := &connAwareLogger{connLimitCh: ch}
+		l.Errorf("connection closed with code 1008")
+		select {
+		case <-ch:
+			// Expected.
+		default:
+			t.Error("expected connLimitCh to be signaled for 1008 error")
+		}
+	})
+
+	t.Run("does not signal on normal errors", func(t *testing.T) {
+		t.Parallel()
+		ch := make(chan struct{}, 1)
+		l := &connAwareLogger{connLimitCh: ch}
+		l.Errorf("r/w threads closed: connection closed unexpectedly: websocket: close 1006 (abnormal closure): unexpected EOF")
+		select {
+		case <-ch:
+			t.Error("did not expect connLimitCh to be signaled for 1006 error")
+		default:
+			// Expected: channel was not signaled.
+		}
+	})
+
+	t.Run("does not block when channel is full", func(t *testing.T) {
+		t.Parallel()
+		ch := make(chan struct{}, 1)
+		ch <- struct{}{} // Pre-fill the buffer.
+		l := &connAwareLogger{connLimitCh: ch}
+		// Should not block or panic.
+		l.Errorf("websocket: close 1008 (policy violation)")
+		assert.Len(t, ch, 1) // Still just 1 item.
+	})
 }
 
 func TestNewBgWorker_Validation(t *testing.T) {
@@ -457,6 +510,91 @@ func TestIsDailyOrLonger(t *testing.T) {
 		t.Run(tt.tf, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.expected, isDailyOrLonger(tt.tf), "isDailyOrLonger(%q)", tt.tf)
+		})
+	}
+}
+
+func TestErrConnectionLimit(t *testing.T) {
+	t.Parallel()
+
+	// errConnectionLimit should be matchable with errors.Is.
+	err := fmt.Errorf("something went wrong: %w", errConnectionLimit)
+	assert.True(t, errors.Is(err, errConnectionLimit))
+}
+
+func TestNextPreMarketOpen(t *testing.T) {
+	t.Parallel()
+
+	ny := calendar.Nasdaq.Tz()
+
+	tests := []struct {
+		name     string
+		now      time.Time
+		expected time.Time
+	}{
+		{
+			name:     "before 3:58 AM on a trading day returns today",
+			now:      time.Date(2026, 4, 7, 2, 0, 0, 0, ny),  // Tuesday 2:00 AM
+			expected: time.Date(2026, 4, 7, 3, 58, 0, 0, ny), // Tuesday 3:58 AM
+		},
+		{
+			name:     "at 3:57 AM on a trading day returns today",
+			now:      time.Date(2026, 4, 7, 3, 57, 0, 0, ny), // Tuesday 3:57 AM
+			expected: time.Date(2026, 4, 7, 3, 58, 0, 0, ny), // Tuesday 3:58 AM
+		},
+		{
+			name:     "at 3:58 AM on a trading day returns next trading day",
+			now:      time.Date(2026, 4, 7, 3, 58, 0, 0, ny), // Tuesday 3:58 AM (not Before)
+			expected: time.Date(2026, 4, 8, 3, 58, 0, 0, ny), // Wednesday 3:58 AM
+		},
+		{
+			name:     "after market hours on a trading day returns next trading day",
+			now:      time.Date(2026, 4, 7, 21, 0, 0, 0, ny), // Tuesday 9 PM
+			expected: time.Date(2026, 4, 8, 3, 58, 0, 0, ny), // Wednesday 3:58 AM
+		},
+		{
+			name:     "Friday after hours returns Monday",
+			now:      time.Date(2026, 4, 10, 21, 0, 0, 0, ny), // Friday 9 PM
+			expected: time.Date(2026, 4, 13, 3, 58, 0, 0, ny), // Monday 3:58 AM
+		},
+		{
+			name:     "Saturday returns Monday",
+			now:      time.Date(2026, 4, 11, 12, 0, 0, 0, ny), // Saturday noon
+			expected: time.Date(2026, 4, 13, 3, 58, 0, 0, ny), // Monday 3:58 AM
+		},
+		{
+			name:     "Sunday returns Monday",
+			now:      time.Date(2026, 4, 12, 12, 0, 0, 0, ny), // Sunday noon
+			expected: time.Date(2026, 4, 13, 3, 58, 0, 0, ny), // Monday 3:58 AM
+		},
+		{
+			name:     "Sunday early morning returns Monday",
+			now:      time.Date(2026, 4, 12, 1, 0, 0, 0, ny),  // Sunday 1 AM (before 3:58 but not a market day)
+			expected: time.Date(2026, 4, 13, 3, 58, 0, 0, ny), // Monday 3:58 AM
+		},
+		{
+			name:     "before holiday returns day after holiday",
+			now:      time.Date(2026, 7, 2, 21, 0, 0, 0, ny), // Thursday July 2 evening
+			expected: time.Date(2026, 7, 6, 3, 58, 0, 0, ny), // Monday July 6 (July 3 = holiday, 4-5 = weekend)
+		},
+		{
+			name:     "early morning on a holiday returns next trading day",
+			now:      time.Date(2026, 7, 3, 2, 0, 0, 0, ny),  // July 3 (holiday) 2 AM
+			expected: time.Date(2026, 7, 6, 3, 58, 0, 0, ny), // Monday July 6
+		},
+		{
+			name:     "early morning on early-close day returns today (still a market day)",
+			now:      time.Date(2026, 11, 27, 2, 0, 0, 0, ny),  // Day after Thanksgiving 2 AM (early close)
+			expected: time.Date(2026, 11, 27, 3, 58, 0, 0, ny), // Same day 3:58 AM
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := nextPreMarketOpen(tt.now)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

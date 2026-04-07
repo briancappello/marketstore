@@ -5,9 +5,18 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
+
+// PGDB is the subset of pgx query methods used by sync operations.
+// Both *pgx.Conn and *pgxpool.Pool satisfy this interface, allowing
+// callers to use either a single connection or a concurrency-safe pool.
+type PGDB interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // SyncWindow represents the confirmed sync coverage for a symbol and data type.
 // If both Oldest and Newest are non-nil, the window [Oldest, Newest] is the
@@ -25,9 +34,9 @@ type SyncWindow struct {
 // TIMESTAMPTZ columns (oldest, newest).
 //
 // If the query returns no rows, an empty SyncWindow (both nil) is returned.
-func ReadSyncWindow(ctx context.Context, conn *pgx.Conn, query string, assetID int64) SyncWindow {
+func ReadSyncWindow(ctx context.Context, db PGDB, query string, assetID int64) SyncWindow {
 	var oldest, newest *time.Time
-	err := conn.QueryRow(ctx, query, assetID).Scan(&oldest, &newest)
+	err := db.QueryRow(ctx, query, assetID).Scan(&oldest, &newest)
 	if err != nil {
 		// pgx.ErrNoRows is expected when no sync record exists yet.
 		// Other errors are logged but not fatal — we fall back to full backfill.
@@ -41,7 +50,7 @@ func ReadSyncWindow(ctx context.Context, conn *pgx.Conn, query string, assetID i
 
 // WriteSyncTimestamp executes a write query (either write_oldest or write_newest)
 // to update a sync boundary. The query must accept $1 (asset_id) and $2 (timestamp).
-func WriteSyncTimestamp(ctx context.Context, conn *pgx.Conn, query string, assetID int64, ts time.Time) error {
-	_, err := conn.Exec(ctx, query, assetID, ts)
+func WriteSyncTimestamp(ctx context.Context, db PGDB, query string, assetID int64, ts time.Time) error {
+	_, err := db.Exec(ctx, query, assetID, ts)
 	return err
 }

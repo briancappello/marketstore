@@ -2,6 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -187,4 +190,99 @@ func TestHistoricAggregatesWithNextURL(t *testing.T) {
 	assert.Equal(t, 50000, agg.ResultCount)
 	assert.NotEmpty(t, agg.NextURL)
 	assert.Contains(t, agg.NextURL, "cursor=abc123")
+}
+
+func TestRequest_AuthFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{"401 Unauthorized", http.StatusUnauthorized},
+		{"403 Forbidden", http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			}))
+			defer srv.Close()
+
+			_, err := request(http.DefaultClient, srv.URL)
+			assert.Error(t, err)
+			assert.True(t, errors.Is(err, ErrAuthFailed), "expected ErrAuthFailed, got: %v", err)
+			assert.Contains(t, err.Error(), srv.URL)
+		})
+	}
+}
+
+func TestRequest_NonAuthError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{"404 Not Found", http.StatusNotFound},
+		{"429 Too Many Requests", http.StatusTooManyRequests},
+		{"500 Internal Server Error", http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			}))
+			defer srv.Close()
+
+			_, err := request(http.DefaultClient, srv.URL)
+			assert.Error(t, err)
+			assert.False(t, errors.Is(err, ErrAuthFailed), "should not be ErrAuthFailed for %d", tt.statusCode)
+		})
+	}
+}
+
+func TestDownload_AuthFailureNoRetry(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, err := download(http.DefaultClient, srv.URL)
+	assert.Error(t, err)
+	assert.True(t, errors.Is(err, ErrAuthFailed))
+	assert.Equal(t, 1, callCount, "auth failure should not be retried")
+}
+
+func TestDownload_TransientErrorRetries(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"OK"}`))
+	}))
+	defer srv.Close()
+
+	body, err := download(http.DefaultClient, srv.URL)
+	assert.Nil(t, err)
+	assert.NotNil(t, body)
+	assert.Equal(t, 3, callCount, "should retry transient errors")
 }

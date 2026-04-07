@@ -118,6 +118,9 @@ bgworkers:
         1D: "2024-01-01"
       backfill_batch_size: 50000
       backfill_adjusted: true
+      # backfill_parallelism controls how many symbols are backfilled
+      # concurrently. Defaults to runtime.NumCPU() if not set.
+      # backfill_parallelism: 4
 
       # sync_queries tracks backfill coverage in PostgreSQL so the backfiller
       # knows exactly what has already been fetched from the API. Each key must

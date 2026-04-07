@@ -189,6 +189,21 @@ func (calendar *Calendar) Tz() *time.Location {
 	return calendar.tz
 }
 
+// NextMarketDay returns the next trading day strictly after t.
+// It walks forward up to 10 days (covers worst-case holiday + weekend spans).
+func (calendar *Calendar) NextMarketDay(t time.Time) time.Time {
+	t = t.In(calendar.tz)
+	const maxDaysForward = 10
+	for i := 1; i <= maxDaysForward; i++ {
+		day := t.AddDate(0, 0, i)
+		if calendar.IsMarketDay(day) {
+			return day
+		}
+	}
+	// Fallback: return tomorrow (should never happen with a valid calendar).
+	return t.AddDate(0, 0, 1)
+}
+
 // LatestMarketTime returns the most recent time when the market was or is open.
 // If the market is currently open (including extended hours), it returns the current time.
 // If the market is closed, it returns the extended hours close time of the most recent trading day.

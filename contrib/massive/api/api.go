@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,11 @@ const (
 	defaultTimeout = 10 * time.Second
 	dateFormat     = "2006-01-02"
 )
+
+// ErrAuthFailed is returned when the API responds with 401 or 403,
+// indicating an invalid or unauthorized API key. This error is not
+// retryable and should cause the backfill to stop.
+var ErrAuthFailed = errors.New("API authentication failed")
 
 var (
 	baseURL = "https://api.massive.com"
@@ -373,6 +379,10 @@ func download(client *http.Client, endpointURL string) ([]byte, error) {
 		if err == nil {
 			return body, nil
 		}
+		// Auth failures are permanent — retrying won't help.
+		if errors.Is(err, ErrAuthFailed) {
+			return nil, err
+		}
 		if strings.Contains(err.Error(), "GOAWAY") {
 			log.Warn("[massive] rate limited, backing off... url=%s", endpointURL)
 			time.Sleep(5 * time.Second)
@@ -398,6 +408,9 @@ func request(client *http.Client, endpointURL string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("HTTP %d from %s: %w", resp.StatusCode, endpointURL, ErrAuthFailed)
+		}
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, endpointURL)
 	}
 

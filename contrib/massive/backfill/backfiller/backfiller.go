@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -248,6 +249,11 @@ func main() {
 					if err == context.Canceled {
 						return
 					}
+					if errors.Is(err, api.ErrAuthFailed) {
+						log.Error("[massive] API authentication failed, stopping backfill: %v", err)
+						cancel()
+						return
+					}
 					log.Warn("[massive] failed to backfill trades for %s: %v", symInfo.Symbol, err)
 				}
 			})
@@ -255,6 +261,11 @@ func main() {
 			runBackfill(ctx, "quotes", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
 				if err := backfill.Quotes(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP, writer); err != nil {
 					if err == context.Canceled {
+						return
+					}
+					if errors.Is(err, api.ErrAuthFailed) {
+						log.Error("[massive] API authentication failed, stopping backfill: %v", err)
+						cancel()
 						return
 					}
 					log.Warn("[massive] failed to backfill quotes for %s: %v", symInfo.Symbol, err)
@@ -266,6 +277,11 @@ func main() {
 			runBackfill(ctx, timeframe+" bars", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
 				if err := backfill.Bars(ctx, client, symInfo.Symbol, timeframe, effectiveStart, end, batchSize, adjusted, writerWP, writer); err != nil {
 					if err == context.Canceled {
+						return
+					}
+					if errors.Is(err, api.ErrAuthFailed) {
+						log.Error("[massive] API authentication failed, stopping backfill: %v", err)
+						cancel()
 						return
 					}
 					log.Warn("[massive] failed to backfill %s bars for %s: %v", timeframe, symInfo.Symbol, err)

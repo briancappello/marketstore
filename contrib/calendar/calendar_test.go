@@ -138,3 +138,60 @@ func TestLatestMarketTime(t *testing.T) {
 		})
 	}
 }
+
+func TestNextMarketDay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		now      time.Time
+		expected time.Time
+	}{
+		{
+			name:     "weekday to next weekday",
+			now:      time.Date(2026, 4, 6, 12, 0, 0, 0, NY), // Monday
+			expected: time.Date(2026, 4, 7, 12, 0, 0, 0, NY), // Tuesday
+		},
+		{
+			name:     "Friday to Monday (skip weekend)",
+			now:      time.Date(2026, 4, 3, 12, 0, 0, 0, NY), // Friday
+			expected: time.Date(2026, 4, 6, 12, 0, 0, 0, NY), // Monday
+		},
+		{
+			name:     "Saturday to Monday",
+			now:      time.Date(2026, 4, 4, 12, 0, 0, 0, NY), // Saturday
+			expected: time.Date(2026, 4, 6, 12, 0, 0, 0, NY), // Monday
+		},
+		{
+			name:     "Sunday to Monday",
+			now:      time.Date(2026, 4, 5, 12, 0, 0, 0, NY), // Sunday
+			expected: time.Date(2026, 4, 6, 12, 0, 0, 0, NY), // Monday
+		},
+		{
+			name:     "day before holiday skips holiday",
+			now:      time.Date(2026, 7, 2, 12, 0, 0, 0, NY), // Thursday July 2
+			expected: time.Date(2026, 7, 6, 12, 0, 0, 0, NY), // Monday July 6 (July 3 = holiday, 4-5 = weekend)
+		},
+		{
+			name:     "Wednesday before Thanksgiving (Thu closed, Fri early close)",
+			now:      time.Date(2026, 11, 25, 12, 0, 0, 0, NY), // Wednesday
+			expected: time.Date(2026, 11, 27, 12, 0, 0, 0, NY), // Friday (early close, but still a market day)
+		},
+		{
+			name:     "early close day is still a market day",
+			now:      time.Date(2026, 11, 26, 12, 0, 0, 0, NY), // Thanksgiving (closed)
+			expected: time.Date(2026, 11, 27, 12, 0, 0, 0, NY), // Fri (early close = market day)
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := Nasdaq.NextMarketDay(tt.now)
+			assert.Equal(t, tt.expected.Year(), result.Year())
+			assert.Equal(t, tt.expected.Month(), result.Month())
+			assert.Equal(t, tt.expected.Day(), result.Day())
+		})
+	}
+}

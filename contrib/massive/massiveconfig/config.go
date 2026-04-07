@@ -86,6 +86,9 @@ type FetcherConfig struct {
 	//   - listing_date: nullable date (DATE, TIMESTAMP, TIMESTAMPTZ, or YYYY-MM-DD string)
 	// Example: "SELECT id, ticker, listed FROM asset WHERE is_active = TRUE"
 	SymbolsQuery string `json:"symbols_query"`
+	// BackfillParallelism is the number of symbols to backfill concurrently.
+	// Defaults to runtime.NumCPU() if not set or zero.
+	BackfillParallelism int `json:"backfill_parallelism"`
 	// SyncQueries maps data type keys (matching query_start keys) to SQL query sets
 	// for reading and writing sync timestamps. Required when symbols_dsn is set
 	// and query_start is non-empty: every key in query_start must have a corresponding
