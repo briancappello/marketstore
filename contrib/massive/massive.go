@@ -356,6 +356,20 @@ func (mf *MassiveFetcher) connectAndStream(
 	for {
 		select {
 		case <-mf.ctx.Done():
+			// Drain the error channel with a short deadline. The upstream
+			// library's process() goroutine blocks on an unbuffered send to
+			// c.err when it hits a fatal error (e.g., auth_failed). If the
+			// context was cancelled by another component (e.g., backfill
+			// detecting HTTP 401 first), the WebSocket auth_failed error may
+			// still be in flight. We wait briefly to give it time to arrive.
+			// This also prevents a goroutine leak in the upstream library:
+			// process() is stuck on the unbuffered send, and Close() is stuck
+			// at ptomb.Wait() until process() returns.
+			select {
+			case err := <-client.Error():
+				log.Error("[massive] %s error during shutdown: %v", dataType, err)
+			case <-time.After(500 * time.Millisecond):
+			}
 			log.Info("[massive] stopping stream for %s", dataType)
 			return nil
 		case <-connLimitCh:
@@ -365,8 +379,16 @@ func (mf *MassiveFetcher) connectAndStream(
 			return fmt.Errorf("fatal error on %s: %w", dataType, err)
 		case msg, ok := <-client.Output():
 			if !ok {
-				log.Info("[massive] output channel closed for %s", dataType)
-				return fmt.Errorf("output channel closed for %s", dataType)
+				// The output channel can close before the error is sent — the
+				// library's reconnect-exhausted path calls close(false) (which
+				// closes the output channel) before pushing to c.err. Wait
+				// briefly for the error to arrive.
+				select {
+				case err := <-client.Error():
+					return fmt.Errorf("fatal error on %s: %w", dataType, err)
+				case <-time.After(500 * time.Millisecond):
+				}
+				return fmt.Errorf("output channel closed unexpectedly for %s", dataType)
 			}
 			// In RawData mode, output is json.RawMessage (individual messages).
 			if raw, ok := msg.(json.RawMessage); ok {
