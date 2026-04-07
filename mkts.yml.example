@@ -98,11 +98,12 @@ bgworkers:
       base_url: "https://api.massive.com"
       ws_server: "wss://socket.massive.com"  # "wss://delayed.massive.com/stocks" | "ws://127.0.0.1:8765"
       # ws_data_types controls real-time WebSocket streaming.
+      # IMPORTANT: only one can be enabled at a time
       ws_data_types:
-        - quotes
-        - trades
+#        - quotes
+#        - trades
         - 1Sec
-        - 1Min  # default if none specified
+#        - 1Min  # default if none specified
       symbols:
         - AAPL
         - SPY

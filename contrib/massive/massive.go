@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	jsonit "github.com/json-iterator/go"
-	massivews "github.com/massive-com/client-go/v3/websocket"
 
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
@@ -22,6 +20,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/massive/handlers"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/ws"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/models"
 	"github.com/alpacahq/marketstore/v4/planner"
@@ -39,47 +38,12 @@ const (
 	maxConnsPerHost          = 100
 )
 
-// errConnectionLimit is returned by connectAndStream when the upstream server
-// rejects the connection due to exceeding the account's WebSocket connection
-// limit (close code 1008, policy violation).
-var errConnectionLimit = errors.New("connection limit exceeded")
-
-// wsDataTypeToTopic maps our config data type names to upstream WebSocket topics.
-var wsDataTypeToTopic = map[string]massivews.Topic{
-	"1Min":   massivews.StocksMinAggs,
-	"1Sec":   massivews.StocksSecAggs,
-	"trades": massivews.StocksTrades,
-	"quotes": massivews.StocksQuotes,
-}
-
-// connAwareLogger adapts the MarketStore log package to the upstream client's
-// Logger interface. It monitors error messages for connection-limit patterns
-// (close code 1008, policy violation) and signals connLimitCh when detected.
-//
-// This is necessary because the upstream library logs connection-limit close
-// errors via c.log.Errorf() inside its close() method, but does NOT surface
-// them through the ReconnectCallback or Error channel. The ReconnectCallback
-// only fires when the TCP dial itself fails, not when the server accepts the
-// connection and then immediately kicks us with a close frame.
-type connAwareLogger struct {
-	connLimitCh chan struct{}
-}
-
-func (l *connAwareLogger) Debugf(template string, args ...any) {
-	log.Debug("[massive/ws] "+template, args...)
-}
-func (l *connAwareLogger) Infof(template string, args ...any) {
-	log.Info("[massive/ws] "+template, args...)
-}
-func (l *connAwareLogger) Errorf(template string, args ...any) {
-	msg := fmt.Sprintf(template, args...)
-	if strings.Contains(msg, "policy violation") || strings.Contains(msg, "1008") {
-		select {
-		case l.connLimitCh <- struct{}{}:
-		default:
-		}
-	}
-	log.Error("[massive/ws] %s", msg)
+// wsDataTypeToTopic maps our config data type names to WebSocket topics.
+var wsDataTypeToTopic = map[string]ws.Topic{
+	"1Min":   ws.StocksMinAggs,
+	"1Sec":   ws.StocksSecAggs,
+	"trades": ws.StocksTrades,
+	"quotes": ws.StocksQuotes,
 }
 
 // Use jsoniter because it supports marshal/unmarshal of map[interface{}]interface{} type.
@@ -203,13 +167,17 @@ func (mf *MassiveFetcher) Run() {
 	log.Info("[massive] shutdown complete")
 }
 
-// startStreaming launches WebSocket streaming goroutines for all configured data types.
-// Each data type gets its own long-lived goroutine that handles connection setup,
-// error detection, and automatic reconnection on a market-calendar-aware schedule.
+// startStreaming connects each configured data type to the Massive WebSocket API
+// sequentially (so no two connections are dialing at the same time), then launches
+// a goroutine per data type to run the message loop.
+//
+// Sequential connection ensures the server has fully registered each connection's
+// subscription before the next one dials. This prevents transient "bare" connections
+// that count against the account's connection limit.
 func (mf *MassiveFetcher) startStreaming() {
-	feed := massivews.Feed(massivews.RealTime)
+	feed := ws.Feed(ws.RealTime)
 	if mf.config.WSServer != "" {
-		feed = massivews.Feed(mf.config.WSServer)
+		feed = ws.Feed(mf.config.WSServer)
 	}
 
 	// Map data types to their handlers.
@@ -234,8 +202,36 @@ func (mf *MassiveFetcher) startStreaming() {
 
 		handler := dataTypeHandlers[dataType]
 
+		// Connect sequentially: dial, auth, subscribe, and wait for confirmation
+		// before moving on to the next data type.
+		client, err := mf.wsConnect(dataType, topic, feed, tickers)
+		if err != nil {
+			log.Error("[massive] %s: initial connection failed: %v", dataType, err)
+			// Launch the retry goroutine which will sleep until the next
+			// pre-market open and try again.
+			mf.wg.Add(1)
+			go mf.streamWithRestart(dataType, topic, handler, feed, tickers)
+			continue
+		}
+
+		log.Info("[massive] streaming %s (%d symbols)", dataType, len(tickers))
+
 		mf.wg.Add(1)
-		go mf.streamWithRestart(dataType, topic, handler, feed, tickers)
+		go mf.streamWithRestart(dataType, topic, handler, feed, tickers, withClient(client))
+	}
+}
+
+// streamOption allows startStreaming to pass an already-connected client to
+// streamWithRestart for the initial run, skipping the first connect.
+type streamOption func(*streamState)
+type streamState struct {
+	client      *ws.Client
+	isReconnect bool
+}
+
+func withClient(c *ws.Client) streamOption {
+	return func(s *streamState) {
+		s.client = c
 	}
 }
 
@@ -243,25 +239,42 @@ func (mf *MassiveFetcher) startStreaming() {
 // stream. On any fatal error (including connection-limit rejections), it sleeps
 // until the next pre-market open (3:58 AM ET) and retries. On a successful
 // reconnect it also triggers a backfill to cover any data gap.
+//
+// If called with withClient(), uses the pre-connected client for the first
+// iteration (skipping the connect step, since startStreaming already did it).
 func (mf *MassiveFetcher) streamWithRestart(
 	dataType string,
-	topic massivews.Topic,
+	topic ws.Topic,
 	handler func([]byte),
-	feed massivews.Feed,
+	feed ws.Feed,
 	tickers []string,
+	opts ...streamOption,
 ) {
 	defer mf.wg.Done()
 
-	isReconnect := false
+	state := streamState{}
+	for _, opt := range opts {
+		opt(&state)
+	}
+
 	for {
-		err := mf.connectAndStream(dataType, topic, handler, feed, tickers, isReconnect)
+		var err error
+		if state.client != nil {
+			// Use the pre-connected client (first iteration from startStreaming).
+			err = mf.stream(dataType, handler, state.client, state.isReconnect)
+			state.client = nil // consumed; next iteration connects fresh
+		} else {
+			// Connect and stream.
+			err = mf.connectAndStream(dataType, topic, handler, feed, tickers, state.isReconnect)
+		}
+
 		if err == nil {
 			// Clean shutdown via context cancellation.
 			return
 		}
 
 		// Log differently for connection-limit vs other fatal errors.
-		if errors.Is(err, errConnectionLimit) {
+		if errors.Is(err, ws.ErrConnectionLimit) {
 			log.Error("[massive] %s: connection limit reached, scheduling retry at next pre-market open", dataType)
 		} else {
 			log.Error("[massive] %s: stream failed (%v), scheduling retry at next pre-market open", dataType, err)
@@ -278,70 +291,65 @@ func (mf *MassiveFetcher) streamWithRestart(
 			log.Info("[massive] %s: waking up for scheduled reconnect", dataType)
 		}
 
-		isReconnect = true
+		state.isReconnect = true
 	}
 }
 
-// connectAndStream creates a WebSocket client for a single data type, subscribes,
-// connects, and processes messages until a fatal error or context cancellation.
-//
-// It returns:
-//   - nil on clean shutdown (context cancelled)
-//   - errConnectionLimit if the server rejected us for exceeding the connection limit
-//   - a wrapped error for any other fatal failure
-//
-// Connection-limit detection works through the logger: when the upstream library's
-// close() method logs an error containing "policy violation" or "1008", the
-// connAwareLogger signals a channel that the select loop monitors. This is the
-// only reliable detection point — the library's ReconnectCallback only fires when
-// the TCP dial fails, not when the server accepts and then kicks us with a close
-// frame.
-//
-// MaxRetries is intentionally not set, so the library uses its default 15-minute
-// exponential backoff. This allows transient network errors (close code 1006,
-// unexpected EOF) to recover automatically without falling through to the
-// wall-clock retry schedule.
-//
-// When isReconnect is true and the connection succeeds, a background backfill is
-// triggered to fill any data gap from the time the stream was down.
+// wsConnect creates a new WebSocket client, registers the subscription, and
+// performs the full synchronous handshake (dial → auth → subscribe → confirmation).
+// Returns the connected client ready for streaming.
+func (mf *MassiveFetcher) wsConnect(
+	dataType string,
+	topic ws.Topic,
+	feed ws.Feed,
+	tickers []string,
+) (*ws.Client, error) {
+	client := ws.New(mf.config.APIKey, feed)
+	client.Subscribe(topic, tickers...)
+
+	if err := client.Connect(); err != nil {
+		return nil, fmt.Errorf("connect %s: %w", dataType, err)
+	}
+	return client, nil
+}
+
+// connectAndStream creates a WebSocket client, connects, and streams messages
+// until a fatal error or context cancellation. Used by streamWithRestart for
+// reconnection attempts (the initial connection is done by startStreaming).
 func (mf *MassiveFetcher) connectAndStream(
 	dataType string,
-	topic massivews.Topic,
+	topic ws.Topic,
 	handler func([]byte),
-	feed massivews.Feed,
+	feed ws.Feed,
 	tickers []string,
 	isReconnect bool,
 ) error {
-	connLimitCh := make(chan struct{}, 1)
-
-	client, err := massivews.New(massivews.Config{
-		APIKey:  mf.config.APIKey,
-		Feed:    feed,
-		Market:  massivews.Stocks,
-		RawData: true,
-		Log:     &connAwareLogger{connLimitCh: connLimitCh},
-		ReconnectCallback: func(err error) {
-			if err != nil {
-				log.Warn("[massive] reconnecting %s: %v", dataType, err)
-			} else {
-				log.Info("[massive] reconnected %s", dataType)
-			}
-		},
-	})
+	client, err := mf.wsConnect(dataType, topic, feed, tickers)
 	if err != nil {
-		return fmt.Errorf("create WebSocket client for %s: %w", dataType, err)
+		return err
 	}
-	defer client.Close()
-
-	if err := client.Subscribe(topic, tickers...); err != nil {
-		return fmt.Errorf("subscribe %s: %w", dataType, err)
-	}
-
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("connect %s: %w", dataType, err)
-	}
-
 	log.Info("[massive] streaming %s (%d symbols)", dataType, len(tickers))
+	return mf.stream(dataType, handler, client, isReconnect)
+}
+
+// stream runs the message loop for an already-connected client until the
+// connection drops or the context is cancelled.
+//
+// It returns:
+//   - nil on clean shutdown (context cancelled)
+//   - ws.ErrConnectionLimit if the server rejected us for exceeding the connection limit
+//   - ws.ErrAuthFailed if the API key is invalid
+//   - a wrapped error for any other fatal failure
+//
+// When isReconnect is true, a background backfill is triggered to fill any data
+// gap from the time the stream was down.
+func (mf *MassiveFetcher) stream(
+	dataType string,
+	handler func([]byte),
+	client *ws.Client,
+	isReconnect bool,
+) error {
+	defer client.Close()
 
 	// On reconnect, backfill any data gap in the background.
 	if isReconnect && len(mf.config.QueryStart) > 0 && !utils.InstanceConfig.NoBackfill {
@@ -356,44 +364,25 @@ func (mf *MassiveFetcher) connectAndStream(
 	for {
 		select {
 		case <-mf.ctx.Done():
-			// Drain the error channel with a short deadline. The upstream
-			// library's process() goroutine blocks on an unbuffered send to
-			// c.err when it hits a fatal error (e.g., auth_failed). If the
-			// context was cancelled by another component (e.g., backfill
-			// detecting HTTP 401 first), the WebSocket auth_failed error may
-			// still be in flight. We wait briefly to give it time to arrive.
-			// This also prevents a goroutine leak in the upstream library:
-			// process() is stuck on the unbuffered send, and Close() is stuck
-			// at ptomb.Wait() until process() returns.
+			// Check if there's a pending error that explains why the context
+			// was cancelled (e.g., backfill detected HTTP 401 first).
 			select {
-			case err := <-client.Error():
+			case err := <-client.Err():
 				log.Error("[massive] %s error during shutdown: %v", dataType, err)
-			case <-time.After(500 * time.Millisecond):
+			default:
 			}
 			log.Info("[massive] stopping stream for %s", dataType)
 			return nil
-		case <-connLimitCh:
-			log.Error("[massive] connection limit detected for %s via server close frame", dataType)
-			return errConnectionLimit
-		case err := <-client.Error():
-			return fmt.Errorf("fatal error on %s: %w", dataType, err)
-		case msg, ok := <-client.Output():
-			if !ok {
-				// The output channel can close before the error is sent — the
-				// library's reconnect-exhausted path calls close(false) (which
-				// closes the output channel) before pushing to c.err. Wait
-				// briefly for the error to arrive.
-				select {
-				case err := <-client.Error():
-					return fmt.Errorf("fatal error on %s: %w", dataType, err)
-				case <-time.After(500 * time.Millisecond):
-				}
-				return fmt.Errorf("output channel closed unexpectedly for %s", dataType)
+		case <-client.Done():
+			// Connection lost. Retrieve the error.
+			select {
+			case err := <-client.Err():
+				return fmt.Errorf("fatal error on %s: %w", dataType, err)
+			default:
+				return fmt.Errorf("connection closed unexpectedly for %s", dataType)
 			}
-			// In RawData mode, output is json.RawMessage (individual messages).
-			if raw, ok := msg.(json.RawMessage); ok {
-				handler([]byte(raw))
-			}
+		case msg := <-client.Output():
+			handler(msg)
 		}
 	}
 }

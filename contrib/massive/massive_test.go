@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	massivews "github.com/massive-com/client-go/v3/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/ws"
 )
 
 func TestWSDataTypeToTopic(t *testing.T) {
@@ -18,12 +18,12 @@ func TestWSDataTypeToTopic(t *testing.T) {
 
 	tests := []struct {
 		dataType string
-		topic    massivews.Topic
+		topic    ws.Topic
 	}{
-		{"1Min", massivews.StocksMinAggs},
-		{"1Sec", massivews.StocksSecAggs},
-		{"trades", massivews.StocksTrades},
-		{"quotes", massivews.StocksQuotes},
+		{"1Min", ws.StocksMinAggs},
+		{"1Sec", ws.StocksSecAggs},
+		{"trades", ws.StocksTrades},
+		{"quotes", ws.StocksQuotes},
 	}
 
 	for _, tt := range tests {
@@ -38,62 +38,6 @@ func TestWSDataTypeToTopic(t *testing.T) {
 
 	// Verify no extra entries.
 	assert.Len(t, wsDataTypeToTopic, 4)
-}
-
-func TestConnAwareLogger(t *testing.T) {
-	t.Parallel()
-
-	// Verify connAwareLogger satisfies the upstream Logger interface.
-	var _ massivews.Logger = &connAwareLogger{}
-
-	t.Run("signals channel on policy violation", func(t *testing.T) {
-		t.Parallel()
-		ch := make(chan struct{}, 1)
-		l := &connAwareLogger{connLimitCh: ch}
-		l.Errorf("r/w threads closed: connection closed unexpectedly: websocket: close 1008 (policy violation)")
-		select {
-		case <-ch:
-			// Expected: channel was signaled.
-		default:
-			t.Error("expected connLimitCh to be signaled for policy violation error")
-		}
-	})
-
-	t.Run("signals channel on 1008 close code", func(t *testing.T) {
-		t.Parallel()
-		ch := make(chan struct{}, 1)
-		l := &connAwareLogger{connLimitCh: ch}
-		l.Errorf("connection closed with code 1008")
-		select {
-		case <-ch:
-			// Expected.
-		default:
-			t.Error("expected connLimitCh to be signaled for 1008 error")
-		}
-	})
-
-	t.Run("does not signal on normal errors", func(t *testing.T) {
-		t.Parallel()
-		ch := make(chan struct{}, 1)
-		l := &connAwareLogger{connLimitCh: ch}
-		l.Errorf("r/w threads closed: connection closed unexpectedly: websocket: close 1006 (abnormal closure): unexpected EOF")
-		select {
-		case <-ch:
-			t.Error("did not expect connLimitCh to be signaled for 1006 error")
-		default:
-			// Expected: channel was not signaled.
-		}
-	})
-
-	t.Run("does not block when channel is full", func(t *testing.T) {
-		t.Parallel()
-		ch := make(chan struct{}, 1)
-		ch <- struct{}{} // Pre-fill the buffer.
-		l := &connAwareLogger{connLimitCh: ch}
-		// Should not block or panic.
-		l.Errorf("websocket: close 1008 (policy violation)")
-		assert.Len(t, ch, 1) // Still just 1 item.
-	})
 }
 
 func TestNewBgWorker_Validation(t *testing.T) {
@@ -517,9 +461,9 @@ func TestIsDailyOrLonger(t *testing.T) {
 func TestErrConnectionLimit(t *testing.T) {
 	t.Parallel()
 
-	// errConnectionLimit should be matchable with errors.Is.
-	err := fmt.Errorf("something went wrong: %w", errConnectionLimit)
-	assert.True(t, errors.Is(err, errConnectionLimit))
+	// ws.ErrConnectionLimit should be matchable with errors.Is through wrapping.
+	err := fmt.Errorf("something went wrong: %w", ws.ErrConnectionLimit)
+	assert.True(t, errors.Is(err, ws.ErrConnectionLimit))
 }
 
 func TestNextPreMarketOpen(t *testing.T) {
