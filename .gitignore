@@ -9,9 +9,10 @@ coverage.txt
 *.pyc
 mktsdb/
 build/
-backfiller
-marketstore
-marketstore_test
+/backfiller
+/flatfiles
+/marketstore
+/marketstore_test
 *.exe
 *.test
 .vscode

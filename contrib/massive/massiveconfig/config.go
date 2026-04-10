@@ -15,6 +15,13 @@ const (
 	DBQueryTimeout = 30 * time.Second
 	// DateFormat is the expected format for date strings.
 	DateFormat = "2006-01-02"
+
+	// DefaultS3Endpoint is the Massive flat files S3-compatible endpoint.
+	DefaultS3Endpoint = "https://files.massive.com"
+	// DefaultS3Bucket is the S3 bucket containing flat files.
+	DefaultS3Bucket = "flatfiles"
+	// DefaultS3Prefix is the S3 key prefix for US stock SIP data.
+	DefaultS3Prefix = "us_stocks_sip"
 )
 
 // SymbolInfo holds a ticker symbol, its database ID, and optional listing date.
@@ -94,6 +101,12 @@ type FetcherConfig struct {
 	// and query_start is non-empty: every key in query_start must have a corresponding
 	// entry in sync_queries.
 	SyncQueries map[string]SyncQuerySet `json:"sync_queries"`
+	// S3AccessKey is the access key ID for the Massive flat files S3 endpoint.
+	// Falls back to MASSIVE_S3_ACCESS_KEY environment variable.
+	S3AccessKey string `json:"s3_access_key"`
+	// S3SecretKey is the secret access key for the Massive flat files S3 endpoint.
+	// Falls back to MASSIVE_S3_SECRET_KEY environment variable.
+	S3SecretKey string `json:"s3_secret_key"`
 	// SymbolInfos is populated at runtime from either Symbols (converted to SymbolInfo with nil dates)
 	// or from the database query results. This field is not parsed from config.
 	SymbolInfos []SymbolInfo `json:"-"`
