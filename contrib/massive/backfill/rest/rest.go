@@ -1,4 +1,4 @@
-package backfill
+package rest
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/models"
@@ -130,7 +131,7 @@ func Bars(
 	limit int,
 	adjusted bool,
 	writerWP *worker.Pool,
-	writer Writer,
+	writer backfill.Writer,
 ) error {
 	// Check for cancellation at start.
 	select {
@@ -267,7 +268,7 @@ func Bars(
 }
 
 // writeModel writes a model's CSM using the provided writer, or falls back to direct disk write.
-func writeModel(csm *io.ColumnSeriesMap, writer Writer, dataType, symbol string) error {
+func writeModel(csm *io.ColumnSeriesMap, writer backfill.Writer, dataType, symbol string) error {
 	if writer != nil {
 		return writer.WriteCSM(*csm, false)
 	}
@@ -284,7 +285,7 @@ func fetchAndWriteBars(
 	limit int,
 	adjusted bool,
 	writerWP *worker.Pool,
-	writer Writer,
+	writer backfill.Writer,
 ) error {
 	// Check for cancellation.
 	select {
@@ -377,7 +378,7 @@ func Trades(
 	from, to time.Time,
 	limit int,
 	writerWP *worker.Pool,
-	writer Writer,
+	writer backfill.Writer,
 ) error {
 	// Check for cancellation at start.
 	select {
@@ -521,7 +522,7 @@ func Quotes(
 	from, to time.Time,
 	limit int,
 	writerWP *worker.Pool,
-	writer Writer,
+	writer backfill.Writer,
 ) error {
 	// Check for cancellation at start.
 	select {

@@ -5,23 +5,22 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	_ "net/http/pprof" // Register pprof handlers on default mux.
 	"os"
 	"os/signal"
 	"runtime"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/gobwas/glob"
 	jsoniter "github.com/json-iterator/go"
 
-	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/flatfiles"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
-	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/internal/di"
 	"github.com/alpacahq/marketstore/v4/plugins/trigger"
@@ -90,14 +89,17 @@ func (f *fromFlags) Set(value string) error {
 }
 
 var (
-	dir            string
-	fromDates      = make(fromFlags)
-	to             string
-	symbols        string
-	parallelism    int
-	configFilePath string
-	grpcAddress    string
-	noRPC          bool
+	dir              string
+	fromDates        = make(fromFlags)
+	to               string
+	symbols          string
+	parallelism      int
+	writeConcurrency int
+	writeBuffer      int
+	configFilePath   string
+	grpcAddress      string
+	noRPC            bool
+	pprofAddr        string
 )
 
 func parseFlags() {
@@ -112,18 +114,34 @@ func parseFlags() {
 		"glob pattern of symbols to backfill (* = all). If not specified, uses symbols from config file.")
 	flag.IntVar(&parallelism, "parallelism", runtime.NumCPU(),
 		"number of parallel S3 downloads (default: NumCPU)")
+	flag.IntVar(&writeConcurrency, "write-concurrency", 2,
+		"number of concurrent writer goroutines (default: 2)")
+	flag.IntVar(&writeBuffer, "write-buffer", 10,
+		"buffered channel capacity between downloaders and writers (default: 10)")
 	flag.StringVar(&configFilePath, "config", "mkts.yml",
 		"path to the mkts.yml config file")
 	flag.StringVar(&grpcAddress, "grpc", "localhost:5995",
 		"gRPC server address for writing data (default: localhost:5995)")
 	flag.BoolVar(&noRPC, "no-rpc", false,
 		"write directly to the filesystem instead of via gRPC to a running server")
+	flag.StringVar(&pprofAddr, "pprof", "",
+		"address for pprof HTTP server (e.g., localhost:6060). Disabled if empty.")
 
 	flag.Parse()
 }
 
 func main() {
 	parseFlags()
+
+	// Start pprof server if requested.
+	if pprofAddr != "" {
+		go func() {
+			log.Info("[flatfiles] pprof server listening on %s", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				log.Error("[flatfiles] pprof server failed: %v", err)
+			}
+		}()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -172,7 +190,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	s3Client, err := NewS3Client(s3AccessKey, s3SecretKey)
+	s3Client, err := flatfiles.NewS3Client(s3AccessKey, s3SecretKey)
 	if err != nil {
 		log.Error("[flatfiles] failed to create S3 client: %v", err)
 		os.Exit(1)
@@ -247,7 +265,7 @@ func main() {
 // data type, downloading flat files from S3 and writing bars to MarketStore.
 func runFlatFileBackfill(
 	ctx context.Context,
-	s3Client *S3Client,
+	s3Client *flatfiles.S3Client,
 	w backfill.Writer,
 	symbolSet map[string]bool,
 	timeframe string, // "1D" or "1Min"
@@ -255,14 +273,7 @@ func runFlatFileBackfill(
 	startDate, endDate time.Time,
 	parallelism int,
 ) {
-	// Build the list of market dates to process.
-	var dates []time.Time
-	for d := startDate; !d.After(endDate); d = d.AddDate(0, 0, 1) {
-		if calendar.Nasdaq.IsMarketDay(d) {
-			dates = append(dates, d)
-		}
-	}
-
+	dates := flatfiles.MarketDays(startDate, endDate)
 	if len(dates) == 0 {
 		log.Info("[flatfiles] no market days in range for %s", timeframe)
 		return
@@ -271,65 +282,14 @@ func runFlatFileBackfill(
 	log.Info("[flatfiles] backfilling %s: %d market days from %s to %s for %d symbols",
 		timeframe, len(dates), startDate.Format(dateFormat), endDate.Format(dateFormat), len(symbolSet))
 
-	downloadWP := worker.NewWorkerPool(ctx, parallelism)
-	writerWP := worker.NewWorkerPool(ctx, 1)
-
-	var totalRows int64
-	var totalSymbols int64
-	var processedDates int64
-
-	for _, date := range dates {
-		select {
-		case <-ctx.Done():
-			downloadWP.CloseAndWait()
-			writerWP.CloseAndWait()
-			return
-		default:
-		}
-
-		currentDate := date
-		downloadWP.Do(func() {
-			reader, err := s3Client.Download(ctx, s3DataType, currentDate)
-			if err != nil {
-				// File may not exist for this date (e.g., data not yet available).
-				if ctx.Err() == nil {
-					log.Warn("[flatfiles] %s: failed to download %s: %v", currentDate.Format(dateFormat), timeframe, err)
-				}
-				return
-			}
-			defer reader.Close()
-
-			csm, stats, err := ParseAndWrite(reader, symbolSet, timeframe, currentDate)
-			if err != nil {
-				log.Warn("[flatfiles] %s: failed to parse %s: %v", currentDate.Format(dateFormat), timeframe, err)
-				return
-			}
-
-			if len(csm) > 0 {
-				writerWP.Do(func() {
-					if err := w.WriteCSM(csm, false); err != nil {
-						log.Warn("[flatfiles] %s: failed to write %s: %v", currentDate.Format(dateFormat), timeframe, err)
-					}
-				})
-			}
-
-			n := atomic.AddInt64(&processedDates, 1)
-			atomic.AddInt64(&totalRows, int64(stats.RowsMatched))
-			atomic.AddInt64(&totalSymbols, int64(stats.SymbolCount))
-
-			if n%50 == 0 || n == int64(len(dates)) {
-				log.Info("[flatfiles] %s: processed %d/%d dates (%d rows, %d symbol-writes)",
-					timeframe, n, len(dates),
-					atomic.LoadInt64(&totalRows), atomic.LoadInt64(&totalSymbols))
-			}
-		})
+	_, _, err := flatfiles.BackfillDates(ctx, s3Client, w, symbolSet, timeframe, s3DataType, dates, flatfiles.BackfillConfig{
+		Parallelism:      parallelism,
+		WriteConcurrency: writeConcurrency,
+		WriteBufferSize:  writeBuffer,
+	})
+	if err != nil && ctx.Err() == nil {
+		log.Warn("[flatfiles] %s backfill encountered errors: %v", timeframe, err)
 	}
-
-	downloadWP.CloseAndWait()
-	writerWP.CloseAndWait()
-
-	log.Info("[flatfiles] %s complete: %d dates, %d rows, %d symbol-writes",
-		timeframe, atomic.LoadInt64(&processedDates), atomic.LoadInt64(&totalRows), atomic.LoadInt64(&totalSymbols))
 }
 
 // applyConfigDefaults applies defaults from the massive bgworker config
@@ -393,9 +353,6 @@ func normalizeSymbolPattern(pattern string) string {
 }
 
 // resolveSymbolInfos resolves symbols from CLI flag, database, or config.
-// For plain symbol names (no wildcards), symbols are used directly without
-// API validation -- the flat file contains all tickers, so unknown symbols
-// simply produce zero matched rows.
 func resolveSymbolInfos(apiKey string, cfg *massiveconfig.FetcherConfig) []massiveconfig.SymbolInfo {
 	// Priority 1: CLI -symbols flag.
 	if symbols != "" {
@@ -432,8 +389,6 @@ func resolveSymbolInfos(apiKey string, cfg *massiveconfig.FetcherConfig) []massi
 //   - A single symbol: "AAPL" -> used directly
 //   - A glob pattern: "*" or "AA*" -> resolved via the Massive ticker API
 func resolveSymbolsFromInput(apiKey, input string) []massiveconfig.SymbolInfo {
-	// If the input contains no wildcard characters, use symbols directly
-	// without calling the API. This avoids needing an API key for simple lists.
 	if !strings.ContainsAny(input, "*?{[") {
 		parts := strings.Split(input, ",")
 		result := make([]massiveconfig.SymbolInfo, 0, len(parts))

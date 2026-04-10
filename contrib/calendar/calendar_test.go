@@ -58,6 +58,20 @@ func TestCalendar(t *testing.T) {
 	assert.True(t, Nasdaq.IsMarketDay(bestDayTooLate))
 
 	assert.Equal(t, Nasdaq.Tz().String(), "America/New_York")
+
+	// Juneteenth (observed by Nasdaq since 2022).
+	// June 19, 2022 = Sunday -> observed Monday June 20.
+	assert.False(t, Nasdaq.IsMarketDay(time.Date(2022, 6, 20, 12, 0, 0, 0, NY)))
+	// June 19, 2023 = Monday -> observed June 19.
+	assert.False(t, Nasdaq.IsMarketDay(time.Date(2023, 6, 19, 12, 0, 0, 0, NY)))
+	// June 19, 2024 = Wednesday -> observed June 19.
+	assert.False(t, Nasdaq.IsMarketDay(time.Date(2024, 6, 19, 12, 0, 0, 0, NY)))
+	// June 19, 2025 = Thursday -> observed June 19.
+	assert.False(t, Nasdaq.IsMarketDay(time.Date(2025, 6, 19, 12, 0, 0, 0, NY)))
+	// June 19, 2026 = Friday -> observed June 19.
+	assert.False(t, Nasdaq.IsMarketDay(time.Date(2026, 6, 19, 12, 0, 0, 0, NY)))
+	// June 19, 2027 = Saturday -> observed Friday June 18.
+	assert.False(t, Nasdaq.IsMarketDay(time.Date(2027, 6, 18, 12, 0, 0, 0, NY)))
 }
 
 func Test_jd(t *testing.T) {

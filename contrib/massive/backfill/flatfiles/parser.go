@@ -1,7 +1,8 @@
-package main
+package flatfiles
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -28,10 +29,10 @@ const (
 // nanosPerSecond is the divisor to convert Unix nanosecond timestamps to seconds.
 const nanosPerSecond = 1_000_000_000
 
-// barCapacity returns the initial slice capacity for a Bar based on timeframe.
+// BarCapacity returns the initial slice capacity for a Bar based on timeframe.
 // 1D bars have 1 row per symbol per file. 1Min bars cover extended hours
 // trading (4:00 AM - 8:00 PM ET = 16 hours = 960 minutes).
-func barCapacity(timeframe string) int {
+func BarCapacity(timeframe string) int {
 	switch timeframe {
 	case "1D":
 		return 1
@@ -83,7 +84,7 @@ func ParseAndWrite(
 	var stats ParseStats
 	var currentTicker string
 	var currentBar *models.Bar
-	capacity := barCapacity(timeframe)
+	capacity := BarCapacity(timeframe)
 
 	flushBar := func() {
 		if currentBar == nil || currentBar.Len() == 0 {
@@ -99,8 +100,17 @@ func ParseAndWrite(
 			break
 		}
 		if err != nil {
-			log.Warn("[flatfiles] skipping malformed CSV row on %s: %v", date.Format("2006-01-02"), err)
-			continue
+			// Distinguish CSV parse errors (malformed row, wrong field count)
+			// from I/O errors (connection reset, gzip corruption). Parse
+			// errors are row-level and can be skipped; I/O errors are fatal
+			// because the underlying stream is broken.
+			var parseErr *csv.ParseError
+			if errors.As(err, &parseErr) {
+				log.Warn("[flatfiles] skipping malformed CSV row on %s: %v", date.Format("2006-01-02"), err)
+				continue
+			}
+			// I/O or decompression error: abort the parse.
+			return csm, stats, fmt.Errorf("read CSV on %s: %w", date.Format("2006-01-02"), err)
 		}
 		stats.RowsRead++
 

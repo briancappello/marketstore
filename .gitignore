@@ -11,6 +11,7 @@ mktsdb/
 build/
 /backfiller
 /flatfiles
+.flatfile_sync.json
 /marketstore
 /marketstore_test
 *.exe

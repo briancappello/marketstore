@@ -19,6 +19,7 @@ import (
 
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/rest"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
 	"github.com/alpacahq/marketstore/v4/executor"
@@ -245,7 +246,7 @@ func main() {
 		switch key {
 		case "trades":
 			runBackfill(ctx, "trades", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
-				if err := backfill.Trades(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP, writer); err != nil {
+				if err := rest.Trades(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP, writer); err != nil {
 					if err == context.Canceled {
 						return
 					}
@@ -259,7 +260,7 @@ func main() {
 			})
 		case "quotes":
 			runBackfill(ctx, "quotes", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
-				if err := backfill.Quotes(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP, writer); err != nil {
+				if err := rest.Quotes(ctx, client, symInfo.Symbol, effectiveStart, end, batchSize, writerWP, writer); err != nil {
 					if err == context.Canceled {
 						return
 					}
@@ -275,7 +276,7 @@ func main() {
 			// Assume it's a bar timeframe (e.g., "1Min", "5Min", "1H", "1D").
 			timeframe := key
 			runBackfill(ctx, timeframe+" bars", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
-				if err := backfill.Bars(ctx, client, symInfo.Symbol, timeframe, effectiveStart, end, batchSize, adjusted, writerWP, writer); err != nil {
+				if err := rest.Bars(ctx, client, symInfo.Symbol, timeframe, effectiveStart, end, batchSize, adjusted, writerWP, writer); err != nil {
 					if err == context.Canceled {
 						return
 					}

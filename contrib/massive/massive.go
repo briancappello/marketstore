@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/flatfiles"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/rest"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/handlers"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
@@ -484,6 +487,9 @@ func (mf *MassiveFetcher) runBackfill() error {
 	log.Info("[massive] starting backfill (%d symbol workers, extended hours end: %s, regular hours end: %s)",
 		parallelism, endExtended.Format(time.RFC3339), endRegular.Format(time.RFC3339))
 
+	// --- Phase 1: Flat file backfill for 1D and 1Min bars ---
+	flatFileDone := mf.runFlatFileBackfill(parallelism, endRegular, endExtended)
+
 	for _, symInfo := range mf.config.SymbolInfos {
 		// Check for cancellation between symbols.
 		select {
@@ -505,6 +511,11 @@ func (mf *MassiveFetcher) runBackfill() error {
 			// Keys are either timeframes (e.g., "1Min", "1D") for bars,
 			// or "trades"/"quotes" for tick data.
 			for key, startDateStr := range mf.config.QueryStart {
+				// Skip keys already handled by flat file backfill.
+				if flatFileDone[key] {
+					continue
+				}
+
 				// Check for cancellation between data types.
 				select {
 				case <-mf.ctx.Done():
@@ -552,6 +563,176 @@ func (mf *MassiveFetcher) runBackfill() error {
 	writerWP.CloseAndWait()
 	log.Info("[massive] backfill complete")
 	return nil
+}
+
+// runFlatFileBackfill runs the flat file backfill phase for all query_start keys
+// that have a corresponding flat file data type (1D, 1Min). It uses S3 flat files
+// instead of the REST API for bulk bar data.
+//
+// Returns a set of query_start keys that were successfully handled, so the
+// subsequent REST backfill loop can skip them.
+func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endExtended time.Time) map[string]bool {
+	done := make(map[string]bool)
+
+	// Check for S3 credentials.
+	s3AccessKey := mf.config.S3AccessKey
+	s3SecretKey := mf.config.S3SecretKey
+	if s3AccessKey == "" {
+		s3AccessKey = resolveEnvVar("MASSIVE_S3_ACCESS_KEY")
+	}
+	if s3SecretKey == "" {
+		s3SecretKey = resolveEnvVar("MASSIVE_S3_SECRET_KEY")
+	}
+	if s3AccessKey == "" || s3SecretKey == "" {
+		// No S3 credentials: skip flat file backfill silently.
+		return done
+	}
+
+	s3Client, err := flatfiles.NewS3Client(s3AccessKey, s3SecretKey)
+	if err != nil {
+		log.Warn("[massive] failed to create S3 client, skipping flat file backfill: %v", err)
+		return done
+	}
+
+	// Read checkpoint from the data root directory.
+	dataDir := executor.ThisInstance.CatalogDir.GetPath()
+	checkpoint, err := flatfiles.ReadCheckpoint(dataDir)
+	if err != nil {
+		log.Warn("[massive] failed to read flat file checkpoint, starting fresh: %v", err)
+		checkpoint = make(flatfiles.Checkpoint)
+	}
+
+	// Build symbol set from the current universe.
+	symbolSet := make(map[string]bool, len(mf.config.SymbolInfos))
+	for _, si := range mf.config.SymbolInfos {
+		symbolSet[si.Symbol] = true
+	}
+
+	w := &backfill.DirectWriter{}
+
+	for key, startDateStr := range mf.config.QueryStart {
+		select {
+		case <-mf.ctx.Done():
+			return done
+		default:
+		}
+
+		s3DataType, ok := flatfiles.DataTypes[key]
+		if !ok {
+			continue // not a flat file type (e.g., trades, quotes)
+		}
+
+		configStart, err := time.Parse(dateFormat, startDateStr)
+		if err != nil {
+			log.Warn("[massive] invalid query_start date %q for %s, skipping flat file backfill", startDateStr, key)
+			continue
+		}
+
+		// Determine end date for this data type.
+		end := endExtended
+		if isDailyOrLonger(key) {
+			end = endRegular
+		}
+		// Flat files are date-oriented; use just the date portion.
+		endDate := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+
+		sw := checkpoint[key]
+		changed := false
+
+		// --- Forward gap: from checkpoint newest (or configStart) to endDate ---
+		var forwardStart time.Time
+		if sw.Newest != "" {
+			parsed, parseErr := time.Parse(dateFormat, sw.Newest)
+			if parseErr == nil {
+				forwardStart = parsed.AddDate(0, 0, 1) // day after last backfilled
+			}
+		}
+		if forwardStart.IsZero() {
+			forwardStart = configStart
+		}
+
+		if !forwardStart.After(endDate) {
+			forwardDates := flatfiles.MarketDays(forwardStart, endDate)
+			if len(forwardDates) > 0 {
+				log.Info("[massive] flat file forward backfill %s: %s to %s (%d market days)",
+					key, forwardStart.Format(dateFormat), endDate.Format(dateFormat), len(forwardDates))
+
+				if sw.Oldest == "" {
+					sw.Oldest = configStart.Format(dateFormat)
+				}
+
+				// Progress callback: advance sw.Newest as the contiguous
+				// high-water mark moves forward through the date list.
+				onForwardProgress := func(date time.Time) {
+					sw.Newest = date.Format(dateFormat)
+					checkpoint[key] = sw
+					if writeErr := flatfiles.WriteCheckpoint(dataDir, checkpoint); writeErr != nil {
+						log.Warn("[massive] failed to write flat file checkpoint: %v", writeErr)
+					}
+				}
+
+				_, _, backfillErr := flatfiles.BackfillDates(mf.ctx, s3Client, w, symbolSet, key, s3DataType, forwardDates, flatfiles.BackfillConfig{
+					Parallelism: parallelism,
+					OnProgress:  onForwardProgress,
+				})
+				if backfillErr != nil {
+					log.Warn("[massive] flat file forward backfill %s: %v", key, backfillErr)
+				}
+				changed = true
+			}
+		}
+
+		// --- Backward gap: configStart moved earlier than checkpoint oldest ---
+		if sw.Oldest != "" {
+			oldest, parseErr := time.Parse(dateFormat, sw.Oldest)
+			if parseErr == nil && configStart.Before(oldest) {
+				backwardEnd := oldest.AddDate(0, 0, -1) // day before oldest backfilled
+				backwardDates := flatfiles.MarketDays(configStart, backwardEnd)
+				if len(backwardDates) > 0 {
+					log.Info("[massive] flat file backward backfill %s: %s to %s (%d market days)",
+						key, configStart.Format(dateFormat), backwardEnd.Format(dateFormat), len(backwardDates))
+
+					// Progress callback: the high-water mark tells us the
+					// contiguous range [dates[0]..date] is complete, so
+					// sw.Oldest can move to dates[0] (= configStart) once
+					// any progress is made.
+					onBackwardProgress := func(date time.Time) {
+						sw.Oldest = backwardDates[0].Format(dateFormat)
+						checkpoint[key] = sw
+						if writeErr := flatfiles.WriteCheckpoint(dataDir, checkpoint); writeErr != nil {
+							log.Warn("[massive] failed to write flat file checkpoint: %v", writeErr)
+						}
+					}
+
+					_, _, backfillErr := flatfiles.BackfillDates(mf.ctx, s3Client, w, symbolSet, key, s3DataType, backwardDates, flatfiles.BackfillConfig{
+						Parallelism: parallelism,
+						OnProgress:  onBackwardProgress,
+					})
+					if backfillErr != nil {
+						log.Warn("[massive] flat file backward backfill %s: %v", key, backfillErr)
+					}
+					changed = true
+				}
+			}
+		}
+
+		if changed {
+			// Final checkpoint write to ensure the last state is persisted.
+			checkpoint[key] = sw
+			if writeErr := flatfiles.WriteCheckpoint(dataDir, checkpoint); writeErr != nil {
+				log.Warn("[massive] failed to write flat file checkpoint: %v", writeErr)
+			}
+		}
+
+		done[key] = true
+	}
+
+	return done
+}
+
+// resolveEnvVar returns the value of an environment variable, or empty string.
+func resolveEnvVar(name string) string {
+	return os.Getenv(name)
 }
 
 // backfillForward handles the forward gap: fetching data from the newest sync
@@ -698,11 +879,11 @@ func (mf *MassiveFetcher) executeBackfill(
 ) error {
 	switch dataType {
 	case "trades":
-		return backfill.Trades(mf.ctx, httpClient, symbol, start, end, batchSize, writerWP, nil)
+		return rest.Trades(mf.ctx, httpClient, symbol, start, end, batchSize, writerWP, nil)
 	case "quotes":
-		return backfill.Quotes(mf.ctx, httpClient, symbol, start, end, batchSize, writerWP, nil)
+		return rest.Quotes(mf.ctx, httpClient, symbol, start, end, batchSize, writerWP, nil)
 	default:
-		return backfill.Bars(mf.ctx, httpClient, symbol, dataType, start, end, batchSize, adjusted, writerWP, nil)
+		return rest.Bars(mf.ctx, httpClient, symbol, dataType, start, end, batchSize, adjusted, writerWP, nil)
 	}
 }
 
