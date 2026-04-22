@@ -18,6 +18,7 @@ package stream
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,6 +91,30 @@ func (s *Subscriber) Subscribed(itemKey string) bool {
 	s.RLock()
 	defer s.RUnlock()
 	for stream := range s.streams {
+		if g, err := glob.Compile(stream, '/'); err == nil {
+			if g.Match(itemKey) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SubscribedDirect matches the subscriber's subscribed streams
+// with the supplied timebucket key string, but only considers
+// subscription patterns that specify a concrete symbol (i.e., the
+// first path segment contains no glob wildcards). This allows
+// PushDirect payloads to reach subscribers who explicitly named a
+// symbol while skipping wildcard-symbol subscribers like "*/1Min/OHLCV".
+func (s *Subscriber) SubscribedDirect(itemKey string) bool {
+	s.RLock()
+	defer s.RUnlock()
+	for stream := range s.streams {
+		// Skip patterns with a wildcard in the symbol position (first segment).
+		parts := strings.SplitN(stream, "/", 2)
+		if len(parts) == 0 || strings.ContainsAny(parts[0], "*?[") {
+			continue
+		}
 		if g, err := glob.Compile(stream, '/'); err == nil {
 			if g.Match(itemKey) {
 				return true
@@ -251,7 +276,13 @@ func stream() {
 		catalog.RLock()
 
 		for s := range catalog.subs {
-			if s.Subscribed(payload.Key) {
+			var matched bool
+			if payload.Direct {
+				matched = s.SubscribedDirect(payload.Key)
+			} else {
+				matched = s.Subscribed(payload.Key)
+			}
+			if matched {
 				if err := s.handleOutbound(buf); err != nil {
 					log.Error("failed to stream outbound (%s)", err)
 				}
@@ -266,11 +297,27 @@ func stream() {
 type Payload struct {
 	Key  string      `msgpack:"key"`
 	Data interface{} `msgpack:"data"`
+	// Direct is an internal routing flag (not serialized over the wire).
+	// When true, the payload is only delivered to subscribers whose
+	// subscription pattern specifies a concrete symbol in the first
+	// path segment (e.g. "AAPL/1Min/OHLCV"), skipping wildcard-symbol
+	// subscribers (e.g. "*/1Min/OHLCV").
+	Direct bool `msgpack:"-"`
 }
 
-// Push sends data over the stream interface.
+// Push sends data over the stream interface to all matching subscribers.
 func Push(tbk io.TimeBucketKey, data interface{}) error {
 	send.In() <- Payload{Key: tbk.GetItemKey(), Data: data}
+	return nil
+}
+
+// PushDirect sends data over the stream interface, but only to
+// subscribers that explicitly named the symbol (no wildcard in the
+// symbol position of their subscription pattern). This is used by the
+// watchlist trigger to deliver non-curated symbol data only to clients
+// that specifically requested it.
+func PushDirect(tbk io.TimeBucketKey, data interface{}) error {
+	send.In() <- Payload{Key: tbk.GetItemKey(), Data: data, Direct: true}
 	return nil
 }
 

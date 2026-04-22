@@ -44,6 +44,13 @@ type SubscribeMessage struct {
 	Step   int      `msgpack:"step"`
 }
 
+// ControlMessage is a mid-replay control message sent by the client to
+// pause, resume, or change playback speed.
+type ControlMessage struct {
+	Action string `msgpack:"action"` // "pause", "resume", or "set_step"
+	Step   int    `msgpack:"step"`   // only used for "set_step"
+}
+
 // Payload is the outbound data message, matching the live stream format.
 type Payload struct {
 	Key  string      `msgpack:"key"`
@@ -75,6 +82,7 @@ type Session struct {
 	mu      sync.Mutex
 	conn    *websocket.Conn
 	done    chan struct{}
+	control chan ControlMessage
 	queryFn QueryFunc
 }
 
@@ -83,6 +91,7 @@ func NewSession(conn *websocket.Conn) *Session {
 	return &Session{
 		conn:    conn,
 		done:    make(chan struct{}),
+		control: make(chan ControlMessage, 16),
 		queryFn: defaultQueryRange,
 	}
 }
@@ -93,6 +102,7 @@ func NewSessionWithQuery(conn *websocket.Conn, qf QueryFunc) *Session {
 	return &Session{
 		conn:    conn,
 		done:    make(chan struct{}),
+		control: make(chan ControlMessage, 16),
 		queryFn: qf,
 	}
 }
@@ -128,9 +138,10 @@ func (s *Session) Run() {
 		// Send subscribed ack before beginning replay.
 		s.sendSubscribed(msg.TBKs)
 
-		// Start a disconnect watcher now that we're about to begin
-		// the replay loop (we won't be reading messages anymore).
-		go s.watchDisconnect()
+		// Start a message watcher now that we're about to begin
+		// the replay loop. It reads control messages (pause/resume/set_step)
+		// and forwards them to s.control; closes s.done on disconnect.
+		go s.watchMessages()
 
 		if err = s.executeReplay(msg); err != nil {
 			s.sendError(err.Error())
@@ -170,6 +181,32 @@ func (s *Session) validateSubscribe(msg SubscribeMessage) error {
 	}
 
 	return nil
+}
+
+// handleControl processes a single ControlMessage. If the action is "pause",
+// it blocks until a "resume" or "set_step" is received, or until the session
+// is done. Returns true if the session should exit (done channel closed).
+func (s *Session) handleControl(ctrl ControlMessage, sleepDuration *time.Duration) bool {
+	switch ctrl.Action {
+	case "pause":
+		// Block until resume or disconnect.
+		for {
+			select {
+			case <-s.done:
+				return true
+			case ctrl2 := <-s.control:
+				switch ctrl2.Action {
+				case "resume":
+					return false
+				case "set_step":
+					*sleepDuration = time.Duration(normalizeStep(ctrl2.Step)) * time.Millisecond
+				}
+			}
+		}
+	case "set_step":
+		*sleepDuration = time.Duration(normalizeStep(ctrl.Step)) * time.Millisecond
+	}
+	return false
 }
 
 // executeReplay queries historical data and streams it to the client
@@ -252,16 +289,18 @@ func (s *Session) executeReplay(msg SubscribeMessage) error {
 	}
 
 	// Stream bars in epoch order.
-	var sleepDuration time.Duration
-	if step > 0 {
-		sleepDuration = time.Duration(step) * time.Millisecond
-	}
+	sleepDuration := time.Duration(step) * time.Millisecond
 
 	for _, epoch := range sortedEpochs {
-		// Check for client disconnect.
+		// Check for disconnect or control messages (non-blocking) before
+		// each bar. This handles pause/set_step when step=0.
 		select {
 		case <-s.done:
 			return nil
+		case ctrl := <-s.control:
+			if s.handleControl(ctrl, &sleepDuration) {
+				return nil
+			}
 		default:
 		}
 
@@ -280,11 +319,16 @@ func (s *Session) executeReplay(msg SubscribeMessage) error {
 			}
 		}
 
-		// Sleep between time steps.
+		// Sleep between time steps, also listening for control messages
+		// and disconnect.
 		if sleepDuration > 0 {
 			select {
 			case <-s.done:
 				return nil
+			case ctrl := <-s.control:
+				if s.handleControl(ctrl, &sleepDuration) {
+					return nil
+				}
 			case <-time.After(sleepDuration):
 			}
 		}
@@ -425,14 +469,34 @@ func (s *Session) sendError(errMsg string) {
 	}
 }
 
-// watchDisconnect reads from the WebSocket to detect when the client
-// disconnects. When the read fails (connection closed), it signals done.
-func (s *Session) watchDisconnect() {
+// watchMessages reads incoming messages during replay. Control messages
+// (pause, resume, set_step) are forwarded to s.control. Any read error
+// (including client disconnect) closes s.done to stop the replay loop.
+func (s *Session) watchMessages() {
 	for {
-		_, _, err := s.conn.ReadMessage()
+		_, buf, err := s.conn.ReadMessage()
 		if err != nil {
-			close(s.done)
+			// Client disconnected or connection closed — signal done.
+			// Use a select to avoid double-close if done is already closed.
+			select {
+			case <-s.done:
+			default:
+				close(s.done)
+			}
 			return
+		}
+		var ctrl ControlMessage
+		if err := msgpack.Unmarshal(buf, &ctrl); err != nil {
+			continue // ignore unparseable messages
+		}
+		// Only forward recognised control actions.
+		switch ctrl.Action {
+		case "pause", "resume", "set_step":
+			select {
+			case s.control <- ctrl:
+			default:
+				// Drop if the buffer is full (streaming loop is busy).
+			}
 		}
 	}
 }

@@ -22,6 +22,7 @@ debug:
 	$(MAKE) debug -C contrib/ondiskagg
 	$(MAKE) debug -C contrib/stream
 	$(MAKE) debug -C contrib/streamreplay
+	$(MAKE) debug -C contrib/watchlist
 	#$(MAKE) debug -C contrib/xignitefeeder
 	GOFLAGS=$(GOFLAGS) go install -gcflags="all=-N -l" -ldflags "-X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" ./...
 
@@ -43,6 +44,7 @@ plugins:
 	$(MAKE) -C contrib/ondiskagg
 	$(MAKE) -C contrib/stream
 	$(MAKE) -C contrib/streamreplay
+	$(MAKE) -C contrib/watchlist
 	#$(MAKE) -C contrib/xignitefeeder
 
 fmt:

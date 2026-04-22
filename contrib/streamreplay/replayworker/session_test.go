@@ -461,6 +461,256 @@ func TestReplayWithStep(t *testing.T) {
 		"expected >= 100ms elapsed, got %v", elapsed)
 }
 
+// sendControl sends a ControlMessage over the WebSocket.
+func sendControl(t *testing.T, ws *websocket.Conn, msg replayworker.ControlMessage) {
+	t.Helper()
+	buf, err := msgpack.Marshal(msg)
+	assert.Nil(t, err)
+	assert.Nil(t, ws.WriteMessage(websocket.BinaryMessage, buf))
+}
+
+// drainMessages starts a goroutine that reads all raw msgpack frames from ws
+// into the returned channel. The goroutine exits (and closes the channel) when
+// the WebSocket closes or errors. This lets test code check for message
+// arrival (or absence) via channel selects without corrupting the connection
+// the way SetReadDeadline would.
+func drainMessages(ws *websocket.Conn) <-chan []byte {
+	ch := make(chan []byte, 32)
+	go func() {
+		defer close(ch)
+		for {
+			_, buf, err := ws.ReadMessage()
+			if err != nil {
+				return
+			}
+			ch <- buf
+		}
+	}()
+	return ch
+}
+
+// expectPayloadCh waits up to 3s for a Payload on ch, fails the test on timeout.
+func expectPayloadCh(t *testing.T, ch <-chan []byte) replayworker.Payload {
+	t.Helper()
+	select {
+	case buf, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed while waiting for payload")
+		}
+		var p replayworker.Payload
+		assert.Nil(t, msgpack.Unmarshal(buf, &p))
+		return p
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for payload")
+		return replayworker.Payload{}
+	}
+}
+
+// expectEndCh waits up to 3s for an EndMessage on ch.
+func expectEndCh(t *testing.T, ch <-chan []byte) {
+	t.Helper()
+	select {
+	case buf, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed while waiting for end")
+		}
+		var m replayworker.EndMessage
+		assert.Nil(t, msgpack.Unmarshal(buf, &m))
+		assert.Equal(t, "end", m.Action)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for end message")
+	}
+}
+
+// expectSilenceCh asserts that no message arrives on ch within duration d.
+func expectSilenceCh(t *testing.T, ch <-chan []byte, d time.Duration) {
+	t.Helper()
+	select {
+	case buf, ok := <-ch:
+		if ok {
+			t.Fatalf("expected silence but received message: %v", buf)
+		}
+	case <-time.After(d):
+		// Good — nothing arrived.
+	}
+}
+
+func TestReplayPauseResume(t *testing.T) {
+	// Replay with step=200ms. After the first bar, send pause.
+	// Verify no more bars arrive for 400ms (2 bar-intervals), then send
+	// resume and verify the remaining bars arrive.
+	epochs := []int64{1000, 2000, 3000}
+	opens := []float32{10.0, 20.0, 30.0}
+	data := map[string]*io.ColumnSeries{
+		"AAPL/1Min/OHLCV": makeOHLCVSeries(epochs, opens),
+	}
+
+	ws, cleanup := newTestSession(t, mockQueryRange(data))
+	defer cleanup()
+
+	sendSubscribe(t, ws, replayworker.SubscribeMessage{
+		Action: "subscribe",
+		TBKs:   []string{"AAPL/1Min/OHLCV"},
+		Start:  "1970-01-01 00:00:00+00:00",
+		End:    "1970-01-02 00:00:00+00:00",
+		Step:   200,
+	})
+
+	// Read subscribed ack synchronously (before starting drainMessages).
+	readSubscribed(t, ws)
+
+	// Start background reader.
+	ch := drainMessages(ws)
+
+	// Receive first bar.
+	p1 := expectPayloadCh(t, ch)
+	assert.Equal(t, "AAPL/1Min/OHLCV", p1.Key)
+
+	// Pause.
+	sendControl(t, ws, replayworker.ControlMessage{Action: "pause"})
+
+	// No bar should arrive in 400ms while paused.
+	expectSilenceCh(t, ch, 400*time.Millisecond)
+
+	// Resume.
+	sendControl(t, ws, replayworker.ControlMessage{Action: "resume"})
+
+	// Receive remaining bars and end.
+	p2 := expectPayloadCh(t, ch)
+	assert.Equal(t, "AAPL/1Min/OHLCV", p2.Key)
+
+	p3 := expectPayloadCh(t, ch)
+	assert.Equal(t, "AAPL/1Min/OHLCV", p3.Key)
+
+	expectEndCh(t, ch)
+}
+
+func TestReplaySetStep(t *testing.T) {
+	// Start replay at step=500ms (very slow). After the first bar,
+	// switch to step=0 (instant). The remaining bars should arrive
+	// quickly without waiting the original 500ms each.
+	epochs := []int64{1000, 2000, 3000}
+	opens := []float32{1.0, 2.0, 3.0}
+	data := map[string]*io.ColumnSeries{
+		"X/1Min/OHLCV": makeOHLCVSeries(epochs, opens),
+	}
+
+	ws, cleanup := newTestSession(t, mockQueryRange(data))
+	defer cleanup()
+
+	sendSubscribe(t, ws, replayworker.SubscribeMessage{
+		Action: "subscribe",
+		TBKs:   []string{"X/1Min/OHLCV"},
+		Start:  "1970-01-01 00:00:00+00:00",
+		End:    "1970-01-02 00:00:00+00:00",
+		Step:   500,
+	})
+
+	readSubscribed(t, ws)
+	ch := drainMessages(ws)
+
+	// Receive first bar.
+	expectPayloadCh(t, ch)
+
+	// Switch to instant mode.
+	sendControl(t, ws, replayworker.ControlMessage{Action: "set_step", Step: 0})
+
+	// The remaining 2 bars + end should arrive quickly (well under 500ms).
+	t0 := time.Now()
+	expectPayloadCh(t, ch)
+	expectPayloadCh(t, ch)
+	expectEndCh(t, ch)
+
+	elapsed := time.Since(t0)
+	assert.True(t, elapsed < 400*time.Millisecond,
+		"expected remaining bars quickly after set_step(0), got %v", elapsed)
+}
+
+func TestReplayPauseThenDisconnect(t *testing.T) {
+	// Pause during replay then disconnect — the session should clean up
+	// without deadlocking or panicking.
+	epochs := []int64{1000, 2000, 3000}
+	opens := []float32{1.0, 2.0, 3.0}
+	data := map[string]*io.ColumnSeries{
+		"X/1Min/OHLCV": makeOHLCVSeries(epochs, opens),
+	}
+
+	ws, cleanup := newTestSession(t, mockQueryRange(data))
+	defer cleanup()
+
+	sendSubscribe(t, ws, replayworker.SubscribeMessage{
+		Action: "subscribe",
+		TBKs:   []string{"X/1Min/OHLCV"},
+		Start:  "1970-01-01 00:00:00+00:00",
+		End:    "1970-01-02 00:00:00+00:00",
+		Step:   200,
+	})
+
+	readSubscribed(t, ws)
+	ch := drainMessages(ws)
+
+	// Receive first bar.
+	expectPayloadCh(t, ch)
+
+	// Pause.
+	sendControl(t, ws, replayworker.ControlMessage{Action: "pause"})
+
+	// Brief delay to let the pause register.
+	time.Sleep(30 * time.Millisecond)
+
+	// Close the connection while paused — session must exit cleanly.
+	ws.Close()
+
+	// Give the session goroutine time to finish.
+	select {
+	case <-ch: // channel closes when ws read loop exits
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not clean up within 2s after disconnect during pause")
+	}
+}
+
+func TestReplaySetStepDuringPause(t *testing.T) {
+	// Pause, then send set_step to change speed while paused,
+	// then resume. Verify bars arrive at the new (fast) speed.
+	epochs := []int64{1000, 2000, 3000}
+	opens := []float32{1.0, 2.0, 3.0}
+	data := map[string]*io.ColumnSeries{
+		"X/1Min/OHLCV": makeOHLCVSeries(epochs, opens),
+	}
+
+	ws, cleanup := newTestSession(t, mockQueryRange(data))
+	defer cleanup()
+
+	sendSubscribe(t, ws, replayworker.SubscribeMessage{
+		Action: "subscribe",
+		TBKs:   []string{"X/1Min/OHLCV"},
+		Start:  "1970-01-01 00:00:00+00:00",
+		End:    "1970-01-02 00:00:00+00:00",
+		Step:   500,
+	})
+
+	readSubscribed(t, ws)
+	ch := drainMessages(ws)
+
+	// Receive first bar.
+	expectPayloadCh(t, ch)
+
+	// Pause, change speed, resume.
+	sendControl(t, ws, replayworker.ControlMessage{Action: "pause"})
+	sendControl(t, ws, replayworker.ControlMessage{Action: "set_step", Step: 20})
+	sendControl(t, ws, replayworker.ControlMessage{Action: "resume"})
+
+	// Remaining 2 bars + end should arrive quickly at the new 20ms step.
+	t0 := time.Now()
+	expectPayloadCh(t, ch)
+	expectPayloadCh(t, ch)
+	expectEndCh(t, ch)
+
+	elapsed := time.Since(t0)
+	assert.True(t, elapsed < 400*time.Millisecond,
+		"expected bars at new speed after set_step during pause, got %v", elapsed)
+}
+
 func TestNormalizeStep(t *testing.T) {
 	tests := []struct {
 		input    int

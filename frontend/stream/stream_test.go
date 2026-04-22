@@ -147,6 +147,154 @@ func genColumns() map[string]interface{} {
 	}
 }
 
+// connectAndSubscribe creates a new WS client, subscribes to the given keys,
+// and returns the connection plus a buffered channel of received messages.
+func connectAndSubscribe(t *testing.T, wsURL string, keys []string) (*websocket.Conn, chan []byte) {
+	t.Helper()
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	assert.Nil(t, err)
+
+	buf, err := msgpack.Marshal(stream.SubscribeMessage{Action: "subscribe", TBKs: keys})
+	assert.Nil(t, err)
+	assert.Nil(t, conn.WriteMessage(websocket.BinaryMessage, buf))
+
+	// Read subscription ack
+	_, buf, err = conn.ReadMessage()
+	assert.Nil(t, err)
+	subResp := &stream.SubscribedMessage{}
+	assert.Nil(t, msgpack.Unmarshal(buf, subResp))
+	assert.Equal(t, "subscribed", subResp.Action)
+
+	bufC := make(chan []byte, 100)
+	go readRoutine(conn, bufC)
+	return conn, bufC
+}
+
+// collectMessages reads from a channel until timeout, returning all received payloads.
+func collectMessages(bufC chan []byte, timeout time.Duration) []stream.Payload {
+	var payloads []stream.Payload
+	timer := time.NewTimer(timeout)
+	for {
+		select {
+		case buf, ok := <-bufC:
+			if !ok {
+				return payloads
+			}
+			var p stream.Payload
+			if err := msgpack.Unmarshal(buf, &p); err == nil {
+				payloads = append(payloads, p)
+			}
+		case <-timer.C:
+			return payloads
+		}
+	}
+}
+
+// TestPushDirect verifies that PushDirect only delivers to subscribers
+// that explicitly named the symbol, not to wildcard subscribers.
+func TestPushDirect(t *testing.T) {
+	setup(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL + "/ws")
+	u.Scheme = "ws"
+
+	// Client A: wildcard subscriber (*/1Min/OHLCV)
+	connA, bufA := connectAndSubscribe(t, u.String(), []string{"*/1Min/OHLCV"})
+	defer connA.Close()
+
+	// Client B: direct subscriber (AAPL/1Min/OHLCV)
+	connB, bufB := connectAndSubscribe(t, u.String(), []string{"AAPL/1Min/OHLCV"})
+	defer connB.Close()
+
+	// Allow subscriptions to register
+	time.Sleep(50 * time.Millisecond)
+
+	// PushDirect -- should only reach client B
+	tbk := io.NewTimeBucketKey("AAPL/1Min/OHLCV")
+	err := stream.PushDirect(*tbk, genColumns())
+	assert.Nil(t, err)
+
+	// Client B should receive the message
+	payloadsB := collectMessages(bufB, 500*time.Millisecond)
+	assert.Equal(t, 1, len(payloadsB))
+	assert.Equal(t, "AAPL/1Min/OHLCV", payloadsB[0].Key)
+
+	// Client A should NOT receive any message
+	payloadsA := collectMessages(bufA, 200*time.Millisecond)
+	assert.Equal(t, 0, len(payloadsA))
+}
+
+// TestPushBroadcast verifies that normal Push delivers to both
+// wildcard and direct subscribers.
+func TestPushBroadcast(t *testing.T) {
+	setup(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL + "/ws")
+	u.Scheme = "ws"
+
+	// Client A: wildcard subscriber
+	connA, bufA := connectAndSubscribe(t, u.String(), []string{"*/1Min/OHLCV"})
+	defer connA.Close()
+
+	// Client B: direct subscriber
+	connB, bufB := connectAndSubscribe(t, u.String(), []string{"AAPL/1Min/OHLCV"})
+	defer connB.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Normal Push (broadcast) -- should reach BOTH clients
+	tbk := io.NewTimeBucketKey("AAPL/1Min/OHLCV")
+	err := stream.Push(*tbk, genColumns())
+	assert.Nil(t, err)
+
+	payloadsA := collectMessages(bufA, 500*time.Millisecond)
+	assert.Equal(t, 1, len(payloadsA))
+	assert.Equal(t, "AAPL/1Min/OHLCV", payloadsA[0].Key)
+
+	payloadsB := collectMessages(bufB, 500*time.Millisecond)
+	assert.Equal(t, 1, len(payloadsB))
+	assert.Equal(t, "AAPL/1Min/OHLCV", payloadsB[0].Key)
+}
+
+// TestPushDirectWithPartialWildcard verifies that PushDirect delivers
+// to a subscriber with a wildcard in a non-symbol position (e.g., AAPL/1Min/*).
+func TestPushDirectWithPartialWildcard(t *testing.T) {
+	setup(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL + "/ws")
+	u.Scheme = "ws"
+
+	// Client subscribes to AAPL/1Min/* -- wildcard in attrgroup, but symbol is concrete
+	conn, bufC := connectAndSubscribe(t, u.String(), []string{"AAPL/1Min/*"})
+	defer conn.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// PushDirect for AAPL -- should match because symbol position is concrete
+	tbk := io.NewTimeBucketKey("AAPL/1Min/OHLCV")
+	err := stream.PushDirect(*tbk, genColumns())
+	assert.Nil(t, err)
+
+	payloads := collectMessages(bufC, 500*time.Millisecond)
+	assert.Equal(t, 1, len(payloads))
+	assert.Equal(t, "AAPL/1Min/OHLCV", payloads[0].Key)
+
+	// PushDirect for a different symbol should NOT match
+	tbk2 := io.NewTimeBucketKey("NVDA/1Min/OHLCV")
+	err = stream.PushDirect(*tbk2, genColumns())
+	assert.Nil(t, err)
+
+	payloads2 := collectMessages(bufC, 200*time.Millisecond)
+	assert.Equal(t, 0, len(payloads2))
+}
+
 func handlePayload(t *testing.T, bufs [][]byte, expectedStreamKeyCount map[string]int) {
 	t.Helper()
 
