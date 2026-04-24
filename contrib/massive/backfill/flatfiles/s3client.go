@@ -1,6 +1,7 @@
 package flatfiles
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -52,6 +53,12 @@ func NewS3Client(accessKey, secretKey string) (*S3Client, error) {
 // Download fetches the gzipped CSV for a data type and date, returning a
 // decompressed reader. The caller must close the returned ReadCloser.
 //
+// The entire compressed response is buffered into memory before
+// decompression so that the HTTP connection is released immediately.
+// This prevents mid-parse "connection reset by peer" errors on large
+// files (e.g. 1Min data) where streaming would hold the TCP connection
+// open for the entire CSV parse duration.
+//
 // dataType should be "day_aggs_v1" or "minute_aggs_v1".
 func (c *S3Client) Download(ctx context.Context, dataType string, date time.Time) (io.ReadCloser, error) {
 	key := c.objectKey(dataType, date)
@@ -64,13 +71,20 @@ func (c *S3Client) Download(ctx context.Context, dataType string, date time.Time
 		return nil, fmt.Errorf("download s3://%s/%s: %w", c.bucket, key, err)
 	}
 
-	gz, err := gzip.NewReader(resp.Body)
+	// Buffer the entire compressed body into memory so the HTTP
+	// connection is closed before we start decompressing and parsing.
+	compressed, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
-		resp.Body.Close()
+		return nil, fmt.Errorf("download s3://%s/%s: %w", c.bucket, key, err)
+	}
+
+	gz, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
 		return nil, fmt.Errorf("decompress s3://%s/%s: %w", c.bucket, key, err)
 	}
 
-	return &gzipReadCloser{gz: gz, body: resp.Body}, nil
+	return &gzipReadCloser{gz: gz, body: io.NopCloser(bytes.NewReader(nil))}, nil
 }
 
 // objectKey builds the S3 key for a flat file.

@@ -3,6 +3,7 @@ package flatfiles
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -244,11 +245,20 @@ func MarketDays(start, end time.Time) []time.Time {
 
 const maxRetries = 3
 
-// retryDelays defines the backoff between retries.
+// retryDelays defines the base backoff between retries. Each delay is
+// jittered by +-25% to prevent thundering herd when multiple workers
+// fail and retry simultaneously.
 var retryDelays = [maxRetries]time.Duration{
 	1 * time.Second,
 	3 * time.Second,
 	10 * time.Second,
+}
+
+// jitteredDelay returns d with +-25% uniform random jitter applied.
+func jitteredDelay(d time.Duration) time.Duration {
+	// jitter range: [0.75*d, 1.25*d]
+	jitter := time.Duration(rand.Int63n(int64(d)/2)) - d/4 //nolint:gosec // jitter does not need crypto rand
+	return d + jitter
 }
 
 // isNonRetryable returns true if the error represents a permanent failure that
@@ -278,11 +288,12 @@ func downloadAndParse(
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			log.Info("[flatfiles] %s: retrying %s (attempt %d/%d)", dateStr, timeframe, attempt+1, maxRetries+1)
+			delay := jitteredDelay(retryDelays[attempt-1])
+			log.Info("[flatfiles] %s: retrying %s (attempt %d/%d, backoff %s)", dateStr, timeframe, attempt+1, maxRetries+1, delay.Round(time.Millisecond))
 			select {
 			case <-ctx.Done():
 				return nil, ParseStats{}, false
-			case <-time.After(retryDelays[attempt-1]):
+			case <-time.After(delay):
 			}
 		}
 
