@@ -30,6 +30,25 @@ type BgWorker interface {
 	Shutdown()
 }
 
+// WatchlistRankingEntry is a single ranked symbol in a watchlist.
+type WatchlistRankingEntry struct {
+	Symbol string
+	Rank   int
+	Fields map[string]interface{}
+}
+
+// WatchlistDataSource is an optional interface that a BgWorker can implement
+// to expose watchlist ranking data to the server's RPC layer. The host checks
+// for this interface after loading the plugin and wires it into the frontend.
+type WatchlistDataSource interface {
+	// ListWatchlistNames returns the names of all available watchlists.
+	ListWatchlistNames() []string
+	// GetWatchlistRanking returns the current ranking for a named watchlist.
+	GetWatchlistRanking(name string) []WatchlistRankingEntry
+	// AllWatchlistRankings returns all current watchlist rankings.
+	AllWatchlistRankings() map[string][]WatchlistRankingEntry
+}
+
 // SymbolLoader is an interface to retrieve symbol object from plugin.
 type SymbolLoader interface {
 	LoadSymbol(symbolName string) (interface{}, error)

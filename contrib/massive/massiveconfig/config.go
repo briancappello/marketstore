@@ -22,6 +22,8 @@ const (
 	DefaultS3Bucket = "flatfiles"
 	// DefaultS3Prefix is the S3 key prefix for US stock SIP data.
 	DefaultS3Prefix = "us_stocks_sip"
+	// DefaultS3IndicesPrefix is the S3 key prefix for US index data.
+	DefaultS3IndicesPrefix = "us_indices"
 )
 
 // SymbolInfo holds a ticker symbol, its database ID, and optional listing date.

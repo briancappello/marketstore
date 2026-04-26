@@ -52,6 +52,16 @@ func NewS3Client(accessKey, secretKey string) (*S3Client, error) {
 
 // Download fetches the gzipped CSV for a data type and date, returning a
 // decompressed reader. The caller must close the returned ReadCloser.
+// It uses the client's default S3 prefix (e.g., "us_stocks_sip").
+//
+// dataType should be "day_aggs_v1" or "minute_aggs_v1".
+func (c *S3Client) Download(ctx context.Context, dataType string, date time.Time) (io.ReadCloser, error) {
+	return c.DownloadWithPrefix(ctx, c.prefix, dataType, date)
+}
+
+// DownloadWithPrefix fetches the gzipped CSV for a data type and date from
+// the given S3 key prefix, returning a decompressed reader. The caller must
+// close the returned ReadCloser.
 //
 // The entire compressed response is buffered into memory before
 // decompression so that the HTTP connection is released immediately.
@@ -59,9 +69,10 @@ func NewS3Client(accessKey, secretKey string) (*S3Client, error) {
 // files (e.g. 1Min data) where streaming would hold the TCP connection
 // open for the entire CSV parse duration.
 //
+// prefix should be "us_stocks_sip" or "us_indices".
 // dataType should be "day_aggs_v1" or "minute_aggs_v1".
-func (c *S3Client) Download(ctx context.Context, dataType string, date time.Time) (io.ReadCloser, error) {
-	key := c.objectKey(dataType, date)
+func (c *S3Client) DownloadWithPrefix(ctx context.Context, prefix, dataType string, date time.Time) (io.ReadCloser, error) {
+	key := c.objectKey(prefix, dataType, date)
 
 	resp, err := c.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket),
@@ -89,9 +100,10 @@ func (c *S3Client) Download(ctx context.Context, dataType string, date time.Time
 
 // objectKey builds the S3 key for a flat file.
 // Example: us_stocks_sip/day_aggs_v1/2025/01/2025-01-02.csv.gz
-func (c *S3Client) objectKey(dataType string, date time.Time) string {
+// Example: us_indices/day_aggs_v1/2025/01/2025-01-02.csv.gz
+func (c *S3Client) objectKey(prefix, dataType string, date time.Time) string {
 	return fmt.Sprintf("%s/%s/%d/%02d/%s.csv.gz",
-		c.prefix, dataType, date.Year(), date.Month(), date.Format("2006-01-02"))
+		prefix, dataType, date.Year(), date.Month(), date.Format("2006-01-02"))
 }
 
 // gzipReadCloser wraps a gzip reader and the underlying S3 response body,

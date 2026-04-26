@@ -152,6 +152,30 @@ func (m *SymbolStateManager) GetWatchlistRanking(name string) []RankedSymbol {
 	return m.watchlists[name]
 }
 
+// ListWatchlistNames returns the names of all watchlists that have rankings.
+func (m *SymbolStateManager) ListWatchlistNames() []string {
+	m.watchlistsMu.RLock()
+	defer m.watchlistsMu.RUnlock()
+	names := make([]string, 0, len(m.watchlists))
+	for name := range m.watchlists {
+		names = append(names, name)
+	}
+	return names
+}
+
+// AllWatchlistRankings returns a snapshot of all current watchlist rankings.
+func (m *SymbolStateManager) AllWatchlistRankings() map[string][]RankedSymbol {
+	m.watchlistsMu.RLock()
+	defer m.watchlistsMu.RUnlock()
+	cp := make(map[string][]RankedSymbol, len(m.watchlists))
+	for name, ranking := range m.watchlists {
+		dst := make([]RankedSymbol, len(ranking))
+		copy(dst, ranking)
+		cp[name] = dst
+	}
+	return cp
+}
+
 // SymbolCount returns the total number of tracked symbols.
 func (m *SymbolStateManager) SymbolCount() int {
 	m.mu.RLock()

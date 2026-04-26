@@ -45,7 +45,7 @@ type SymbolState struct {
 
 	// --- Derived metrics (recomputed on each tick) ---
 
-	// PctChange is (HighOfDay - PriorClose) / PriorClose * 100.
+	// PctChange is (LastPrice - PriorClose) / PriorClose * 100.
 	PctChange float64
 
 	// VolumeMultipleOfMed is CumulativeVolume / MedianVolume50D.

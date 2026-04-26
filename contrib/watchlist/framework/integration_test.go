@@ -485,7 +485,7 @@ func TestSymbolStateAccumulation(t *testing.T) {
 	assert.Equal(t, float64(103), state.HighOfDay)
 	assert.InDelta(t, 100, state.LowOfDay, 0.01)
 	assert.Equal(t, int64(1000), state.CumulativeVolume)
-	assert.InDelta(t, 3.0, state.PctChange, 0.01) // (103-100)/100 * 100
+	assert.InDelta(t, 2.0, state.PctChange, 0.01) // (close 102 - prior 100)/100 * 100
 
 	// Tick 2: higher high, more volume.
 	h.writeOHLCVAndFire("TEST", baseTime.Add(time.Minute), 102, 106, 101, 105, 2000)
@@ -493,7 +493,7 @@ func TestSymbolStateAccumulation(t *testing.T) {
 	assert.Equal(t, float64(101), state.DayOpen) // should not change
 	assert.Equal(t, float64(106), state.HighOfDay)
 	assert.Equal(t, int64(3000), state.CumulativeVolume) // accumulated
-	assert.InDelta(t, 6.0, state.PctChange, 0.01)        // (106-100)/100 * 100
+	assert.InDelta(t, 5.0, state.PctChange, 0.01)        // (close 105 - prior 100)/100 * 100
 }
 
 // Test: Curation change detection.
@@ -537,6 +537,130 @@ func TestCurationChangeDetection(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "should receive a curation_change message")
+}
+
+// Test: Negative PctChange is computed correctly when price drops below PriorClose.
+func TestNegativePctChange(t *testing.T) {
+	h := newTestHarness(t)
+
+	framework.Manager.SetCurator(&mockCurator{allowed: nil}) // all curated
+
+	state := framework.Manager.GetOrCreate("LOSER")
+	state.PriorClose = 100
+
+	conn, _ := h.connectAndSubscribe("LOSER/1Min/OHLCV")
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	baseTime := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	// Price drops: close=90, well below PriorClose=100
+	h.writeOHLCVAndFire("LOSER", baseTime, 98, 99, 88, 90, 5000)
+
+	assert.InDelta(t, -10.0, state.PctChange, 0.01) // (90 - 100) / 100 * 100
+	assert.Equal(t, 90.0, state.LastPrice)
+
+	// Second tick: price drops further
+	h.writeOHLCVAndFire("LOSER", baseTime.Add(time.Minute), 89, 91, 80, 82, 3000)
+
+	assert.InDelta(t, -18.0, state.PctChange, 0.01) // (82 - 100) / 100 * 100
+}
+
+// Test: Day-boundary reset clears running state and updates PriorClose.
+func TestDayBoundaryReset(t *testing.T) {
+	h := newTestHarness(t)
+
+	framework.Manager.SetCurator(&mockCurator{allowed: nil})
+
+	state := framework.Manager.GetOrCreate("DAYRESET")
+	state.PriorClose = 100
+	state.MedianVolume50D = 50000
+
+	conn, _ := h.connectAndSubscribe("DAYRESET/1Min/OHLCV")
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	day1 := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	// Day 1: two ticks
+	h.writeOHLCVAndFire("DAYRESET", day1, 101, 105, 100, 104, 10000)
+	h.writeOHLCVAndFire("DAYRESET", day1.Add(time.Minute), 104, 108, 103, 107, 20000)
+
+	assert.Equal(t, 101.0, state.DayOpen)
+	assert.Equal(t, 108.0, state.HighOfDay)
+	assert.Equal(t, int64(30000), state.CumulativeVolume)
+	assert.InDelta(t, 7.0, state.PctChange, 0.01) // (107 - 100) / 100 * 100
+	assert.Equal(t, int64(2), state.TickCount)
+
+	// Day 2: first tick on a new calendar day triggers ResetDaily.
+	day2 := time.Date(2025, 1, 16, 9, 30, 0, 0, time.UTC)
+	h.writeOHLCVAndFire("DAYRESET", day2, 110, 112, 109, 111, 5000)
+
+	// PriorClose should now be the last close from day 1 (107), not the
+	// original PriorClose (100).
+	assert.Equal(t, 107.0, state.PriorClose)
+
+	// Running state should be reset for the new day.
+	assert.Equal(t, 110.0, state.DayOpen)
+	assert.Equal(t, 112.0, state.HighOfDay)
+	assert.Equal(t, 109.0, state.LowOfDay)
+	assert.Equal(t, int64(5000), state.CumulativeVolume)
+	assert.Equal(t, int64(1), state.TickCount)
+
+	// PctChange should use the new PriorClose (107).
+	// (111 - 107) / 107 * 100 ≈ 3.74
+	assert.InDelta(t, 3.738, state.PctChange, 0.01)
+}
+
+// Test: Curation removal is detected when a symbol drops below thresholds.
+func TestCurationRemoval(t *testing.T) {
+	h := newTestHarness(t)
+
+	// Curator requires price >= 5.0
+	framework.Manager.SetCurator(&dynamicCurator{minPrice: 5.0, minDollarVolRate: 0})
+
+	conn, ch := h.connectAndSubscribe("CURATION/1Min/CHANGES")
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	baseTime := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	// Tick 1: price $10 -- passes curation.
+	h.writeOHLCVAndFire("DROPPER", baseTime, 10, 11, 9, 10, 100000)
+	h.worker.TriggerRanking()
+
+	// Consume the "added" curation change.
+	msgs := collectMessages(ch, 500*time.Millisecond)
+	addedFound := false
+	for _, msg := range msgs {
+		if msg["msg_type"] == "curation_change" {
+			addedFound = true
+		}
+	}
+	assert.True(t, addedFound, "DROPPER should be added to curation")
+	assert.True(t, framework.Manager.IsCurated("DROPPER"))
+
+	// Tick 2: price drops to $2 -- below minPrice=5.0, should be removed.
+	h.writeOHLCVAndFire("DROPPER", baseTime.Add(time.Minute), 3, 4, 1, 2, 50000)
+	h.worker.TriggerRanking()
+
+	msgs2 := collectMessages(ch, 500*time.Millisecond)
+	removedFound := false
+	for _, msg := range msgs2 {
+		if msg["msg_type"] == "curation_change" {
+			payload, _ := msg["payload"].(map[string]interface{})
+			removed, _ := payload["removed"].([]interface{})
+			for _, entry := range removed {
+				if e, ok := entry.(map[string]interface{}); ok {
+					if e["symbol"] == "DROPPER" {
+						removedFound = true
+					}
+				}
+			}
+		}
+	}
+	assert.True(t, removedFound, "DROPPER should be in removed list")
+	assert.False(t, framework.Manager.IsCurated("DROPPER"))
 }
 
 // Test: Key naming for watchlist updates follows the WATCHLISTS/TimeFrame/NAME convention.

@@ -38,11 +38,9 @@ const (
 	defaultMaxIdleConnsPerHost = 100
 )
 
-// flatFileDataTypes maps the query_start keys for bars to the S3 flat file data type names.
-var flatFileDataTypes = map[string]string{
-	"1D":   "day_aggs_v1",
-	"1Min": "minute_aggs_v1",
-}
+// flatFileDataTypes maps the query_start keys for bars to their S3 flat file types.
+// This is a reference to the canonical map in the flatfiles package.
+var flatFileDataTypes = flatfiles.DataTypes
 
 // fromFlags is a custom flag type that collects multiple -from freq=date pairs.
 // This matches the REST backfiller's interface exactly.
@@ -60,10 +58,11 @@ func (f *fromFlags) String() string {
 }
 
 func (f *fromFlags) Set(value string) error {
-	// Support both "YYYY-MM-DD" (applies to all types) and "key=YYYY-MM-DD".
+	// Support both "YYYY-MM-DD" (applies to equity types) and "key=YYYY-MM-DD".
 	parts := strings.SplitN(value, "=", 2)
 	if len(parts) == 1 {
-		// Plain date: applies to both 1D and 1Min.
+		// Plain date: applies to equity types (1D and 1Min) only.
+		// Index types must be specified explicitly (e.g., -from 1D-index=2020-01-01).
 		dateStr := strings.TrimSpace(parts[0])
 		if _, err := time.Parse(dateFormat, dateStr); err != nil {
 			return fmt.Errorf("invalid date %q: %w", dateStr, err)
@@ -81,7 +80,7 @@ func (f *fromFlags) Set(value string) error {
 	}
 
 	if _, ok := flatFileDataTypes[key]; !ok {
-		return fmt.Errorf("unsupported data type %q: flat files only support 1D and 1Min", key)
+		return fmt.Errorf("unsupported data type %q: flat files support 1D, 1Min, and 1D-index", key)
 	}
 
 	(*f)[key] = dateStr
@@ -105,9 +104,9 @@ var (
 func parseFlags() {
 	flag.StringVar(&dir, "dir", "", "mktsdb directory (overrides mkts.yml)")
 	flag.Var(&fromDates, "from",
-		"start date for backfill. Either a plain date (applies to both 1D and 1Min) "+
-			"or key=date pairs (e.g., -from 1D=2020-01-01 -from 1Min=2024-01-01). "+
-			"If not specified, uses query_start from config file.")
+		"start date for backfill. Either a plain date (applies to equity types 1D and 1Min) "+
+			"or key=date pairs (e.g., -from 1D=2020-01-01 -from 1Min=2024-01-01 -from 1D-index=2020-01-01). "+
+			"Index types must use key=date form. If not specified, uses query_start from config file.")
 	flag.StringVar(&to, "to", time.Now().AddDate(0, 0, -1).Format(dateFormat),
 		"backfill to date (YYYY-MM-DD, inclusive, default: yesterday)")
 	flag.StringVar(&symbols, "symbols", "",
@@ -228,7 +227,7 @@ func main() {
 
 	startTime := time.Now()
 
-	// Process each data type (1D, 1Min).
+	// Process each data type (1D, 1Min, 1D-index).
 	for key, startDateStr := range fromDates {
 		select {
 		case <-ctx.Done():
@@ -240,7 +239,7 @@ func main() {
 		default:
 		}
 
-		s3DataType, ok := flatFileDataTypes[key]
+		ffType, ok := flatFileDataTypes[key]
 		if !ok {
 			log.Warn("[flatfiles] unsupported data type %q, skipping", key)
 			continue
@@ -252,7 +251,7 @@ func main() {
 			continue
 		}
 
-		runFlatFileBackfill(ctx, s3Client, w, symbolSet, key, s3DataType, configStart, endDate, parallelism)
+		runFlatFileBackfill(ctx, s3Client, w, symbolSet, key, ffType, configStart, endDate, parallelism)
 	}
 
 	if instanceMeta != nil {
@@ -268,8 +267,8 @@ func runFlatFileBackfill(
 	s3Client *flatfiles.S3Client,
 	w backfill.Writer,
 	symbolSet map[string]bool,
-	timeframe string, // "1D" or "1Min"
-	s3DataType string, // "day_aggs_v1" or "minute_aggs_v1"
+	timeframe string, // "1D", "1Min", or "1D-index"
+	ffType flatfiles.FlatFileType,
 	startDate, endDate time.Time,
 	parallelism int,
 ) {
@@ -282,7 +281,7 @@ func runFlatFileBackfill(
 	log.Info("[flatfiles] backfilling %s: %d market days from %s to %s for %d symbols",
 		timeframe, len(dates), startDate.Format(dateFormat), endDate.Format(dateFormat), len(symbolSet))
 
-	_, _, err := flatfiles.BackfillDates(ctx, s3Client, w, symbolSet, timeframe, s3DataType, dates, flatfiles.BackfillConfig{
+	_, _, err := flatfiles.BackfillDates(ctx, s3Client, w, symbolSet, timeframe, ffType.S3Prefix, ffType.S3DataType, dates, flatfiles.BackfillConfig{
 		Parallelism:      parallelism,
 		WriteConcurrency: writeConcurrency,
 		WriteBufferSize:  writeBuffer,
@@ -309,7 +308,7 @@ func applyConfigDefaults(cfg *massiveconfig.FetcherConfig) {
 	}
 
 	// query_start from config provides the backfill dates.
-	// Only use 1D and 1Min keys (flat files only support these).
+	// Only use keys that map to flat file data types (1D, 1Min, 1D-index).
 	if len(fromDates) == 0 && len(cfg.QueryStart) > 0 {
 		for key, dateStr := range cfg.QueryStart {
 			if _, ok := flatFileDataTypes[key]; !ok {

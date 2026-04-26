@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alpacahq/marketstore/v4/models"
@@ -29,12 +30,22 @@ const (
 // nanosPerSecond is the divisor to convert Unix nanosecond timestamps to seconds.
 const nanosPerSecond = 1_000_000_000
 
+// NormalizeTicker converts a flat file ticker into a MarketStore symbol name.
+// Index tickers (e.g., "I:AAVE100") have their "I:" prefix replaced with "^"
+// (e.g., "^AAVE100"). Non-index tickers are returned unchanged.
+func NormalizeTicker(ticker string) string {
+	if strings.HasPrefix(ticker, "I:") {
+		return models.IndexPrefix + ticker[2:]
+	}
+	return ticker
+}
+
 // BarCapacity returns the initial slice capacity for a Bar based on timeframe.
-// 1D bars have 1 row per symbol per file. 1Min bars cover extended hours
-// trading (4:00 AM - 8:00 PM ET = 16 hours = 960 minutes).
+// 1D/1D-index bars have 1 row per symbol per file. 1Min bars cover extended
+// hours trading (4:00 AM - 8:00 PM ET = 16 hours = 960 minutes).
 func BarCapacity(timeframe string) int {
 	switch timeframe {
-	case "1D":
+	case "1D", "1D-index":
 		return 1
 	case "1Min":
 		return 960
@@ -58,8 +69,14 @@ type ParseStats struct {
 // accumulate bars for the current symbol and flush into the CSM when the
 // ticker changes.
 //
-// symbolSet maps ticker strings to true for symbols we want. If nil, all
-// symbols are accepted. timeframe should be "1D" or "1Min".
+// Index flat files (without a "volume" column) are detected automatically.
+// Index tickers are normalized from the CSV format (e.g., "I:AAVE100") to
+// the MarketStore format (e.g., "^AAVE100") using NormalizeTicker. The
+// resulting bars use the OHLC attribute group (no Volume column).
+//
+// symbolSet maps MarketStore symbol names to true for symbols we want. For
+// index data, the set should use normalized names (e.g., "^AAVE100"). If nil,
+// all symbols are accepted. timeframe should be "1D", "1Min", or "1D-index".
 func ParseAndWrite(
 	reader io.Reader,
 	symbolSet map[string]bool,
@@ -114,9 +131,10 @@ func ParseAndWrite(
 		}
 		stats.RowsRead++
 
-		ticker := record[colIdx.ticker]
+		// Normalize index tickers (e.g., "I:AAVE100" -> "^AAVE100").
+		ticker := NormalizeTicker(record[colIdx.ticker])
 
-		// Filter by symbol set.
+		// Filter by symbol set (using normalized ticker names).
 		if symbolSet != nil && !symbolSet[ticker] {
 			continue
 		}
@@ -146,10 +164,11 @@ func ParseAndWrite(
 	return csm, stats, nil
 }
 
-// columnIndex holds the column positions for required CSV fields.
+// columnIndex holds the column positions for CSV fields. The volume field is
+// optional: it will be -1 for index data that has no volume column.
 type columnIndex struct {
 	ticker      int
-	volume      int
+	volume      int // -1 when absent (index data)
 	open        int
 	close       int
 	high        int
@@ -157,7 +176,13 @@ type columnIndex struct {
 	windowStart int
 }
 
+// HasVolume reports whether the CSV contains a volume column.
+func (idx columnIndex) HasVolume() bool {
+	return idx.volume >= 0
+}
+
 // buildColumnIndex maps column names to their positions in the CSV header.
+// The volume column is optional: index flat files do not include it.
 func buildColumnIndex(header []string) (columnIndex, error) {
 	idx := columnIndex{
 		ticker:      -1,
@@ -188,7 +213,8 @@ func buildColumnIndex(header []string) (columnIndex, error) {
 		}
 	}
 
-	// Validate all required columns are present.
+	// Validate required columns are present. Volume is optional (absent
+	// in index flat files).
 	if idx.ticker < 0 {
 		return idx, fmt.Errorf("missing required CSV column: %s", colTicker)
 	}
@@ -204,9 +230,6 @@ func buildColumnIndex(header []string) (columnIndex, error) {
 	if idx.close < 0 {
 		return idx, fmt.Errorf("missing required CSV column: %s", colClose)
 	}
-	if idx.volume < 0 {
-		return idx, fmt.Errorf("missing required CSV column: %s", colVolume)
-	}
 	if idx.windowStart < 0 {
 		return idx, fmt.Errorf("missing required CSV column: %s", colWindowStart)
 	}
@@ -214,8 +237,10 @@ func buildColumnIndex(header []string) (columnIndex, error) {
 	return idx, nil
 }
 
-// parseRow extracts OHLCV data from a CSV record. Returns open, high, low, close,
-// volume (as uint64), and epoch (window_start converted from nanoseconds to seconds).
+// parseRow extracts OHLC(V) data from a CSV record. Returns open, high, low,
+// close, volume (as uint64), and epoch (window_start converted from nanoseconds
+// to seconds). When the volume column is absent (idx.volume < 0), volume is
+// returned as 0.
 func parseRow(record []string, idx columnIndex) (open, high, low, clos float64, volume uint64, epoch int64, err error) {
 	open, err = strconv.ParseFloat(record[idx.open], 64)
 	if err != nil {
@@ -234,12 +259,15 @@ func parseRow(record []string, idx columnIndex) (open, high, low, clos float64, 
 		return 0, 0, 0, 0, 0, 0, fmt.Errorf("parse close: %w", err)
 	}
 
-	// Volume is a float in the CSV (e.g., "953587") but MarketStore stores it as uint64.
-	volFloat, err := strconv.ParseFloat(record[idx.volume], 64)
-	if err != nil {
-		return 0, 0, 0, 0, 0, 0, fmt.Errorf("parse volume: %w", err)
+	// Volume is optional: index flat files do not include it.
+	if idx.HasVolume() {
+		// Volume is a float in the CSV (e.g., "953587") but MarketStore stores it as uint64.
+		volFloat, err := strconv.ParseFloat(record[idx.volume], 64)
+		if err != nil {
+			return 0, 0, 0, 0, 0, 0, fmt.Errorf("parse volume: %w", err)
+		}
+		volume = uint64(volFloat)
 	}
-	volume = uint64(volFloat)
 
 	// window_start is Unix nanoseconds; convert to seconds for MarketStore Epoch.
 	windowStartNanos, err := strconv.ParseInt(record[idx.windowStart], 10, 64)

@@ -458,3 +458,61 @@ func (s GRPCService) ServerVersion(ctx context.Context, req *proto.ServerVersion
 		Version: utils.GitHash,
 	}, nil
 }
+
+func (s GRPCService) ListWatchlists(ctx context.Context, req *proto.ListWatchlistsRequest,
+) (*proto.ListWatchlistsResponse, error) {
+	if atomic.LoadUint32(&Queryable) == 0 {
+		return nil, errNotQueryable
+	}
+
+	provider := GetWatchlistProvider()
+	if provider == nil {
+		return &proto.ListWatchlistsResponse{}, nil
+	}
+
+	if req != nil && req.Name != "" {
+		ranking := provider.GetRanking(req.Name)
+		return &proto.ListWatchlistsResponse{
+			Watchlists: []*proto.WatchlistRanking{
+				convertRankingToProto(req.Name, ranking),
+			},
+		}, nil
+	}
+
+	all := provider.AllRankings()
+	watchlists := make([]*proto.WatchlistRanking, 0, len(all))
+	for name, entries := range all {
+		watchlists = append(watchlists, convertRankingToProto(name, entries))
+	}
+	return &proto.ListWatchlistsResponse{Watchlists: watchlists}, nil
+}
+
+func convertRankingToProto(name string, entries []WatchlistRankingEntry) *proto.WatchlistRanking {
+	protoEntries := make([]*proto.WatchlistEntry, len(entries))
+	for i, e := range entries {
+		fields := make(map[string]float64, len(e.Fields))
+		for k, v := range e.Fields {
+			switch val := v.(type) {
+			case float64:
+				fields[k] = val
+			case float32:
+				fields[k] = float64(val)
+			case int:
+				fields[k] = float64(val)
+			case int64:
+				fields[k] = float64(val)
+			case int32:
+				fields[k] = float64(val)
+			}
+		}
+		protoEntries[i] = &proto.WatchlistEntry{
+			Symbol: e.Symbol,
+			Rank:   int32(e.Rank),
+			Fields: fields,
+		}
+	}
+	return &proto.WatchlistRanking{
+		Name:    name,
+		Entries: protoEntries,
+	}
+}

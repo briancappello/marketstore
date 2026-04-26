@@ -1,6 +1,12 @@
 package framework
 
-import "encoding/json"
+// Use jsoniter because gopkg.in/yaml.v2 decodes nested YAML maps as
+// map[interface{}]interface{}, which encoding/json cannot marshal.
+// jsoniter handles this transparently by converting interface{} keys
+// to their string representations.
+import jsoniter "github.com/json-iterator/go"
+
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // TriggerConfig is the config block for the watchlist trigger in mkts.yml.
 type TriggerConfig struct {

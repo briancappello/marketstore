@@ -39,6 +39,12 @@ const (
 	defaultBackfillBatchSize = 50000
 	backfillHTTPTimeout      = 30 * time.Second
 	maxConnsPerHost          = 100
+
+	// flatFileAvailableHourET is the hour (ET) after which flat files for the
+	// previous market day are expected to be available. The data provider
+	// publishes flat files for date D at approximately 11 AM ET on D+1; we
+	// use noon as a buffer.
+	flatFileAvailableHourET = 12
 )
 
 // wsDataTypeToTopic maps our config data type names to WebSocket topics.
@@ -487,8 +493,28 @@ func (mf *MassiveFetcher) runBackfill() error {
 	log.Info("[massive] starting backfill (%d symbol workers, extended hours end: %s, regular hours end: %s)",
 		parallelism, endExtended.Format(time.RFC3339), endRegular.Format(time.RFC3339))
 
-	// --- Phase 1: Flat file backfill for 1D and 1Min bars ---
-	flatFileDone := mf.runFlatFileBackfill(parallelism, endRegular, endExtended)
+	// --- Phase 1: Flat file backfill (historical) + REST current-day backfill ---
+	// These run concurrently since their date ranges never overlap:
+	//   - Flat files cover dates where files are expected to be published
+	//     (up to flatFileAvailableThrough).
+	//   - REST covers the gap from the flat file cutoff through the latest
+	//     market time (typically today and possibly yesterday).
+	var flatFileDone map[string]bool
+	var phase1 sync.WaitGroup
+
+	phase1.Add(1)
+	go func() {
+		defer phase1.Done()
+		flatFileDone = mf.runFlatFileBackfill(parallelism, endRegular, endExtended, now)
+	}()
+
+	phase1.Add(1)
+	go func() {
+		defer phase1.Done()
+		mf.restBackfillCurrentDay(httpClient, endRegular, endExtended, now, batchSize, adjusted, parallelism)
+	}()
+
+	phase1.Wait()
 
 	for _, symInfo := range mf.config.SymbolInfos {
 		// Check for cancellation between symbols.
@@ -571,7 +597,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 //
 // Returns a set of query_start keys that were successfully handled, so the
 // subsequent REST backfill loop can skip them.
-func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endExtended time.Time) map[string]bool {
+func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endExtended, now time.Time) map[string]bool {
 	done := make(map[string]bool)
 
 	// Check for S3 credentials.
@@ -617,7 +643,7 @@ func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endEx
 		default:
 		}
 
-		s3DataType, ok := flatfiles.DataTypes[key]
+		ffType, ok := flatfiles.DataTypes[key]
 		if !ok {
 			continue // not a flat file type (e.g., trades, quotes)
 		}
@@ -635,6 +661,14 @@ func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endEx
 		}
 		// Flat files are date-oriented; use just the date portion.
 		endDate := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+
+		// Cap end date to the latest date whose flat file is expected to be
+		// published. Flat files for date D become available ~noon ET on D+1.
+		// Dates beyond this cutoff are handled by the REST current-day backfill.
+		maxFlatFile := flatFileAvailableThrough(now)
+		if endDate.After(maxFlatFile) {
+			endDate = maxFlatFile
+		}
 
 		sw := checkpoint[key]
 		changed := false
@@ -671,7 +705,7 @@ func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endEx
 					}
 				}
 
-				_, _, backfillErr := flatfiles.BackfillDates(mf.ctx, s3Client, w, symbolSet, key, s3DataType, forwardDates, flatfiles.BackfillConfig{
+				_, _, backfillErr := flatfiles.BackfillDates(mf.ctx, s3Client, w, symbolSet, key, ffType.S3Prefix, ffType.S3DataType, forwardDates, flatfiles.BackfillConfig{
 					Parallelism: parallelism,
 					OnProgress:  onForwardProgress,
 				})
@@ -704,7 +738,7 @@ func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endEx
 						}
 					}
 
-					_, _, backfillErr := flatfiles.BackfillDates(mf.ctx, s3Client, w, symbolSet, key, s3DataType, backwardDates, flatfiles.BackfillConfig{
+					_, _, backfillErr := flatfiles.BackfillDates(mf.ctx, s3Client, w, symbolSet, key, ffType.S3Prefix, ffType.S3DataType, backwardDates, flatfiles.BackfillConfig{
 						Parallelism: parallelism,
 						OnProgress:  onBackwardProgress,
 					})
@@ -728,6 +762,106 @@ func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endEx
 	}
 
 	return done
+}
+
+// restBackfillCurrentDay backfills recent market dates that are not yet covered
+// by flat files (which have a ~1 day publication delay). It uses the Massive
+// REST API to fetch 1D and 1Min bars for all symbols in parallel.
+//
+// The date range starts the day after flatFileAvailableThrough(now) and extends
+// through the latest market time. This typically covers 1-2 market days (today
+// and possibly yesterday if flat files haven't been published yet). On weekends
+// after the publication cutoff, this range is empty and no REST calls are made.
+func (mf *MassiveFetcher) restBackfillCurrentDay(
+	httpClient *http.Client,
+	endRegular, endExtended, now time.Time,
+	batchSize int,
+	adjusted bool,
+	parallelism int,
+) {
+	restStart := flatFileAvailableThrough(now).AddDate(0, 0, 1)
+
+	for key := range mf.config.QueryStart {
+		select {
+		case <-mf.ctx.Done():
+			return
+		default:
+		}
+
+		// Only handle flat-file data types (1D, 1Min). Other data types
+		// (trades, quotes) are handled by the per-symbol REST loop.
+		if _, ok := flatfiles.DataTypes[key]; !ok {
+			continue
+		}
+
+		end := endExtended
+		if isDailyOrLonger(key) {
+			end = endRegular
+		}
+
+		// Convert end to a date for market day enumeration.
+		endDate := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+		if restStart.After(endDate) {
+			// No gap: flat files cover everything through endDate.
+			continue
+		}
+
+		restDates := flatfiles.MarketDays(restStart, endDate)
+		if len(restDates) == 0 {
+			continue
+		}
+
+		startTime := time.Now()
+		log.Info("[massive] REST current-day backfill %s: %s to %s (%d market days, %d symbols, parallelism=%d)",
+			key, restStart.Format(dateFormat), endDate.Format(dateFormat),
+			len(restDates), len(mf.config.SymbolInfos), parallelism)
+
+		// Use the date range boundaries as the API time window.
+		// restStart is midnight UTC; end is the actual market close time.
+		apiFrom := time.Date(restStart.Year(), restStart.Month(), restStart.Day(),
+			0, 0, 0, 0, calendar.Nasdaq.Tz())
+		apiTo := end
+
+		apiWP := worker.NewWorkerPool(mf.ctx, parallelism)
+		writerWP := worker.NewWorkerPool(mf.ctx, 1)
+
+		for _, symInfo := range mf.config.SymbolInfos {
+			select {
+			case <-mf.ctx.Done():
+				apiWP.CloseAndWait()
+				writerWP.CloseAndWait()
+				return
+			default:
+			}
+
+			if symInfo.Symbol == "*" {
+				continue
+			}
+
+			currentSym := symInfo.Symbol
+			currentKey := key
+			apiWP.Do(func() {
+				if err := rest.Bars(mf.ctx, httpClient, currentSym, currentKey,
+					apiFrom, apiTo, batchSize, adjusted, writerWP, nil); err != nil {
+					if err == context.Canceled {
+						return
+					}
+					if errors.Is(err, api.ErrAuthFailed) {
+						log.Error("[massive] API authentication failed during REST current-day backfill: %v", err)
+						mf.cancel()
+						return
+					}
+					log.Warn("[massive] REST current-day backfill %s %s: %v", currentSym, currentKey, err)
+				}
+			})
+		}
+
+		apiWP.CloseAndWait()
+		writerWP.CloseAndWait()
+
+		log.Info("[massive] REST current-day backfill %s complete: %d symbols in %s",
+			key, len(mf.config.SymbolInfos), time.Since(startTime).Round(time.Millisecond))
+	}
 }
 
 // resolveEnvVar returns the value of an environment variable, or empty string.
@@ -1065,6 +1199,25 @@ func isDailyUpToDate(lastTS, end time.Time, dataType string, marketTZ *time.Loca
 	endLocal := end.In(marketTZ)
 
 	return cd.Truncate(lastLocal).Equal(cd.Truncate(endLocal))
+}
+
+// flatFileAvailableThrough returns the latest market date whose flat file is
+// expected to be published on S3. The data provider publishes flat files for
+// date D at approximately 11 AM ET on D+1; we use flatFileAvailableHourET
+// (noon) as a safety buffer.
+//
+// Before noon ET: files available through the day before yesterday.
+// After noon ET: files available through yesterday.
+func flatFileAvailableThrough(now time.Time) time.Time {
+	et := now.In(calendar.Nasdaq.Tz())
+	// After the cutoff hour, yesterday's file should be available.
+	// Before the cutoff, only day-before-yesterday is safe.
+	daysBack := 2
+	if et.Hour() >= flatFileAvailableHourET {
+		daysBack = 1
+	}
+	d := et.AddDate(0, 0, -daysBack)
+	return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // isDailyOrLonger returns true if the timeframe represents daily or longer periods.

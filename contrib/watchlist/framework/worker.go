@@ -163,3 +163,52 @@ func initialCurationPass(mgr *SymbolStateManager) {
 func (w *WatchlistWorker) Shutdown() {
 	w.cancel()
 }
+
+// ListWatchlistNames returns the names of all available watchlists.
+// Implements bgworker.WatchlistDataSource.
+func (w *WatchlistWorker) ListWatchlistNames() []string {
+	if Manager == nil {
+		return nil
+	}
+	return Manager.ListWatchlistNames()
+}
+
+// GetWatchlistRanking returns the current ranking for a named watchlist.
+// Implements bgworker.WatchlistDataSource.
+func (w *WatchlistWorker) GetWatchlistRanking(name string) []bgworker.WatchlistRankingEntry {
+	if Manager == nil {
+		return nil
+	}
+	ranking := Manager.GetWatchlistRanking(name)
+	entries := make([]bgworker.WatchlistRankingEntry, len(ranking))
+	for i, rs := range ranking {
+		entries[i] = bgworker.WatchlistRankingEntry{
+			Symbol: rs.Symbol,
+			Rank:   rs.Rank,
+			Fields: rs.Fields,
+		}
+	}
+	return entries
+}
+
+// AllWatchlistRankings returns all current watchlist rankings.
+// Implements bgworker.WatchlistDataSource.
+func (w *WatchlistWorker) AllWatchlistRankings() map[string][]bgworker.WatchlistRankingEntry {
+	if Manager == nil {
+		return nil
+	}
+	all := Manager.AllWatchlistRankings()
+	result := make(map[string][]bgworker.WatchlistRankingEntry, len(all))
+	for name, ranking := range all {
+		entries := make([]bgworker.WatchlistRankingEntry, len(ranking))
+		for i, rs := range ranking {
+			entries[i] = bgworker.WatchlistRankingEntry{
+				Symbol: rs.Symbol,
+				Rank:   rs.Rank,
+				Fields: rs.Fields,
+			}
+		}
+		result[name] = entries
+	}
+	return result
+}

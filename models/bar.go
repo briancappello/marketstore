@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/alpacahq/marketstore/v4/executor"
@@ -12,11 +13,23 @@ import (
 )
 
 const (
-	barSuffix = "OHLCV"
-	oneDay    = 24 * time.Hour
+	barSuffix      = "OHLCV"
+	barSuffixNoVol = "OHLC"
+	oneDay         = 24 * time.Hour
+
+	// IndexPrefix is the prefix for index symbols. Symbols starting with
+	// this prefix are treated as indices (no volume data) and use the OHLC
+	// attribute group instead of OHLCV.
+	IndexPrefix = "^"
 )
 
-// Bar is a data model to persist arrays of Ask-Bid quotes.
+// IsIndex returns true if the symbol represents an index (prefixed with "^").
+// Index symbols use the OHLC attribute group (no Volume column).
+func IsIndex(symbol string) bool {
+	return strings.HasPrefix(symbol, IndexPrefix)
+}
+
+// Bar is a data model to persist arrays of OHLCV (or OHLC for indices) bar data.
 type Bar struct {
 	Tbk                    *io.TimeBucketKey
 	Csm                    io.ColumnSeriesMap
@@ -24,21 +37,36 @@ type Bar struct {
 	Open, High, Low, Close []enum.Price
 	Volume                 []enum.Size
 	WriteTime              time.Duration
+	hasVolume              bool
 }
 
 // BarBucketKey returns a string bucket key for a given symbol and timeframe.
+// Index symbols (prefixed with "^") use the OHLC attribute group; all others
+// use OHLCV.
 func BarBucketKey(symbol, timeframe string) string {
-	return symbol + "/" + timeframe + "/" + barSuffix
+	suffix := barSuffix
+	if IsIndex(symbol) {
+		suffix = barSuffixNoVol
+	}
+	return symbol + "/" + timeframe + "/" + suffix
 }
 
-// NewBar creates a new Bar object and initializes it's internal column buffers to the given capacity.
+// NewBar creates a new Bar object and initializes its internal column buffers
+// to the given capacity. For index symbols (prefixed with "^"), the bar uses
+// the OHLC attribute group and does not allocate or store Volume data.
 func NewBar(symbol, timeframe string, capacity int) *Bar {
 	model := &Bar{
-		Tbk: io.NewTimeBucketKey(BarBucketKey(symbol, timeframe)),
-		Csm: io.NewColumnSeriesMap(),
+		Tbk:       io.NewTimeBucketKey(BarBucketKey(symbol, timeframe)),
+		Csm:       io.NewColumnSeriesMap(),
+		hasVolume: !IsIndex(symbol),
 	}
 	model.make(capacity)
 	return model
+}
+
+// HasVolume reports whether this bar includes volume data.
+func (model *Bar) HasVolume() bool {
+	return model.hasVolume
 }
 
 // Key returns the key of the model's time bucket.
@@ -63,17 +91,22 @@ func (model *Bar) make(capacity int) {
 	model.High = make([]enum.Price, 0, capacity)
 	model.Low = make([]enum.Price, 0, capacity)
 	model.Close = make([]enum.Price, 0, capacity)
-	model.Volume = make([]enum.Size, 0, capacity)
+	if model.hasVolume {
+		model.Volume = make([]enum.Size, 0, capacity)
+	}
 }
 
-// Add adds a new data point to the internal buffers, and increment the internal index by one.
+// Add adds a new data point to the internal buffers, and increments the internal index by one.
+// For bars without volume (index symbols), the volume argument is ignored.
 func (model *Bar) Add(epoch int64, open, high, low, clos enum.Price, volume enum.Size) {
 	model.Epoch = append(model.Epoch, epoch)
 	model.Open = append(model.Open, open)
 	model.High = append(model.High, high)
 	model.Low = append(model.Low, low)
 	model.Close = append(model.Close, clos)
-	model.Volume = append(model.Volume, volume)
+	if model.hasVolume {
+		model.Volume = append(model.Volume, volume)
+	}
 }
 
 func (model *Bar) GetCs() *io.ColumnSeries {
@@ -83,7 +116,9 @@ func (model *Bar) GetCs() *io.ColumnSeries {
 	cs.AddColumn("High", model.High)
 	cs.AddColumn("Low", model.Low)
 	cs.AddColumn("Close", model.Close)
-	cs.AddColumn("Volume", model.Volume)
+	if model.hasVolume {
+		cs.AddColumn("Volume", model.Volume)
+	}
 	return cs
 }
 

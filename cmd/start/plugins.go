@@ -1,6 +1,7 @@
 package start
 
 import (
+	"github.com/alpacahq/marketstore/v4/frontend"
 	"github.com/alpacahq/marketstore/v4/plugins"
 	"github.com/alpacahq/marketstore/v4/plugins/bgworker"
 	"github.com/alpacahq/marketstore/v4/utils"
@@ -20,6 +21,15 @@ func RunBgWorkers(bgWorkers []*utils.BgWorkerSetting) []bgworker.BgWorker {
 		if bgWorker != nil {
 			log.Info("Start running BgWorker %s...", bgWorkerSetting.Name)
 			workers = append(workers, bgWorker)
+
+			// If the worker implements WatchlistDataSource, register it
+			// as the frontend's WatchlistProvider so RPC calls can read
+			// watchlist ranking data.
+			if wds, ok := bgWorker.(bgworker.WatchlistDataSource); ok {
+				frontend.RegisterWatchlistProvider(&watchlistAdapter{src: wds})
+				log.Info("Registered watchlist data source from BgWorker %s", bgWorkerSetting.Name)
+			}
+
 			go bgWorker.Run()
 		}
 	}
@@ -33,6 +43,47 @@ func ShutdownBgWorkers(workers []bgworker.BgWorker) {
 	for _, w := range workers {
 		w.Shutdown()
 	}
+}
+
+// watchlistAdapter bridges bgworker.WatchlistDataSource (shared with the
+// plugin) to frontend.WatchlistProvider (used by the RPC layer). This runs
+// in the host process, so it correctly accesses the host's frontend state.
+type watchlistAdapter struct {
+	src bgworker.WatchlistDataSource
+}
+
+func (a *watchlistAdapter) ListNames() []string {
+	return a.src.ListWatchlistNames()
+}
+
+func (a *watchlistAdapter) GetRanking(name string) []frontend.WatchlistRankingEntry {
+	ranking := a.src.GetWatchlistRanking(name)
+	entries := make([]frontend.WatchlistRankingEntry, len(ranking))
+	for i, r := range ranking {
+		entries[i] = frontend.WatchlistRankingEntry{
+			Symbol: r.Symbol,
+			Rank:   r.Rank,
+			Fields: r.Fields,
+		}
+	}
+	return entries
+}
+
+func (a *watchlistAdapter) AllRankings() map[string][]frontend.WatchlistRankingEntry {
+	all := a.src.AllWatchlistRankings()
+	result := make(map[string][]frontend.WatchlistRankingEntry, len(all))
+	for name, ranking := range all {
+		entries := make([]frontend.WatchlistRankingEntry, len(ranking))
+		for i, r := range ranking {
+			entries[i] = frontend.WatchlistRankingEntry{
+				Symbol: r.Symbol,
+				Rank:   r.Rank,
+				Fields: r.Fields,
+			}
+		}
+		result[name] = entries
+	}
+	return result
 }
 
 func NewBgWorker(s *utils.BgWorkerSetting) bgworker.BgWorker {

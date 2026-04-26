@@ -466,6 +466,73 @@ func TestErrConnectionLimit(t *testing.T) {
 	assert.True(t, errors.Is(err, ws.ErrConnectionLimit))
 }
 
+func TestFlatFileAvailableThrough(t *testing.T) {
+	t.Parallel()
+
+	ny := calendar.Nasdaq.Tz()
+
+	// Helper: midnight UTC date for comparison.
+	utcDate := func(year, month, day int) time.Time {
+		return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+	}
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{
+			name: "before noon ET: available through day-before-yesterday",
+			now:  time.Date(2026, 4, 24, 6, 0, 0, 0, ny), // Fri 6 AM ET
+			want: utcDate(2026, 4, 22),                     // Wednesday
+		},
+		{
+			name: "at 11:59 AM ET: still before cutoff",
+			now:  time.Date(2026, 4, 24, 11, 59, 0, 0, ny),
+			want: utcDate(2026, 4, 22),
+		},
+		{
+			name: "at noon ET: yesterday is available",
+			now:  time.Date(2026, 4, 24, 12, 0, 0, 0, ny), // Fri noon ET
+			want: utcDate(2026, 4, 23),                      // Thursday
+		},
+		{
+			name: "after noon ET: yesterday is available",
+			now:  time.Date(2026, 4, 24, 15, 0, 0, 0, ny), // Fri 3 PM ET
+			want: utcDate(2026, 4, 23),                      // Thursday
+		},
+		{
+			name: "Saturday after noon: Friday is available",
+			now:  time.Date(2026, 4, 25, 13, 0, 0, 0, ny), // Sat 1 PM ET
+			want: utcDate(2026, 4, 24),                      // Friday
+		},
+		{
+			name: "Saturday before noon: Thursday is available",
+			now:  time.Date(2026, 4, 25, 8, 0, 0, 0, ny), // Sat 8 AM ET
+			want: utcDate(2026, 4, 23),                     // Thursday
+		},
+		{
+			name: "Sunday after noon: Saturday (flat file dates are calendar, not market)",
+			now:  time.Date(2026, 4, 26, 14, 0, 0, 0, ny), // Sun 2 PM ET
+			want: utcDate(2026, 4, 25),                      // Saturday
+		},
+		{
+			name: "midnight ET: before noon, 2 days back",
+			now:  time.Date(2026, 4, 24, 0, 0, 0, 0, ny),
+			want: utcDate(2026, 4, 22),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := flatFileAvailableThrough(tt.now)
+			assert.Equal(t, tt.want, got, "flatFileAvailableThrough(%s)", tt.now.Format(time.RFC3339))
+		})
+	}
+}
+
 func TestNextPreMarketOpen(t *testing.T) {
 	t.Parallel()
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
 	utilsio "github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
@@ -19,11 +20,21 @@ import (
 
 const dateFormat = "2006-01-02"
 
-// DataTypes maps query_start keys for bars to S3 flat file data type names.
+// FlatFileType describes an S3 flat file data source: the S3 key prefix and
+// the data type subdirectory within that prefix.
+type FlatFileType struct {
+	// S3Prefix is the top-level S3 key prefix (e.g., "us_stocks_sip" or "us_indices").
+	S3Prefix string
+	// S3DataType is the data type subdirectory (e.g., "day_aggs_v1" or "minute_aggs_v1").
+	S3DataType string
+}
+
+// DataTypes maps query_start keys to their S3 flat file location.
 // Only these data types are supported by the flat file backfiller.
-var DataTypes = map[string]string{
-	"1D":   "day_aggs_v1",
-	"1Min": "minute_aggs_v1",
+var DataTypes = map[string]FlatFileType{
+	"1D":       {S3Prefix: massiveconfig.DefaultS3Prefix, S3DataType: "day_aggs_v1"},
+	"1Min":     {S3Prefix: massiveconfig.DefaultS3Prefix, S3DataType: "minute_aggs_v1"},
+	"1D-index": {S3Prefix: massiveconfig.DefaultS3IndicesPrefix, S3DataType: "day_aggs_v1"},
 }
 
 // ProgressFunc is called when the contiguous high-water mark of completed dates
@@ -73,13 +84,16 @@ type writeJob struct {
 // of cfg.WriteConcurrency writer goroutines. This decouples download throughput
 // from write throughput, preventing network stalls when writes are slow.
 //
+// s3Prefix is the top-level S3 key prefix (e.g., "us_stocks_sip" or "us_indices").
+//
 // Returns the total rows matched and total symbol-writes across all dates.
 func BackfillDates(
 	ctx context.Context,
 	s3Client *S3Client,
 	w backfill.Writer,
 	symbolSet map[string]bool,
-	timeframe string, // "1D" or "1Min"
+	timeframe string, // "1D", "1Min", or "1D-index"
+	s3Prefix string, // "us_stocks_sip" or "us_indices"
 	s3DataType string, // "day_aggs_v1" or "minute_aggs_v1"
 	dates []time.Time,
 	cfg BackfillConfig,
@@ -160,7 +174,7 @@ func BackfillDates(
 		downloadWP.Do(func() {
 			// Download.
 			dlStart := time.Now()
-			csm, stats, ok := downloadAndParse(ctx, s3Client, symbolSet, s3DataType, timeframe, currentDate)
+			csm, stats, ok := downloadAndParse(ctx, s3Client, symbolSet, s3Prefix, s3DataType, timeframe, currentDate)
 			dlDuration := time.Since(dlStart)
 			if !ok {
 				return
@@ -281,7 +295,7 @@ func downloadAndParse(
 	ctx context.Context,
 	s3Client *S3Client,
 	symbolSet map[string]bool,
-	s3DataType, timeframe string,
+	s3Prefix, s3DataType, timeframe string,
 	date time.Time,
 ) (utilsio.ColumnSeriesMap, ParseStats, bool) {
 	dateStr := date.Format(dateFormat)
@@ -297,7 +311,7 @@ func downloadAndParse(
 			}
 		}
 
-		reader, err := s3Client.Download(ctx, s3DataType, date)
+		reader, err := s3Client.DownloadWithPrefix(ctx, s3Prefix, s3DataType, date)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ParseStats{}, false

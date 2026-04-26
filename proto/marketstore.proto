@@ -168,6 +168,31 @@ message ServerVersionResponse {
     string version = 1;
 }
 
+// ListWatchlistsRequest optionally filters to a specific watchlist by name.
+// If name is empty, all watchlists are returned.
+message ListWatchlistsRequest {
+    string name = 1;
+}
+
+// WatchlistEntry is a single ranked symbol in a watchlist.
+message WatchlistEntry {
+    string symbol = 1;
+    int32 rank = 2;
+    // Strategy-specific fields (e.g. "pct_change", "volume").
+    map<string, double> fields = 3;
+}
+
+// WatchlistRanking is a named watchlist with its current ranked entries.
+message WatchlistRanking {
+    string name = 1;
+    repeated WatchlistEntry entries = 2;
+}
+
+// ListWatchlistsResponse contains the current rankings for one or more watchlists.
+message ListWatchlistsResponse {
+    repeated WatchlistRanking watchlists = 1;
+}
+
 service Marketstore {
     rpc Query (MultiQueryRequest) returns (MultiQueryResponse);
     rpc Create (MultiCreateRequest) returns (MultiServerResponse);
@@ -175,4 +200,5 @@ service Marketstore {
     rpc Destroy (MultiKeyRequest) returns (MultiServerResponse);
     rpc ListSymbols (ListSymbolsRequest) returns (ListSymbolsResponse);
     rpc ServerVersion (ServerVersionRequest) returns (ServerVersionResponse);
+    rpc ListWatchlists (ListWatchlistsRequest) returns (ListWatchlistsResponse);
 }

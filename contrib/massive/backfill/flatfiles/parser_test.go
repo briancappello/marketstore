@@ -111,18 +111,18 @@ func TestParseAndWrite_EmptyFile(t *testing.T) {
 	assert.Len(t, csm, 0)
 }
 
-func TestParseAndWrite_MissingColumn(t *testing.T) {
+func TestParseAndWrite_MissingRequiredColumn(t *testing.T) {
 	t.Parallel()
 
-	// Missing "volume" column.
-	csv := "ticker,open,close,high,low,window_start,transactions\nAAPL,150,155,156,149,1735794000000000000,1000\n"
+	// Missing "open" column (a required column).
+	csv := "ticker,close,high,low,window_start\nAAPL,155,156,149,1735794000000000000\n"
 	reader := strings.NewReader(csv)
 	date := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
 
 	_, _, err := ParseAndWrite(reader, nil, "1D", date)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "volume")
+	assert.Contains(t, err.Error(), "open")
 }
 
 func TestEpochConversion(t *testing.T) {
@@ -182,11 +182,20 @@ func TestBuildColumnIndex(t *testing.T) {
 		assert.Equal(t, 0, idx.windowStart)
 	})
 
-	t.Run("missing column", func(t *testing.T) {
+	t.Run("missing volume is allowed", func(t *testing.T) {
+		// Index flat files have no volume column; this should succeed.
 		header := []string{"ticker", "open", "close", "high", "low", "window_start"}
+		idx, err := buildColumnIndex(header)
+		require.NoError(t, err)
+		assert.Equal(t, -1, idx.volume)
+		assert.False(t, idx.HasVolume())
+	})
+
+	t.Run("missing required column", func(t *testing.T) {
+		header := []string{"ticker", "open", "high", "low", "window_start"}
 		_, err := buildColumnIndex(header)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "volume")
+		assert.Contains(t, err.Error(), "close")
 	})
 }
 
@@ -236,4 +245,143 @@ func TestParseRow(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "window_start")
 	})
+}
+
+// Index flat file CSV: no volume or transactions columns.
+const indexDayAggsCSV = `ticker,open,close,high,low,window_start
+I:AAVE100,96.767,99.2175,100.4065,95.5217,1701756000000000000
+I:AAVE10RP,96.7652,99.2205,100.3647,95.5207,1701756000000000000
+I:XNDXTRND,2755.6953,2759.323,2763.9738,2748.6122,1701756000000000000
+`
+
+func TestParseAndWrite_IndexDayAggs(t *testing.T) {
+	t.Parallel()
+
+	reader := strings.NewReader(indexDayAggsCSV)
+	date := time.Date(2023, 12, 5, 0, 0, 0, 0, time.UTC)
+
+	csm, stats, err := ParseAndWrite(reader, nil, "1D-index", date)
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, stats.RowsRead)
+	assert.Equal(t, 3, stats.RowsMatched)
+	assert.Equal(t, 3, stats.SymbolCount)
+	assert.Len(t, csm, 3)
+
+	// Verify index tickers are normalized: "I:AAVE100" -> "^AAVE100".
+	// TBKs should use OHLC attribute group (no Volume).
+	for _, sym := range []string{"^AAVE100", "^AAVE10RP", "^XNDXTRND"} {
+		tbk := utilsio.NewTimeBucketKeyFromString(sym + "/1D-index/OHLC")
+		cs := csm[*tbk]
+		require.NotNil(t, cs, "missing CSM entry for %s", sym)
+
+		// Should have OHLC columns but NOT Volume.
+		epochs := cs.GetColumn("Epoch").([]int64)
+		assert.Len(t, epochs, 1, "expected 1 bar for %s", sym)
+		assert.NotNil(t, cs.GetColumn("Open"), "expected Open column for %s", sym)
+		assert.NotNil(t, cs.GetColumn("High"), "expected High column for %s", sym)
+		assert.NotNil(t, cs.GetColumn("Low"), "expected Low column for %s", sym)
+		assert.NotNil(t, cs.GetColumn("Close"), "expected Close column for %s", sym)
+		assert.Nil(t, cs.GetColumn("Volume"), "Volume should be absent for index %s", sym)
+	}
+}
+
+func TestParseAndWrite_IndexSymbolFilter(t *testing.T) {
+	t.Parallel()
+
+	// Filter using normalized names (with ^ prefix).
+	symbolSet := map[string]bool{"^AAVE100": true, "^XNDXTRND": true}
+	reader := strings.NewReader(indexDayAggsCSV)
+	date := time.Date(2023, 12, 5, 0, 0, 0, 0, time.UTC)
+
+	csm, stats, err := ParseAndWrite(reader, symbolSet, "1D-index", date)
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, stats.RowsRead)
+	assert.Equal(t, 2, stats.RowsMatched) // ^AAVE100 and ^XNDXTRND
+	assert.Equal(t, 2, stats.SymbolCount)
+	assert.Len(t, csm, 2)
+}
+
+func TestParseAndWrite_IndexEmptyFile(t *testing.T) {
+	t.Parallel()
+
+	reader := strings.NewReader("ticker,open,close,high,low,window_start\n")
+	date := time.Date(2023, 12, 5, 0, 0, 0, 0, time.UTC)
+
+	csm, stats, err := ParseAndWrite(reader, nil, "1D-index", date)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, stats.RowsRead)
+	assert.Equal(t, 0, stats.SymbolCount)
+	assert.Len(t, csm, 0)
+}
+
+func TestParseAndWrite_IndexEpochConversion(t *testing.T) {
+	t.Parallel()
+
+	// 1701756000000000000 nanoseconds = 1701756000 seconds = 2023-12-05 06:00:00 UTC
+	csv := `ticker,open,close,high,low,window_start
+I:SPX,4500.00,4550.50,4560.00,4490.00,1701756000000000000
+`
+	reader := strings.NewReader(csv)
+	date := time.Date(2023, 12, 5, 0, 0, 0, 0, time.UTC)
+
+	csm, _, err := ParseAndWrite(reader, nil, "1D-index", date)
+
+	require.NoError(t, err)
+
+	tbk := utilsio.NewTimeBucketKeyFromString("^SPX/1D-index/OHLC")
+	cs := csm[*tbk]
+	require.NotNil(t, cs)
+
+	epochs := cs.GetColumn("Epoch").([]int64)
+	require.Len(t, epochs, 1)
+	assert.Equal(t, int64(1701756000), epochs[0])
+}
+
+func TestNormalizeTicker(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"I:AAVE100", "^AAVE100"},
+		{"I:SPX", "^SPX"},
+		{"I:XNDXTRND", "^XNDXTRND"},
+		{"AAPL", "AAPL"},         // Non-index ticker unchanged
+		{"X:BTCUSD", "X:BTCUSD"}, // Crypto prefix unchanged
+		{"", ""},                 // Empty string
+		{"I:", "^"},              // Edge case: prefix only
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.expected, NormalizeTicker(tt.input), "NormalizeTicker(%q)", tt.input)
+	}
+}
+
+func TestParseRow_NoVolume(t *testing.T) {
+	t.Parallel()
+
+	// Index column layout: no volume column.
+	idx := columnIndex{
+		ticker:      0,
+		volume:      -1, // absent
+		open:        1,
+		close:       2,
+		high:        3,
+		low:         4,
+		windowStart: 5,
+	}
+
+	record := []string{"I:SPX", "4500.00", "4550.50", "4560.00", "4490.00", "1701756000000000000"}
+	open, high, low, clos, volume, epoch, err := parseRow(record, idx)
+	require.NoError(t, err)
+	assert.InDelta(t, 4500.00, open, 0.001)
+	assert.InDelta(t, 4560.00, high, 0.001)
+	assert.InDelta(t, 4490.00, low, 0.001)
+	assert.InDelta(t, 4550.50, clos, 0.001)
+	assert.Equal(t, uint64(0), volume) // No volume -> 0
+	assert.Equal(t, int64(1701756000), epoch)
 }

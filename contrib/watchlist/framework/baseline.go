@@ -144,12 +144,19 @@ func computeSymbolBaseline(
 	state.MedianVolume50D = median(recentVols)
 
 	// Extract close column for PriorClose.
+	// PriorClose is the close of the day BEFORE the most recent bar,
+	// used as the baseline for percent-change calculations.
 	closeCol := cs.GetColumn("Close")
 	closes := toFloat64Slice(closeCol)
 	if len(closes) == 0 {
 		return
 	}
-	state.PriorClose = closes[len(closes)-1]
+	if len(closes) >= 2 {
+		state.PriorClose = closes[len(closes)-2]
+	} else {
+		// Only one daily bar available; use it as both prior and current.
+		state.PriorClose = closes[0]
+	}
 
 	// Determine "today" for intraday queries.
 	today := time.Now().Truncate(24 * time.Hour)
@@ -267,7 +274,7 @@ func seedFromIntraday(
 
 	// Compute derived metrics.
 	if state.PriorClose != 0 {
-		state.PctChange = (state.HighOfDay - state.PriorClose) / state.PriorClose * 100
+		state.PctChange = (state.LastPrice - state.PriorClose) / state.PriorClose * 100
 	}
 	if state.MedianVolume50D != 0 {
 		state.VolumeMultipleOfMed = float64(state.CumulativeVolume) / state.MedianVolume50D
@@ -304,7 +311,7 @@ func seedFromDailyBar(state *SymbolState, closes, volumes, opens, highs, lows []
 
 	// Compute derived metrics.
 	if state.PriorClose != 0 {
-		state.PctChange = (state.HighOfDay - state.PriorClose) / state.PriorClose * 100
+		state.PctChange = (state.LastPrice - state.PriorClose) / state.PriorClose * 100
 	}
 	if state.MedianVolume50D != 0 {
 		state.VolumeMultipleOfMed = float64(state.CumulativeVolume) / state.MedianVolume50D

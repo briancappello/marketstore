@@ -225,7 +225,7 @@ func updateSymbolState(state *SymbolState, data map[string]interface{}) {
 
 	// Recompute derived metrics.
 	if state.PriorClose != 0 {
-		state.PctChange = (state.HighOfDay - state.PriorClose) / state.PriorClose * 100
+		state.PctChange = (state.LastPrice - state.PriorClose) / state.PriorClose * 100
 	}
 	if state.MedianVolume50D != 0 {
 		state.VolumeMultipleOfMed = float64(state.CumulativeVolume) / state.MedianVolume50D
