@@ -66,7 +66,14 @@ func (w *WatchlistWorker) Run() {
 
 	// Create WatchlistStrategy instances from registered factories.
 	for name, factory := range GetAllWatchlistFactories() {
-		strategy, err := factory(nil) // TODO: pass per-watchlist config
+		var strategyConf map[string]interface{}
+		if w.config.StrategyConfig != nil {
+			strategyConf = w.config.StrategyConfig[name]
+		}
+		if strategyConf == nil {
+			strategyConf = map[string]interface{}{}
+		}
+		strategy, err := factory(strategyConf)
 		if err != nil {
 			log.Error("[watchlist] failed to create watchlist %q: %v", name, err)
 			continue

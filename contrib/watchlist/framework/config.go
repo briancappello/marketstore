@@ -39,6 +39,12 @@ type WorkerConfig struct {
 	MedianWindow         int    `json:"median_window"`
 	RankingIntervalMs    int    `json:"ranking_interval_ms"`
 	RefreshInterval      string `json:"refresh_interval"`
+
+	// StrategyConfig is an optional map of strategy-name to config that is
+	// passed to each WatchlistStrategy factory at creation time. This allows
+	// bgworker-level config (e.g., database DSNs) to reach strategies that
+	// need it.
+	StrategyConfig map[string]map[string]interface{} `json:"strategy_config"`
 }
 
 // ParseTriggerConfig parses a raw config map into a TriggerConfig.

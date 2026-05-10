@@ -34,6 +34,7 @@ const (
 	configDesc            = "set the path for the marketstore YAML configuration file"
 
 	diskUsageMonitorInterval = 10 * time.Minute
+	runtimeMonitorInterval   = 30 * time.Second
 )
 
 var (
@@ -68,6 +69,18 @@ func init() {
 
 // executeStart implements the start command.
 func executeStart(cmd *cobra.Command, _ []string) error {
+	// Force the pure-Go DNS resolver. Combined with the `netgo` build tag
+	// (set in the top-level Makefile), this eliminates the cgo getaddrinfo
+	// path that was identified as the primary OS-thread-creation source
+	// under load. See plans/os-thread-accumulation.md.
+	//
+	// The build tag is the authoritative mechanism (it removes the cgo
+	// resolver from the binary entirely); this runtime assignment is a
+	// defense-in-depth signal for any caller that constructs its own
+	// net.Resolver from net.DefaultResolver semantics or that runs in a
+	// build that inadvertently loses the tag.
+	net.DefaultResolver.PreferGo = true
+
 	ctx := context.Background()
 	globalCtx, globalCancel := context.WithCancel(ctx)
 	defer globalCancel()
@@ -126,6 +139,7 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
 
 	go metrics.StartDiskUsageMonitor(metrics.TotalDiskUsageBytes, config.RootDirectory, diskUsageMonitorInterval)
+	go metrics.StartRuntimeMonitor(globalCtx, runtimeMonitorInterval)
 
 	startupTime := time.Since(start)
 	metrics.StartupTime.Set(startupTime.Seconds())

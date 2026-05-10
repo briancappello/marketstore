@@ -66,4 +66,30 @@ var (
 			Name:      "total_disk_usage_bytes",
 			Help:      "Total disk usage [bytes] of the Marketstore data files",
 		})
+
+	// Goroutines exposes runtime.NumGoroutine() for monitoring goroutine
+	// growth or leaks.
+	Goroutines = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "goroutines",
+			Help:      "Current number of live goroutines (runtime.NumGoroutine).",
+		})
+
+	// OSThreads exposes the count of OS threads owned by the Go runtime
+	// (runtime/metrics /sched/threads/total:threads). This is the metric
+	// to watch for the unbounded thread accumulation pattern documented in
+	// plans/os-thread-accumulation.md: Go never releases OS threads once
+	// created, so this gauge only ever grows. Sustained growth past a
+	// few hundred is a signal that something (typically blocking syscalls
+	// in CGo or backfill code paths) is forcing the scheduler to spawn
+	// new M's faster than they can be reused.
+	OSThreads = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "os_threads",
+			Help:      "Current count of OS threads owned by the Go runtime (/sched/threads/total).",
+		})
 )

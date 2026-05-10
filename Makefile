@@ -1,6 +1,15 @@
 .PHONY: plugins deploy
 
-GOFLAGS=""
+# Build tags applied to every `go` invocation (host binary, plugins, helpers).
+#
+# netgo: force the pure-Go DNS resolver. Eliminates the CGo getaddrinfo path,
+# which was identified as the primary OS-thread-creation source under load
+# (see plans/os-thread-accumulation.md). The host binary and all plugins MUST
+# be built with the same tag set, otherwise plugin.Open() fails with a build
+# ID mismatch.
+GO_BUILD_TAGS ?= netgo
+export GOFLAGS := -tags=$(GO_BUILD_TAGS) $(GOFLAGS)
+
 GOPATH0 := $(firstword $(subst :, ,$(GOPATH)))
 ifeq ($(GOPATH0),)
 GOPATH0 := $(CURDIR)/build

@@ -71,6 +71,12 @@ type MassiveFetcher struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
+	// httpClient is shared across all backfill cycles (initial + reconnect
+	// gap-fills). Reusing a single client preserves the underlying
+	// http.Transport's connection pool, so reconnect-triggered backfills
+	// don't re-pay TCP dial + TLS handshake costs and don't leak
+	// orphaned idle connections from prior cycles.
+	httpClient *http.Client
 }
 
 // NewBgWorker returns a new instance of MassiveFetcher.
@@ -138,11 +144,23 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Long-lived HTTP client, shared across every runBackfill() invocation.
+	// The transport's connection pool persists across reconnect gap-fills,
+	// avoiding repeated DNS + TCP dial + TLS handshake on each cycle.
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: maxConnsPerHost,
+			MaxConnsPerHost:     maxConnsPerHost,
+		},
+		Timeout: backfillHTTPTimeout,
+	}
+
 	return &MassiveFetcher{
 		config:      config,
 		wsDataTypes: wsDataTypes,
 		ctx:         ctx,
 		cancel:      cancel,
+		httpClient:  httpClient,
 	}, nil
 }
 
@@ -424,6 +442,10 @@ func nextPreMarketOpen(now time.Time) time.Time {
 // Shutdown cancels the context and stops all background operations.
 func (mf *MassiveFetcher) Shutdown() {
 	mf.cancel()
+	// Release pooled HTTP connections so they don't linger past shutdown.
+	if t, ok := mf.httpClient.Transport.(*http.Transport); ok {
+		t.CloseIdleConnections()
+	}
 }
 
 // runBackfill performs a historical data backfill from the Massive REST API
@@ -458,13 +480,10 @@ func (mf *MassiveFetcher) runBackfill() error {
 		adjusted = *mf.config.BackfillAdjusted
 	}
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: maxConnsPerHost,
-			MaxConnsPerHost:     maxConnsPerHost,
-		},
-		Timeout: backfillHTTPTimeout,
-	}
+	// Reuse the long-lived httpClient (constructed in NewBgWorker) across
+	// every backfill cycle so the underlying http.Transport's connection
+	// pool persists across reconnect-triggered gap-fills.
+	httpClient := mf.httpClient
 
 	// Open a connection pool for sync reads/writes throughout the backfill.
 	// Using pgxpool.Pool instead of pgx.Conn so that multiple symbol-level
