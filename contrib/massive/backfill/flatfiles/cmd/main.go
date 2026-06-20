@@ -99,6 +99,11 @@ var (
 	grpcAddress      string
 	noRPC            bool
 	pprofAddr        string
+	progressMode     string
+
+	// writeConcurrencySet reports whether -write-concurrency was passed
+	// explicitly on the command line.
+	writeConcurrencySet bool
 )
 
 func parseFlags() {
@@ -114,7 +119,7 @@ func parseFlags() {
 	flag.IntVar(&parallelism, "parallelism", runtime.NumCPU(),
 		"number of parallel S3 downloads (default: NumCPU)")
 	flag.IntVar(&writeConcurrency, "write-concurrency", 2,
-		"number of concurrent writer goroutines (default: 2)")
+		"number of concurrent writer goroutines (default: 2, or 4 with --no-rpc)")
 	flag.IntVar(&writeBuffer, "write-buffer", 10,
 		"buffered channel capacity between downloaders and writers (default: 10)")
 	flag.StringVar(&configFilePath, "config", "mkts.yml",
@@ -125,8 +130,18 @@ func parseFlags() {
 		"write directly to the filesystem instead of via gRPC to a running server")
 	flag.StringVar(&pprofAddr, "pprof", "",
 		"address for pprof HTTP server (e.g., localhost:6060). Disabled if empty.")
+	flag.StringVar(&progressMode, "progress", "auto",
+		"interactive progress bar with ETA: auto (only when stderr is a terminal), always, or never")
 
 	flag.Parse()
+
+	// Record whether the user explicitly set -write-concurrency so we can
+	// apply a mode-specific default (see main) only when they did not.
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "write-concurrency" {
+			writeConcurrencySet = true
+		}
+	})
 }
 
 func main() {
@@ -164,6 +179,15 @@ func main() {
 
 	if noRPC {
 		log.Info("[flatfiles] using direct disk mode (--no-rpc)")
+		// Direct disk writes parallelize well, so default to a higher writer
+		// concurrency than the gRPC path. Kept moderate (4) because each
+		// concurrent writer holds a full date's CSM in memory; for 1Min over
+		// the full symbol universe these are large, so too many writers cause
+		// memory/disk contention. Only override when the user did not set
+		// -write-concurrency explicitly.
+		if !writeConcurrencySet {
+			writeConcurrency = 4
+		}
 		instanceMeta, massiveConfig = initWriter()
 		w = &backfill.DirectWriter{}
 	} else {
@@ -285,6 +309,7 @@ func runFlatFileBackfill(
 		Parallelism:      parallelism,
 		WriteConcurrency: writeConcurrency,
 		WriteBufferSize:  writeBuffer,
+		ProgressBar:      progressMode,
 	})
 	if err != nil && ctx.Err() == nil {
 		log.Warn("[flatfiles] %s backfill encountered errors: %v", timeframe, err)
@@ -495,7 +520,18 @@ func initWriter() (*executor.InstanceMetadata, *massiveconfig.FetcherConfig) {
 	cfg := utils.NewDefaultConfig(rootDir)
 	cfg.WALRotateInterval = config.WALRotateInterval
 	cfg.WALBypass = true
-	cfg.BackgroundSync = false
+	// BackgroundSync MUST be enabled. executor.WriteCSM queues every write
+	// command into txnPipe.writeChannel (buffer = WriteChannelCommandDepth,
+	// 1,000,000) inside its per-symbol loop and only calls RequestFlush AFTER
+	// the loop finishes. Without BackgroundSync, the SyncWAL drain goroutine
+	// never starts, so a single WriteCSM that generates more than 1M commands
+	// fills the channel and blocks forever mid-loop -- the flush that would
+	// drain it is unreachable. Full-universe 1Min data hits this (~1.6M bars
+	// per day = ~1.6M commands); daily (~10k commands) stays under the buffer
+	// and so worked by accident. With WALBypass=true, SyncWAL flushes straight
+	// to primary storage and skips WAL-file writes, so there is no WAL
+	// overhead -- it just provides the concurrent drainer WriteCSM requires.
+	cfg.BackgroundSync = true
 	c := di.NewContainer(cfg)
 
 	// Load ondiskagg triggers if configured.

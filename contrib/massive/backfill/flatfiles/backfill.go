@@ -20,6 +20,11 @@ import (
 
 const dateFormat = "2006-01-02"
 
+// slowWriteThreshold is the per-date write duration above which a write is
+// logged at info level. This surfaces slow persists (common for 1Min data
+// covering the full symbol universe) so they are not mistaken for a hang.
+const slowWriteThreshold = 5 * time.Second
+
 // FlatFileType describes an S3 flat file data source: the S3 key prefix and
 // the data type subdirectory within that prefix.
 type FlatFileType struct {
@@ -65,6 +70,12 @@ type BackfillConfig struct {
 	// completed dates advances, allowing the caller to persist incremental
 	// checkpoint state. May be nil.
 	OnProgress ProgressFunc
+
+	// ProgressBar controls the interactive progress bar rendered to stderr:
+	// "always" forces it on, "never" disables it, and "auto" (or "") enables
+	// it only when stderr is a terminal. The bar shows percent complete,
+	// processing rate (dates/sec), and ETA.
+	ProgressBar string
 }
 
 // writeJob is a unit of work for the writer goroutines.
@@ -118,13 +129,24 @@ func BackfillDates(
 		cfg.Parallelism, cfg.WriteConcurrency, cfg.WriteBufferSize)
 
 	startTime := time.Now()
+
+	var processedDates int64
+
+	// Interactive progress bar (rendered to stderr; see progress.go). It polls
+	// processedDates on a timer so it advances smoothly even when downloads
+	// stall. Disabled automatically when stderr is not a terminal unless
+	// ProgressBar == "always".
+	progress := NewProgressReporter(timeframe, int64(len(dates)),
+		func() int64 { return atomic.LoadInt64(&processedDates) },
+		0, cfg.ProgressBar)
+	progress.Start()
+	defer progress.Finish()
+
 	downloadWP := worker.NewWorkerPool(ctx, cfg.Parallelism)
 
 	// Buffered channel decouples download workers from writer goroutines.
 	// Download workers can continue fetching while writers are busy flushing.
 	writeCh := make(chan writeJob, cfg.WriteBufferSize)
-
-	var processedDates int64
 
 	// --- Timing stats (atomic, nanoseconds) ---
 	var totalDownloadNs int64
@@ -142,6 +164,40 @@ func BackfillDates(
 		dateIndex[d] = i
 	}
 
+	// markComplete records that the date at index idx has been fully handled
+	// (persisted, or skipped because it had no data) and advances the
+	// contiguous high-water mark / checkpoint. It is the single place that
+	// increments processedDates, so the progress bar reflects DURABLY-WRITTEN
+	// dates rather than merely downloaded/enqueued ones.
+	//
+	// It is called from the writer goroutines (after a successful WriteCSM)
+	// and from the download workers for dates that produced no data.
+	markComplete := func(idx int) {
+		n := atomic.AddInt64(&processedDates, 1)
+
+		hwMu.Lock()
+		completed[idx] = true
+		newHW := highWater
+		for newHW+1 < len(completed) && completed[newHW+1] {
+			newHW++
+		}
+		advanced := newHW > highWater
+		highWater = newHW
+		hwMu.Unlock()
+
+		if advanced && cfg.OnProgress != nil {
+			cfg.OnProgress(dates[newHW])
+		}
+
+		// When the interactive bar is active it already conveys progress,
+		// so suppress the redundant periodic count log to avoid noise.
+		if !progress.Active() && (n%50 == 0 || n == int64(len(dates))) {
+			log.Info("[flatfiles] %s: processed %d/%d dates (%d rows, %d symbol-writes)",
+				timeframe, n, len(dates),
+				atomic.LoadInt64(&totalRows), atomic.LoadInt64(&totalSymbols))
+		}
+	}
+
 	// Start writer goroutines.
 	var writerWg sync.WaitGroup
 	for i := 0; i < cfg.WriteConcurrency; i++ {
@@ -149,12 +205,27 @@ func BackfillDates(
 		go func() {
 			defer writerWg.Done()
 			for job := range writeCh {
+				// Persisting a single date can take a long time for large
+				// CSMs (e.g. 1Min for the full symbol universe writes one file
+				// per symbol). Log start+duration so a slow write is visibly
+				// distinguishable from a hang, and so there is activity before
+				// the first date's progress tick.
+				log.Debug("[flatfiles] %s: writing %s (%d symbols)...",
+					job.date.Format(dateFormat), job.timeframe, len(job.csm))
 				writeStart := time.Now()
 				if writeErr := w.WriteCSM(job.csm, false); writeErr != nil {
 					log.Warn("[flatfiles] %s: failed to write %s: %v",
 						job.date.Format(dateFormat), job.timeframe, writeErr)
 				}
-				atomic.AddInt64(&totalWriteNs, int64(time.Since(writeStart)))
+				writeDur := time.Since(writeStart)
+				atomic.AddInt64(&totalWriteNs, int64(writeDur))
+				if writeDur > slowWriteThreshold {
+					log.Info("[flatfiles] %s: wrote %s (%d symbols) in %s",
+						job.date.Format(dateFormat), job.timeframe, len(job.csm),
+						writeDur.Round(time.Millisecond))
+				}
+				// Count the date only after it is durably written.
+				markComplete(job.dateIdx)
 			}
 		}()
 	}
@@ -181,10 +252,16 @@ func BackfillDates(
 			}
 
 			atomic.AddInt64(&totalDownloadNs, int64(dlDuration))
+			atomic.AddInt64(&totalRows, int64(stats.RowsMatched))
+			atomic.AddInt64(&totalSymbols, int64(stats.SymbolCount))
+
+			idx := dateIndex[currentDate]
 
 			// Send to writer channel (buffered, may block if buffer is full).
+			// The date is counted as complete by the writer goroutine once it
+			// is persisted. Dates with no matching data are never enqueued, so
+			// they must be counted here instead.
 			if len(csm) > 0 {
-				idx := dateIndex[currentDate]
 				select {
 				case writeCh <- writeJob{
 					csm:       csm,
@@ -195,32 +272,8 @@ func BackfillDates(
 				case <-ctx.Done():
 					return
 				}
-			}
-
-			n := atomic.AddInt64(&processedDates, 1)
-			atomic.AddInt64(&totalRows, int64(stats.RowsMatched))
-			atomic.AddInt64(&totalSymbols, int64(stats.SymbolCount))
-
-			// Advance the contiguous high-water mark.
-			idx := dateIndex[currentDate]
-			hwMu.Lock()
-			completed[idx] = true
-			newHW := highWater
-			for newHW+1 < len(completed) && completed[newHW+1] {
-				newHW++
-			}
-			advanced := newHW > highWater
-			highWater = newHW
-			hwMu.Unlock()
-
-			if advanced && cfg.OnProgress != nil {
-				cfg.OnProgress(dates[newHW])
-			}
-
-			if n%50 == 0 || n == int64(len(dates)) {
-				log.Info("[flatfiles] %s: processed %d/%d dates (%d rows, %d symbol-writes)",
-					timeframe, n, len(dates),
-					atomic.LoadInt64(&totalRows), atomic.LoadInt64(&totalSymbols))
+			} else {
+				markComplete(idx)
 			}
 		})
 	}
