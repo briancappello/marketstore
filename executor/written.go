@@ -11,6 +11,7 @@ import (
 type TriggerPluginDispatcher struct {
 	c               chan writtenRecords
 	done            chan struct{}
+	mu              sync.Mutex
 	m               map[string][]trigger.Record
 	triggerMatchers []*trigger.Matcher
 	triggerWg       *sync.WaitGroup
@@ -49,6 +50,9 @@ func (tpd *TriggerPluginDispatcher) run() {
 
 // AppendRecord collects the record from the serialized buffer.
 func (tpd *TriggerPluginDispatcher) AppendRecord(keyPath string, record []byte) {
+	tpd.mu.Lock()
+	defer tpd.mu.Unlock()
+
 	if tpd.m == nil {
 		tpd.m = make(map[string][]trigger.Record)
 	}
@@ -60,10 +64,14 @@ func (tpd *TriggerPluginDispatcher) AppendRecord(keyPath string, record []byte) 
 // if the file path matches the condition.  This is meant to be
 // run in a separate goroutine and recovers from panics in the triggers.
 func (tpd *TriggerPluginDispatcher) DispatchRecords() {
-	for key, records := range tpd.m {
+	tpd.mu.Lock()
+	m := tpd.m
+	tpd.m = nil // for GC
+	tpd.mu.Unlock()
+
+	for key, records := range m {
 		tpd.c <- writtenRecords{key: key, records: records}
 	}
-	tpd.m = nil // for GC
 }
 
 func (tpd *TriggerPluginDispatcher) fire(trig trigger.Trigger, key string, records []trigger.Record) {
