@@ -491,19 +491,8 @@ func convertRankingToProto(name string, entries []WatchlistRankingEntry) *proto.
 	protoEntries := make([]*proto.WatchlistEntry, len(entries))
 	for i, e := range entries {
 		fields := make(map[string]float64, len(e.Fields))
-		for k, v := range e.Fields {
-			switch val := v.(type) {
-			case float64:
-				fields[k] = val
-			case float32:
-				fields[k] = float64(val)
-			case int:
-				fields[k] = float64(val)
-			case int64:
-				fields[k] = float64(val)
-			case int32:
-				fields[k] = float64(val)
-			}
+		for _, f := range e.Fields {
+			fields[f.Key] = f.Value
 		}
 		protoEntries[i] = &proto.WatchlistEntry{
 			Symbol: e.Symbol,

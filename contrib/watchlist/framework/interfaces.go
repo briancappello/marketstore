@@ -42,12 +42,40 @@ type WatchlistStrategy interface {
 	Rank(curated map[string]*SymbolState) []RankedSymbol
 }
 
+// Field is a single named numeric metric attached to a RankedSymbol.
+//
+// Using a flat (Key, Value) pair instead of a map[string]interface{} avoids
+// two allocations per metric on the ranking hot path: the map header
+// itself (one per ranked symbol) and the interface boxing of each value
+// (one per metric). Across 6 strategies × 50-150 ranked symbols × 2-7
+// metrics each, this is the single largest source of heap-resident
+// allocations in the watchlist subsystem.
+//
+// Values are typed as float64 because the downstream serializers
+// (proto.WatchlistEntry.fields, the msgpack response struct, the gRPC
+// converter) all coerce to float64 anyway. Strategies that need to expose
+// a small integer metric (gainers/losers/symbol_count) pass it as a
+// float64; the precision is more than sufficient for the magnitudes
+// involved (counts in the thousands, volumes up to ~1e12).
+type Field struct {
+	Key   string
+	Value float64
+}
+
 // RankedSymbol is a single entry in a watchlist ranking result.
 type RankedSymbol struct {
 	Symbol string
 	Rank   int
 	// Fields holds computed metrics for this symbol in this watchlist.
-	// Keys and values depend on the WatchlistStrategy implementation
-	// (e.g., "pct_change", "volume", "volume_multiple_of_median").
-	Fields map[string]interface{}
+	// Keys and the meaning of values depend on the WatchlistStrategy
+	// implementation (e.g., "pct_change", "volume",
+	// "volume_multiple_of_median"). Implementations should produce a
+	// stable field order across calls so consumers can rely on positional
+	// access if desired.
+	Fields []Field
+	// Sector is an optional non-numeric label used by aggregate strategies
+	// (IndustryAggregate emits the parent sector name here). Empty for
+	// strategies that don't use it. This is a separate field rather than
+	// part of Fields so Fields can stay strictly numeric.
+	Sector string
 }

@@ -6,12 +6,25 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/watchlist/framework"
 )
 
+// pctChangeEntry is the shared scratch record for both PctChangeUp and
+// PctChangeDown. Promoted from a function-local type so each strategy can
+// reuse its backing slice across Rank() calls.
+type pctChangeEntry struct {
+	symbol    string
+	pctChange float64
+	volume    int64
+}
+
 // --- PCT_CHANGE_UP: Top N by positive percent change ---
 
 // PctChangeUp ranks curated symbols by percent change (descending),
 // filtered to positive changes only.
+//
+// Rank() is invoked serially by the framework's ranking loop, so the
+// reusable entries slice does not need synchronization.
 type PctChangeUp struct {
-	limit int
+	limit   int
+	entries []pctChangeEntry
 }
 
 // NewPctChangeUp creates a new PctChangeUp strategy.
@@ -30,18 +43,13 @@ func (s *PctChangeUp) Name() string { return "PCT_CHANGE_UP" }
 func (s *PctChangeUp) Configure(config map[string]interface{}) error { return nil }
 
 func (s *PctChangeUp) Rank(curated map[string]*framework.SymbolState) []framework.RankedSymbol {
-	type entry struct {
-		symbol    string
-		pctChange float64
-		volume    int64
-	}
-
-	var entries []entry
+	entries := s.entries[:0]
 	for sym, state := range curated {
 		if state.PctChange > 0 {
-			entries = append(entries, entry{sym, state.PctChange, state.CumulativeVolume})
+			entries = append(entries, pctChangeEntry{sym, state.PctChange, state.CumulativeVolume})
 		}
 	}
+	s.entries = entries
 
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].pctChange > entries[j].pctChange
@@ -57,9 +65,9 @@ func (s *PctChangeUp) Rank(curated map[string]*framework.SymbolState) []framewor
 		result[i] = framework.RankedSymbol{
 			Symbol: entries[i].symbol,
 			Rank:   i + 1,
-			Fields: map[string]interface{}{
-				"pct_change": entries[i].pctChange,
-				"volume":     entries[i].volume,
+			Fields: []framework.Field{
+				{Key: "pct_change", Value: entries[i].pctChange},
+				{Key: "volume", Value: float64(entries[i].volume)},
 			},
 		}
 	}
@@ -70,8 +78,11 @@ func (s *PctChangeUp) Rank(curated map[string]*framework.SymbolState) []framewor
 
 // PctChangeDown ranks curated symbols by percent change (ascending),
 // filtered to negative changes only.
+//
+// Rank() is invoked serially, so entries does not need synchronization.
 type PctChangeDown struct {
-	limit int
+	limit   int
+	entries []pctChangeEntry
 }
 
 // NewPctChangeDown creates a new PctChangeDown strategy.
@@ -90,18 +101,13 @@ func (s *PctChangeDown) Name() string { return "PCT_CHANGE_DOWN" }
 func (s *PctChangeDown) Configure(config map[string]interface{}) error { return nil }
 
 func (s *PctChangeDown) Rank(curated map[string]*framework.SymbolState) []framework.RankedSymbol {
-	type entry struct {
-		symbol    string
-		pctChange float64
-		volume    int64
-	}
-
-	var entries []entry
+	entries := s.entries[:0]
 	for sym, state := range curated {
 		if state.PctChange < 0 {
-			entries = append(entries, entry{sym, state.PctChange, state.CumulativeVolume})
+			entries = append(entries, pctChangeEntry{sym, state.PctChange, state.CumulativeVolume})
 		}
 	}
+	s.entries = entries
 
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].pctChange < entries[j].pctChange
@@ -117,9 +123,9 @@ func (s *PctChangeDown) Rank(curated map[string]*framework.SymbolState) []framew
 		result[i] = framework.RankedSymbol{
 			Symbol: entries[i].symbol,
 			Rank:   i + 1,
-			Fields: map[string]interface{}{
-				"pct_change": entries[i].pctChange,
-				"volume":     entries[i].volume,
+			Fields: []framework.Field{
+				{Key: "pct_change", Value: entries[i].pctChange},
+				{Key: "volume", Value: float64(entries[i].volume)},
 			},
 		}
 	}

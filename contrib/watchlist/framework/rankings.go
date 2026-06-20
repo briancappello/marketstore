@@ -3,8 +3,13 @@ package framework
 // RunRankings executes all registered watchlist strategies against the
 // current curated symbol states, updates the state manager with the results,
 // and returns the rankings keyed by watchlist name.
+//
+// Caller contract: must be invoked serially (WatchlistWorker.TriggerRanking
+// holds rankingMu around this call). The reusable curated snapshot relies
+// on that serialization. Strategies must not retain a reference to the
+// curated map beyond the call.
 func RunRankings(mgr *SymbolStateManager) map[string][]RankedSymbol {
-	curated := mgr.CuratedStates()
+	curated := mgr.reusableCuratedSnapshot()
 
 	results := make(map[string][]RankedSymbol, len(mgr.strategies))
 	for _, strategy := range mgr.strategies {

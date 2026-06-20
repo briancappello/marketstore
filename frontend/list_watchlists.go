@@ -25,10 +25,16 @@ type WatchlistRankingResponse struct {
 }
 
 // WatchlistRankingEntryResponse is a single ranked symbol in a watchlist.
+//
+// Fields is serialized as a map<string,float64> on the wire to preserve
+// JSON/msgpack compatibility with existing clients. It is built per-response
+// from the typed framework.Field slice.
 type WatchlistRankingEntryResponse struct {
-	Symbol string                 `msgpack:"symbol"`
-	Rank   int                    `msgpack:"rank"`
-	Fields map[string]interface{} `msgpack:"fields"`
+	Symbol string             `msgpack:"symbol"`
+	Rank   int                `msgpack:"rank"`
+	Fields map[string]float64 `msgpack:"fields"`
+	// Sector is included only when non-empty (aggregate strategies).
+	Sector string `msgpack:"sector,omitempty"`
 }
 
 // ListWatchlists returns the current rankings for one or all watchlists.
@@ -78,10 +84,15 @@ func convertRanking(name string, entries []WatchlistRankingEntry) WatchlistRanki
 		Entries: make([]WatchlistRankingEntryResponse, len(entries)),
 	}
 	for i, e := range entries {
+		fields := make(map[string]float64, len(e.Fields))
+		for _, f := range e.Fields {
+			fields[f.Key] = f.Value
+		}
 		resp.Entries[i] = WatchlistRankingEntryResponse{
 			Symbol: e.Symbol,
 			Rank:   e.Rank,
-			Fields: e.Fields,
+			Fields: fields,
+			Sector: e.Sector,
 		}
 	}
 	return resp

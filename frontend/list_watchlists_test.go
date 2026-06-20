@@ -58,11 +58,11 @@ func TestListWatchlists_AllWatchlists(t *testing.T) {
 	provider := &mockProvider{
 		rankings: map[string][]frontend.WatchlistRankingEntry{
 			"PCT_CHANGE_UP": {
-				{Symbol: "AAPL", Rank: 1, Fields: map[string]interface{}{"pct_change": 5.2}},
-				{Symbol: "NVDA", Rank: 2, Fields: map[string]interface{}{"pct_change": 4.1}},
+				{Symbol: "AAPL", Rank: 1, Fields: []frontend.WatchlistRankingField{{Key: "pct_change", Value: 5.2}}},
+				{Symbol: "NVDA", Rank: 2, Fields: []frontend.WatchlistRankingField{{Key: "pct_change", Value: 4.1}}},
 			},
 			"VOLUME_UP": {
-				{Symbol: "TSLA", Rank: 1, Fields: map[string]interface{}{"volume": int64(1000000)}},
+				{Symbol: "TSLA", Rank: 1, Fields: []frontend.WatchlistRankingField{{Key: "volume", Value: 1000000}}},
 			},
 		},
 	}
@@ -90,10 +90,10 @@ func TestListWatchlists_SingleWatchlist(t *testing.T) {
 	provider := &mockProvider{
 		rankings: map[string][]frontend.WatchlistRankingEntry{
 			"PCT_CHANGE_UP": {
-				{Symbol: "AAPL", Rank: 1, Fields: map[string]interface{}{"pct_change": 5.2}},
+				{Symbol: "AAPL", Rank: 1, Fields: []frontend.WatchlistRankingField{{Key: "pct_change", Value: 5.2}}},
 			},
 			"VOLUME_UP": {
-				{Symbol: "TSLA", Rank: 1, Fields: map[string]interface{}{"volume": int64(999)}},
+				{Symbol: "TSLA", Rank: 1, Fields: []frontend.WatchlistRankingField{{Key: "volume", Value: 999}}},
 			},
 		},
 	}

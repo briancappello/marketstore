@@ -368,7 +368,7 @@ func TestWatchlistRanking(t *testing.T) {
 			for i, e := range entries {
 				result[i] = framework.RankedSymbol{
 					Symbol: e.sym,
-					Fields: map[string]interface{}{"pct_change": e.pct},
+					Fields: []framework.Field{{Key: "pct_change", Value: e.pct}},
 				}
 			}
 			return result
@@ -672,7 +672,7 @@ func TestWatchlistKeyNaming(t *testing.T) {
 	framework.Manager.AddStrategy(&mockWatchlist{
 		name: "MY_LIST",
 		rankFn: func(curated map[string]*framework.SymbolState) []framework.RankedSymbol {
-			return []framework.RankedSymbol{{Symbol: "TEST", Fields: map[string]interface{}{}}}
+			return []framework.RankedSymbol{{Symbol: "TEST"}}
 		},
 	})
 

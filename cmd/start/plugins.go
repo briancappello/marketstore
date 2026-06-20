@@ -58,32 +58,38 @@ func (a *watchlistAdapter) ListNames() []string {
 
 func (a *watchlistAdapter) GetRanking(name string) []frontend.WatchlistRankingEntry {
 	ranking := a.src.GetWatchlistRanking(name)
-	entries := make([]frontend.WatchlistRankingEntry, len(ranking))
-	for i, r := range ranking {
-		entries[i] = frontend.WatchlistRankingEntry{
-			Symbol: r.Symbol,
-			Rank:   r.Rank,
-			Fields: r.Fields,
-		}
-	}
-	return entries
+	return convertBgRanking(ranking)
 }
 
 func (a *watchlistAdapter) AllRankings() map[string][]frontend.WatchlistRankingEntry {
 	all := a.src.AllWatchlistRankings()
 	result := make(map[string][]frontend.WatchlistRankingEntry, len(all))
 	for name, ranking := range all {
-		entries := make([]frontend.WatchlistRankingEntry, len(ranking))
-		for i, r := range ranking {
-			entries[i] = frontend.WatchlistRankingEntry{
-				Symbol: r.Symbol,
-				Rank:   r.Rank,
-				Fields: r.Fields,
-			}
-		}
-		result[name] = entries
+		result[name] = convertBgRanking(ranking)
 	}
 	return result
+}
+
+// convertBgRanking translates the bgworker's typed ranking entries to the
+// frontend's parallel type. Both shapes are identical by construction; this
+// indirection exists only because the two packages cannot import each
+// other (the frontend cannot depend on a plugin interface package, and
+// the plugin package cannot depend on the frontend).
+func convertBgRanking(ranking []bgworker.WatchlistRankingEntry) []frontend.WatchlistRankingEntry {
+	entries := make([]frontend.WatchlistRankingEntry, len(ranking))
+	for i, r := range ranking {
+		fields := make([]frontend.WatchlistRankingField, len(r.Fields))
+		for j, f := range r.Fields {
+			fields[j] = frontend.WatchlistRankingField{Key: f.Key, Value: f.Value}
+		}
+		entries[i] = frontend.WatchlistRankingEntry{
+			Symbol: r.Symbol,
+			Rank:   r.Rank,
+			Fields: fields,
+			Sector: r.Sector,
+		}
+	}
+	return entries
 }
 
 func NewBgWorker(s *utils.BgWorkerSetting) bgworker.BgWorker {

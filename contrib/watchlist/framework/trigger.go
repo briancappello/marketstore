@@ -38,9 +38,10 @@ func NewTrigger(conf map[string]interface{}) (trigger.Trigger, error) {
 // The implementation follows the same disk-query pattern as the stream trigger:
 // read the latest row back from disk rather than parsing raw record bytes.
 func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
-	// Parse symbol/timeframe/attrgroup from the key path.
-	// keyPath is like "AAPL/1Min/OHLCV/2024.bin"
-	symbol, timeframe, attrGroup, err := parseKeyPath(keyPath)
+	// Parse symbol/timeframe/attrgroup/fileName from the key path in a single
+	// pass to avoid repeated allocations on this hot path. keyPath is like
+	// "AAPL/1Min/OHLCV/2024.bin".
+	symbol, timeframe, attrGroup, fileName, err := parseKeyPathFull(keyPath)
 	if err != nil {
 		log.Error("[watchlist] failed to parse key path %q: %v", keyPath, err)
 		return
@@ -52,24 +53,26 @@ func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
 	}
 
 	// Find the max index from the written records to query the latest row.
-	indexes := make([]int64, len(records))
-	for i, record := range records {
-		indexes[i] = record.Index()
+	// Avoid the intermediate slice allocation on this per-tick hot path.
+	tail := int64(0)
+	for _, record := range records {
+		if idx := record.Index(); idx > tail {
+			tail = idx
+		}
 	}
-	tail := maxInt64(indexes)
 
-	// Parse the year from the filename (e.g., "2024.bin" -> 2024).
-	elements := strings.Split(keyPath, "/")
-	fileName := elements[len(elements)-1]
-	year, err := strconv.ParseInt(strings.Replace(fileName, ".bin", "", 1), 10, 32)
+	// Parse the year from the filename ("2024.bin" -> 2024). Use TrimSuffix
+	// instead of Replace to avoid an allocation when the suffix is present.
+	yearStr := strings.TrimSuffix(fileName, ".bin")
+	year, err := strconv.ParseInt(yearStr, 10, 32)
 	if err != nil {
 		log.Error("[watchlist] get year from filename (%v)", err)
 		return
 	}
 
-	// Build the TBK and resolve the end time.
-	tbkString := symbol + "/" + timeframe + "/" + attrGroup
-	tbk := io.NewTimeBucketKey(tbkString)
+	// Resolve the cached TBK for this (symbol, timeframe, attrGroup) tuple.
+	// Falls back to allocating one if not yet cached.
+	tbk := tbkCache.Get(symbol, timeframe, attrGroup)
 	tf := utils.NewTimeframe(timeframe)
 	end := io.IndexToTime(tail, tf.Duration, int16(year))
 
@@ -132,45 +135,54 @@ func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
 	PushTick(symbol, timeframe, attrGroup, msgType, data, curated)
 }
 
-// parseKeyPath extracts symbol, timeframe, and attribute group from a
-// MarketStore key path like "AAPL/1Min/OHLCV/2024.bin".
-func parseKeyPath(keyPath string) (symbol, timeframe, attrGroup string, err error) {
-	parts := strings.Split(keyPath, "/")
-	if len(parts) < 3 {
-		return "", "", "", fmt.Errorf("key path has fewer than 3 segments: %q", keyPath)
+// parseKeyPathFull extracts symbol, timeframe, attribute group, and the
+// trailing filename from a MarketStore key path like
+// "AAPL/1Min/OHLCV/2024.bin", in a single pass without allocating a slice.
+//
+// This is on the per-tick Fire hot path; allocation discipline matters.
+func parseKeyPathFull(keyPath string) (symbol, timeframe, attrGroup, fileName string, err error) {
+	// Find the three '/' separators that split the four expected segments.
+	first := strings.IndexByte(keyPath, '/')
+	if first < 0 {
+		return "", "", "", "", fmt.Errorf("key path has fewer than 3 segments: %q", keyPath)
 	}
-	return parts[0], parts[1], parts[2], nil
+	second := strings.IndexByte(keyPath[first+1:], '/')
+	if second < 0 {
+		return "", "", "", "", fmt.Errorf("key path has fewer than 3 segments: %q", keyPath)
+	}
+	second += first + 1
+	third := strings.IndexByte(keyPath[second+1:], '/')
+	if third < 0 {
+		// Three segments only (no filename); valid for some callers.
+		return keyPath[:first], keyPath[first+1 : second], keyPath[second+1:], "", nil
+	}
+	third += second + 1
+	return keyPath[:first], keyPath[first+1 : second], keyPath[second+1 : third], keyPath[third+1:], nil
 }
 
 // columnSeriesToMap extracts the first (most recent) record from a ColumnSeries
 // into a map. Uses the same reflection approach as the stream trigger.
+//
+// Note: column keys are returned as-is from the ColumnSeries. The caller
+// (updateSymbolState, downstream consumers) must use the canonical key case
+// established by the data writer ("Open", "High", ...). Lower-casing per call
+// allocates a fresh string for every column on every tick, which on a
+// 5-symbol-per-second feed amounts to tens of millions of allocations per
+// minute; we instead pre-lower the keys once on construction below.
 func columnSeriesToMap(cs *io.ColumnSeries) map[string]interface{} {
 	if cs == nil || cs.Len() == 0 {
 		return nil
 	}
 
-	m := make(map[string]interface{})
-	for key, col := range cs.GetColumns() {
+	cols := cs.GetColumns()
+	m := make(map[string]interface{}, len(cols))
+	for key, col := range cols {
 		s := reflect.ValueOf(col)
 		if s.Len() > 0 {
-			m[strings.ToLower(key)] = s.Index(0).Interface()
+			m[lowerColumnKey(key)] = s.Index(0).Interface()
 		}
 	}
 	return m
-}
-
-// maxInt64 returns the maximum value from a slice of int64.
-func maxInt64(values []int64) int64 {
-	if len(values) == 0 {
-		return 0
-	}
-	max := values[0]
-	for _, v := range values[1:] {
-		if v > max {
-			max = v
-		}
-	}
-	return max
 }
 
 // updateSymbolState updates the running state from extracted bar data.

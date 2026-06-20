@@ -2,7 +2,6 @@ package framework
 
 import (
 	"github.com/alpacahq/marketstore/v4/frontend/stream"
-	"github.com/alpacahq/marketstore/v4/utils/io"
 )
 
 // MsgTypeBar is the msg_type for OHLCV bar messages.
@@ -28,7 +27,10 @@ func PushTick(symbol, timeframe, attrGroup, msgType string, data map[string]inte
 		"payload":  data,
 	}
 
-	tbk := io.NewTimeBucketKey(symbol + "/" + timeframe + "/" + attrGroup)
+	// Resolve a cached TBK to avoid the per-tick fmt.Sprintf inside
+	// io.NewTimeBucketKey. The (symbol, timeframe, attrGroup) tuple is
+	// stable, so this is safe.
+	tbk := tbkCache.Get(symbol, timeframe, attrGroup)
 
 	if curated {
 		_ = stream.Push(*tbk, payload)
@@ -48,20 +50,34 @@ func PushCurationChange(timeframe string, added, removed []CurationChangeEntry, 
 		},
 	}
 
-	tbk := io.NewTimeBucketKey("CURATION/" + timeframe + "/CHANGES")
+	tbk := tbkCache.GetByItemKey("CURATION/" + timeframe + "/CHANGES")
 	_ = stream.Push(*tbk, payload)
 }
 
 // PushWatchlistUpdate pushes a watchlist ranking update.
+//
+// Each entry is serialized as a fresh map[string]interface{} for the stream
+// layer (which expects map-shaped payloads). The map is sized to the exact
+// field count plus the symbol/rank/sector keys to avoid bucket growth, and
+// each typed Field is unboxed into the map exactly once. This is still
+// O(symbols * fields) allocations per push, but eliminates the redundant
+// per-row map+box pass that previously happened inside each strategy's
+// Rank() method (the Fields map there has been replaced with a typed slice).
 func PushWatchlistUpdate(timeframe, watchlistName string, symbols []RankedSymbol) {
 	symbolMaps := make([]map[string]interface{}, len(symbols))
 	for i, rs := range symbols {
-		m := map[string]interface{}{
-			"symbol": rs.Symbol,
-			"rank":   rs.Rank,
+		size := 2 + len(rs.Fields)
+		if rs.Sector != "" {
+			size++
 		}
-		for k, v := range rs.Fields {
-			m[k] = v
+		m := make(map[string]interface{}, size)
+		m["symbol"] = rs.Symbol
+		m["rank"] = rs.Rank
+		for _, f := range rs.Fields {
+			m[f.Key] = f.Value
+		}
+		if rs.Sector != "" {
+			m["sector"] = rs.Sector
 		}
 		symbolMaps[i] = m
 	}
@@ -75,7 +91,7 @@ func PushWatchlistUpdate(timeframe, watchlistName string, symbols []RankedSymbol
 		},
 	}
 
-	tbk := io.NewTimeBucketKey("WATCHLISTS/" + timeframe + "/" + watchlistName)
+	tbk := tbkCache.GetByItemKey("WATCHLISTS/" + timeframe + "/" + watchlistName)
 	_ = stream.Push(*tbk, payload)
 }
 

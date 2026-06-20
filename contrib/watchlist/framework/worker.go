@@ -186,16 +186,7 @@ func (w *WatchlistWorker) GetWatchlistRanking(name string) []bgworker.WatchlistR
 	if Manager == nil {
 		return nil
 	}
-	ranking := Manager.GetWatchlistRanking(name)
-	entries := make([]bgworker.WatchlistRankingEntry, len(ranking))
-	for i, rs := range ranking {
-		entries[i] = bgworker.WatchlistRankingEntry{
-			Symbol: rs.Symbol,
-			Rank:   rs.Rank,
-			Fields: rs.Fields,
-		}
-	}
-	return entries
+	return toBgWorkerEntries(Manager.GetWatchlistRanking(name))
 }
 
 // AllWatchlistRankings returns all current watchlist rankings.
@@ -207,15 +198,26 @@ func (w *WatchlistWorker) AllWatchlistRankings() map[string][]bgworker.Watchlist
 	all := Manager.AllWatchlistRankings()
 	result := make(map[string][]bgworker.WatchlistRankingEntry, len(all))
 	for name, ranking := range all {
-		entries := make([]bgworker.WatchlistRankingEntry, len(ranking))
-		for i, rs := range ranking {
-			entries[i] = bgworker.WatchlistRankingEntry{
-				Symbol: rs.Symbol,
-				Rank:   rs.Rank,
-				Fields: rs.Fields,
-			}
-		}
-		result[name] = entries
+		result[name] = toBgWorkerEntries(ranking)
 	}
 	return result
+}
+
+// toBgWorkerEntries converts framework RankedSymbol values to the
+// equivalent bgworker types at the plugin/host boundary.
+func toBgWorkerEntries(ranking []RankedSymbol) []bgworker.WatchlistRankingEntry {
+	entries := make([]bgworker.WatchlistRankingEntry, len(ranking))
+	for i, rs := range ranking {
+		fields := make([]bgworker.WatchlistRankingField, len(rs.Fields))
+		for j, f := range rs.Fields {
+			fields[j] = bgworker.WatchlistRankingField{Key: f.Key, Value: f.Value}
+		}
+		entries[i] = bgworker.WatchlistRankingEntry{
+			Symbol: rs.Symbol,
+			Rank:   rs.Rank,
+			Fields: fields,
+			Sector: rs.Sector,
+		}
+	}
+	return entries
 }

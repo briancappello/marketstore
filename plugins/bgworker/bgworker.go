@@ -30,11 +30,22 @@ type BgWorker interface {
 	Shutdown()
 }
 
+// WatchlistRankingField is a single named numeric metric on a watchlist
+// entry. It mirrors framework.Field at the plugin/host boundary so the
+// framework's typed representation can be passed across the plugin
+// boundary without re-introducing map[string]interface{} allocations.
+type WatchlistRankingField struct {
+	Key   string
+	Value float64
+}
+
 // WatchlistRankingEntry is a single ranked symbol in a watchlist.
 type WatchlistRankingEntry struct {
 	Symbol string
 	Rank   int
-	Fields map[string]interface{}
+	Fields []WatchlistRankingField
+	// Sector is an optional non-numeric label used by aggregate strategies.
+	Sector string
 }
 
 // WatchlistDataSource is an optional interface that a BgWorker can implement

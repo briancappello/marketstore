@@ -28,6 +28,12 @@ type SymbolStateManager struct {
 
 	// strategies is the list of active WatchlistStrategy implementations.
 	strategies []WatchlistStrategy
+
+	// curatedSnapshot is a reusable map populated by CuratedStatesInto.
+	// It is safe to reuse because RunRankings holds the worker's
+	// rankingMu while the snapshot is in use, ensuring only one
+	// outstanding caller. Lazily allocated on first call.
+	curatedSnapshot map[string]*SymbolState
 }
 
 // NewSymbolStateManager creates a new empty state manager.
@@ -90,6 +96,10 @@ func (m *SymbolStateManager) AllStates() map[string]*SymbolState {
 }
 
 // CuratedStates returns a snapshot of only the curated symbol states.
+//
+// The returned map is freshly allocated. Most callers in performance-
+// sensitive paths should prefer reusableCuratedSnapshot, which reuses a
+// per-Manager scratch map across cycles.
 func (m *SymbolStateManager) CuratedStates() map[string]*SymbolState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -103,6 +113,40 @@ func (m *SymbolStateManager) CuratedStates() map[string]*SymbolState {
 		}
 	}
 	return cp
+}
+
+// reusableCuratedSnapshot returns the manager's reusable snapshot map,
+// repopulated with the current curated states. The returned map MUST be
+// treated as read-only and the reference MUST NOT be retained beyond the
+// current ranking cycle: the next call clears and refills it.
+//
+// This is safe only because RunRankings is invoked serially by
+// WatchlistWorker.TriggerRanking under rankingMu. If callers ever
+// parallelize, switch back to CuratedStates which allocates a fresh map.
+//
+// Eliminating the per-cycle map allocation matters because
+// N_curated × pointer-size × load-factor approaches several hundred KB
+// every cycle, and the previous map's bucket array becomes garbage
+// immediately on the next cycle.
+func (m *SymbolStateManager) reusableCuratedSnapshot() map[string]*SymbolState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	m.curatedMu.RLock()
+	defer m.curatedMu.RUnlock()
+
+	if m.curatedSnapshot == nil {
+		m.curatedSnapshot = make(map[string]*SymbolState, len(m.curated))
+	} else {
+		for k := range m.curatedSnapshot {
+			delete(m.curatedSnapshot, k)
+		}
+	}
+	for sym := range m.curated {
+		if s, ok := m.states[sym]; ok {
+			m.curatedSnapshot[sym] = s
+		}
+	}
+	return m.curatedSnapshot
 }
 
 // IsCurated returns whether a symbol is currently in the curated set.

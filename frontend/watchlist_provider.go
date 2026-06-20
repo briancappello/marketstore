@@ -16,11 +16,20 @@ type WatchlistProvider interface {
 	AllRankings() map[string][]WatchlistRankingEntry
 }
 
+// WatchlistRankingField is a single named numeric metric on a watchlist
+// ranking entry. Mirrors framework.Field at the frontend layer.
+type WatchlistRankingField struct {
+	Key   string
+	Value float64
+}
+
 // WatchlistRankingEntry is a single ranked symbol in a watchlist.
 type WatchlistRankingEntry struct {
 	Symbol string
 	Rank   int
-	Fields map[string]interface{}
+	Fields []WatchlistRankingField
+	// Sector is an optional non-numeric label used by aggregate strategies.
+	Sector string
 }
 
 var (

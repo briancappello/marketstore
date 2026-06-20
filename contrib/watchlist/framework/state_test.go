@@ -38,8 +38,8 @@ func TestAllWatchlistRankings_Empty(t *testing.T) {
 func TestAllWatchlistRankings_ReturnsSnapshot(t *testing.T) {
 	mgr := framework.NewSymbolStateManager()
 	ranking := []framework.RankedSymbol{
-		{Symbol: "AAPL", Rank: 1, Fields: map[string]interface{}{"pct_change": 5.2}},
-		{Symbol: "NVDA", Rank: 2, Fields: map[string]interface{}{"pct_change": 4.1}},
+		{Symbol: "AAPL", Rank: 1, Fields: []framework.Field{{Key: "pct_change", Value: 5.2}}},
+		{Symbol: "NVDA", Rank: 2, Fields: []framework.Field{{Key: "pct_change", Value: 4.1}}},
 	}
 	mgr.SetWatchlistRanking("PCT_CHANGE_UP", ranking)
 
