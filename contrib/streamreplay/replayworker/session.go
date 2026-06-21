@@ -232,6 +232,9 @@ func (s *Session) executeReplay(msg SubscribeMessage) error {
 	// individual TBKs before querying.
 	expandedTBKs := expandTBKs(msg.TBKs)
 
+	log.Info("[streamreplay] executeReplay: tbks=%v start=%q end=%q step=%d expanded=%d",
+		msg.TBKs, msg.Start, msg.End, msg.Step, len(expandedTBKs))
+
 	var allData []tbkData
 	for _, tbk := range expandedTBKs {
 		cs, qErr := s.queryFn(tbk, start, end)
@@ -289,6 +292,8 @@ func (s *Session) executeReplay(msg SubscribeMessage) error {
 	}
 
 	// Stream bars in epoch order.
+	log.Info("[streamreplay] executeReplay: streaming %d unique epochs across %d tbk(s)",
+		len(sortedEpochs), len(allData))
 	sleepDuration := time.Duration(step) * time.Millisecond
 
 	for _, epoch := range sortedEpochs {
