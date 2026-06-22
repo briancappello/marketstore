@@ -157,6 +157,12 @@ func (wf *WALFileType) Replay(dryRun bool) error {
 
 	log.Info("Replay of WAL file %s finished", wf.FilePtr.Name())
 	if !dryRun {
+		// Durably flush all primary-store writes performed during replay
+		// with a single filesystem sync, rather than one sync per
+		// transaction group. This must happen before we mark the WAL file
+		// REPLAYED, because once REPLAYED the file becomes eligible for
+		// deletion and we must guarantee the replayed data is on disk.
+		io.Syncfs()
 		if err := wf.WriteStatus(wal.OPEN, wal.REPLAYED); err != nil {
 			return fmt.Errorf("failed to write REPLAYED status to wal: %w", err)
 		}
@@ -206,11 +212,17 @@ func (wf *WALFileType) replayTGData(tgID int64, wtSets []wal.WTSet) (err error) 
 			return fmt.Errorf("record Type is incorrect from WALFile, may be invalid/outdated WAL file")
 		}
 	}
+	// Note: we intentionally do NOT call CreateCheckpoint() here (per
+	// transaction group). CreateCheckpoint() issues a full-filesystem
+	// sync(2) via io.Syncfs(), and calling it once per TG turns replay
+	// into an O(N) sequence of whole-filesystem syncs, which dominates
+	// replay time for large WAL files. Replay is idempotent (fixed-offset
+	// writes), and the WAL file being replayed is deleted immediately
+	// afterwards, so the per-TG CHECKPOINT records it would write are
+	// discarded anyway. Durability is instead guaranteed by a single
+	// io.Syncfs() at the end of Replay(), before the file is marked
+	// REPLAYED and deleted.
 	wf.lastCommittedTGID = tgID
-	err = wf.CreateCheckpoint()
-	if err != nil {
-		return fmt.Errorf("create checkpoint of wal:%w", err)
-	}
 
 	return nil
 }
