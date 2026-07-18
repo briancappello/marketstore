@@ -234,6 +234,20 @@ var bucketDurations = map[string]time.Duration{
 	"1D":   oneDay,
 }
 
+// finalizeVolume converts an accumulated float64 trade volume into the
+// enum.Size (uint64) stored on a bar. A positive sub-1 volume (fractional-share
+// activity) is clamped up to 1 so that "something traded" is distinguishable
+// from "nothing traded" (which remains 0); larger values truncate toward zero.
+func finalizeVolume(v float64) enum.Size {
+	if v <= 0 {
+		return 0
+	}
+	if iv := enum.Size(v); iv == 0 {
+		return 1
+	}
+	return enum.Size(v)
+}
+
 func FromTrades(trades *Trade, symbol, timeframe string) (*Bar, error) {
 	bar := NewBar(symbol, timeframe, len(trades.Epoch))
 
@@ -244,7 +258,7 @@ func FromTrades(trades *Trade, symbol, timeframe string) (*Bar, error) {
 
 	var epoch int64
 	var open, high, low, clos enum.Price
-	var volume enum.Size
+	var volume float64
 	lastBucketTimestamp := time.Time{}
 
 	marketCenterOfficialCloseProcessed := false
@@ -260,7 +274,7 @@ func FromTrades(trades *Trade, symbol, timeframe string) (*Bar, error) {
 
 		if !lastBucketTimestamp.Equal(bucketTimestamp) {
 			if open != 0 && volume != 0 {
-				bar.Add(epoch, open, high, low, clos, volume)
+				bar.Add(epoch, open, high, low, clos, finalizeVolume(volume))
 			}
 
 			lastBucketTimestamp = bucketTimestamp
@@ -335,7 +349,7 @@ func FromTrades(trades *Trade, symbol, timeframe string) (*Bar, error) {
 	}
 
 	if open != 0 && volume != 0 {
-		bar.Add(epoch, open, high, low, clos, volume)
+		bar.Add(epoch, open, high, low, clos, finalizeVolume(volume))
 	}
 
 	return bar, nil

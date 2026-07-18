@@ -20,13 +20,16 @@ type Trade struct {
 	Epoch    []int64
 	Nanos    []int32
 	Price    []enum.Price
-	Size     []enum.Size
+	Size     []float64
 	Exchange []enum.Exchange
 	TapeID   []enum.Tape
 	Cond1    []enum.TradeCondition
 	Cond2    []enum.TradeCondition
 	Cond3    []enum.TradeCondition
 	Cond4    []enum.TradeCondition
+	// Correction is the busted/cancelled/errored trade indicator (Massive
+	// "correction" code, 0 = normal). Stored as a raw byte.
+	Correction []byte
 
 	WriteTime time.Duration
 }
@@ -65,18 +68,21 @@ func (model *Trade) make(capacity int) {
 	model.Epoch = make([]int64, 0, capacity)
 	model.Nanos = make([]int32, 0, capacity)
 	model.Price = make([]enum.Price, 0, capacity)
-	model.Size = make([]enum.Size, 0, capacity)
+	model.Size = make([]float64, 0, capacity)
 	model.Exchange = make([]enum.Exchange, 0, capacity)
 	model.TapeID = make([]enum.Tape, 0, capacity)
 	model.Cond1 = make([]enum.TradeCondition, 0, capacity)
 	model.Cond2 = make([]enum.TradeCondition, 0, capacity)
 	model.Cond3 = make([]enum.TradeCondition, 0, capacity)
 	model.Cond4 = make([]enum.TradeCondition, 0, capacity)
+	model.Correction = make([]byte, 0, capacity)
 }
 
 // Add adds a new data point to the internal buffers, and increment the internal index by one.
-func (model *Trade) Add(epoch int64, nanos int, price enum.Price, size enum.Size,
-	exchange enum.Exchange, tapeid enum.Tape, conditions ...enum.TradeCondition,
+// size is the (possibly fractional) share size; correction is the Massive
+// correction code (0 = normal).
+func (model *Trade) Add(epoch int64, nanos int, price enum.Price, size float64,
+	exchange enum.Exchange, tapeid enum.Tape, correction byte, conditions ...enum.TradeCondition,
 ) {
 	model.Epoch = append(model.Epoch, epoch)
 	model.Nanos = append(model.Nanos, int32(nanos))
@@ -84,6 +90,7 @@ func (model *Trade) Add(epoch int64, nanos int, price enum.Price, size enum.Size
 	model.Size = append(model.Size, size)
 	model.Exchange = append(model.Exchange, exchange)
 	model.TapeID = append(model.TapeID, tapeid)
+	model.Correction = append(model.Correction, correction)
 
 	cond1 := enum.NoTradeCondition
 	cond2 := enum.NoTradeCondition
@@ -130,6 +137,7 @@ func (model *Trade) GetCs() *io.ColumnSeries {
 	cs.AddColumn("Cond2", model.Cond2)
 	cs.AddColumn("Cond3", model.Cond3)
 	cs.AddColumn("Cond4", model.Cond4)
+	cs.AddColumn("Correction", model.Correction)
 
 	return cs
 }

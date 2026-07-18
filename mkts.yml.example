@@ -32,10 +32,12 @@ attrgroup_types:
     record_type: fixed
 
   # TRADE - Individual trade executions (used by massive plugin)
-  # Full trade data with exchange, tape ID, and up to 4 condition codes
+  # Full trade data with exchange, tape ID, and up to 4 condition codes.
+  # NOTE: do NOT list "Nanoseconds" for variable-length records. The sub-second
+  # offset is stored in the variable record index, not as a column (the writer
+  # strips a "Nanoseconds" column on write), so listing it breaks bucket creation.
   TRADE:
     columns:
-      Nanoseconds: int32
       Price: float64
       Size: uint64
       Exchange: byte
@@ -48,7 +50,6 @@ attrgroup_types:
 
   QUOTE:
     columns:
-      Nanoseconds: int32
       BidPrice: float64
       AskPrice: float64
       BidSize: uint64
@@ -56,13 +57,21 @@ attrgroup_types:
     record_type: variable
 
 triggers:
+  # Stream OHLCV bars to WebSocket subscribers.
+  #
+  # IMPORTANT: target OHLCV only ("*/1Sec/OHLCV"), NOT "*/1Sec/*". A "*/1Sec/*"
+  # glob also matches the variable-length 1Sec/TRADE and 1Sec/QUOTE buckets,
+  # which would fire this trigger on every tick write and make it read those
+  # tick buckets back from disk (a source of "snappy: corrupt input" read
+  # errors). If you genuinely want to stream raw ticks, add explicit
+  # "*/1Sec/TRADE" / "*/1Sec/QUOTE" triggers instead of a wildcard.
   - module: stream.so
-    on: "*/1Sec/*"
+    on: "*/1Sec/OHLCV"
     config:
       filter: "nasdaq"
 
   - module: stream.so
-    on: "*/1Min/*"
+    on: "*/1Min/OHLCV"
     config:
       filter: "nasdaq"
 
@@ -96,9 +105,10 @@ bgworkers:
     config:
       api_key: "FIXME"
       base_url: "https://api.massive.com"
-      ws_server: "wss://socket.massive.com"  # "wss://delayed.massive.com/stocks" | "ws://127.0.0.1:8765"
-      # ws_data_types controls real-time WebSocket streaming.
-      # IMPORTANT: only one can be enabled at a time
+      ws_server: "wss://socket.massive.com"  # host only; "/stocks" is appended automatically. Alt: "wss://delayed.massive.com" | "ws://127.0.0.1:8765"
+      # ws_data_types controls real-time WebSocket streaming. All enabled types
+      # are multiplexed onto a single WebSocket connection (the account permits
+      # only one connection), so any combination may be enabled together.
       ws_data_types:
 #        - quotes
 #        - trades

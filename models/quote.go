@@ -15,6 +15,12 @@ const (
 )
 
 // Quote defines schema and helper functions for storing Ask-Bid quote data.
+//
+// The internal buffers are append-style (make([]T, 0, capacity)); use Add to
+// append rows and Len to get the row count. This differs from the historical
+// index-based API (which required the exact row count up front) and supports
+// streaming ingestion where the per-symbol row count is unknown until a ticker
+// boundary is reached.
 type Quote struct {
 	Tbk         *io.TimeBucketKey
 	Epoch       []int64
@@ -25,11 +31,14 @@ type Quote struct {
 	AskSize     []uint64
 	BidExchange []byte
 	AskExchange []byte
-	Cond        []byte
+	// Cond is the first/primary quote condition (raw Massive int cast to byte).
+	Cond []byte
+	// Cond2 is the second quote condition (raw Massive int cast to byte).
+	Cond2 []byte
+	// Indicators is the first quote indicator (raw Massive int cast to byte).
+	Indicators []byte
 
 	WriteTime time.Duration
-	limit     int
-	idx       int
 }
 
 // BarBucketKey returns a string bucket key for a given symbol and timeframe.
@@ -37,13 +46,13 @@ func QuoteBucketKey(symbol string) string {
 	return symbol + "/" + quoteTimeframe + "/" + quoteSuffix
 }
 
-// NewBar creates a new Bar object and initializes it's internal column buffers to the given length.
-func NewQuote(symbol string, length int) *Quote {
+// NewQuote creates a new Quote object and initializes its internal column
+// buffers to the given capacity (a hint; buffers grow via append as needed).
+func NewQuote(symbol string, capacity int) *Quote {
 	model := &Quote{
-		Tbk:   io.NewTimeBucketKey(QuoteBucketKey(symbol)),
-		limit: length,
+		Tbk: io.NewTimeBucketKey(QuoteBucketKey(symbol)),
 	}
-	model.make(length)
+	model.make(capacity)
 	return model
 }
 
@@ -62,62 +71,58 @@ func (model *Quote) Symbol() string {
 	return model.Tbk.GetItemInCategory("Symbol")
 }
 
-// SetLimit sets a limit on how many entries are actually used when .Write() is called
-// It is useful if the model's buffers populated through the exported buffers directly (Open[i], Close[i], etc)
-// and the actual amount of inserted data is less than the initially specified length parameter.
-func (model *Quote) SetLimit(limit int) {
-	model.limit = limit
-}
-
 // make allocates buffers for this model.
-func (model *Quote) make(length int) {
-	model.Epoch = make([]int64, length)
-	model.Nanos = make([]int32, length)
-	model.BidPrice = make([]float64, length)
-	model.AskPrice = make([]float64, length)
-	model.BidSize = make([]uint64, length)
-	model.AskSize = make([]uint64, length)
-	model.BidExchange = make([]byte, length)
-	model.AskExchange = make([]byte, length)
-	model.Cond = make([]byte, length)
+func (model *Quote) make(capacity int) {
+	model.Epoch = make([]int64, 0, capacity)
+	model.Nanos = make([]int32, 0, capacity)
+	model.BidPrice = make([]float64, 0, capacity)
+	model.AskPrice = make([]float64, 0, capacity)
+	model.BidSize = make([]uint64, 0, capacity)
+	model.AskSize = make([]uint64, 0, capacity)
+	model.BidExchange = make([]byte, 0, capacity)
+	model.AskExchange = make([]byte, 0, capacity)
+	model.Cond = make([]byte, 0, capacity)
+	model.Cond2 = make([]byte, 0, capacity)
+	model.Indicators = make([]byte, 0, capacity)
 }
 
-// Add adds a new data point to the internal buffers, and increment the internal index by one.
+// Add appends a new data point to the internal buffers.
+// cond and cond2 are the (raw Massive) quote conditions; indicator is the first
+// quote indicator. bidSize/askSize are share counts.
 func (model *Quote) Add(epoch int64, nanos int, bidPrice, askPrice float64,
-	bidSize, askSize int, bidExchange, askExchange enum.Exchange, cond enum.QuoteCondition,
+	bidSize, askSize int, bidExchange, askExchange enum.Exchange,
+	cond enum.QuoteCondition, cond2, indicator byte,
 ) {
-	idx := model.idx
-	model.Epoch[idx] = epoch
-	model.Nanos[idx] = int32(nanos)
-	model.BidPrice[idx] = bidPrice
-	model.AskPrice[idx] = askPrice
-	model.BidSize[idx] = uint64(bidSize)
-	model.AskSize[idx] = uint64(askSize)
-	model.BidExchange[idx] = byte(bidExchange)
-	model.AskExchange[idx] = byte(askExchange)
-	model.Cond[idx] = byte(cond)
-	model.idx++
+	model.Epoch = append(model.Epoch, epoch)
+	model.Nanos = append(model.Nanos, int32(nanos))
+	model.BidPrice = append(model.BidPrice, bidPrice)
+	model.AskPrice = append(model.AskPrice, askPrice)
+	model.BidSize = append(model.BidSize, uint64(bidSize))
+	model.AskSize = append(model.AskSize, uint64(askSize))
+	model.BidExchange = append(model.BidExchange, byte(bidExchange))
+	model.AskExchange = append(model.AskExchange, byte(askExchange))
+	model.Cond = append(model.Cond, byte(cond))
+	model.Cond2 = append(model.Cond2, cond2)
+	model.Indicators = append(model.Indicators, indicator)
 }
 
 // BuildCsm prepares an io.ColumnSeriesMap object and populates it's columns with the contents of the internal buffers
 // it is included in the .Write() method
 // so use only when you need to work with the ColumnSeriesMap before writing it to disk.
 func (model *Quote) BuildCsm() *io.ColumnSeriesMap {
-	if model.idx > 0 {
-		model.limit = model.idx
-	}
-	limit := model.limit
 	csm := io.NewColumnSeriesMap()
 	cs := io.NewColumnSeries()
-	cs.AddColumn("Epoch", model.Epoch[:limit])
-	cs.AddColumn("Nanoseconds", model.Nanos[:limit])
-	cs.AddColumn("AskPrice", model.AskPrice[:limit])
-	cs.AddColumn("BidPrice", model.BidPrice[:limit])
-	cs.AddColumn("AskSize", model.AskSize[:limit])
-	cs.AddColumn("BidSize", model.BidSize[:limit])
-	cs.AddColumn("BidExchange", model.BidExchange[:limit])
-	cs.AddColumn("AskExchange", model.AskExchange[:limit])
-	cs.AddColumn("Cond", model.Cond[:limit])
+	cs.AddColumn("Epoch", model.Epoch)
+	cs.AddColumn("Nanoseconds", model.Nanos)
+	cs.AddColumn("AskPrice", model.AskPrice)
+	cs.AddColumn("BidPrice", model.BidPrice)
+	cs.AddColumn("AskSize", model.AskSize)
+	cs.AddColumn("BidSize", model.BidSize)
+	cs.AddColumn("BidExchange", model.BidExchange)
+	cs.AddColumn("AskExchange", model.AskExchange)
+	cs.AddColumn("Cond", model.Cond)
+	cs.AddColumn("Cond2", model.Cond2)
+	cs.AddColumn("Indicators", model.Indicators)
 	csm.AddColumnSeries(*model.Tbk, cs)
 	return &csm
 }

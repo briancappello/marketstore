@@ -311,7 +311,7 @@ func convertCSToTrades(cs *io.ColumnSeries, symbol string) (*models.Trade, error
 	epochs := cs.GetEpoch()
 	nanos, ok := cs.GetColumn("Nanoseconds").([]int32)
 	prices, ok2 := cs.GetColumn("Price").([]float64)
-	sizes, ok3 := cs.GetColumn("Size").([]uint64)
+	sizes, ok3 := cs.GetColumn("Size").([]float64)
 	exchanges, ok4 := cs.GetColumn("Exchange").([]byte)
 	tapeids, ok5 := cs.GetColumn("TapeID").([]byte)
 	cond1, ok6 := cs.GetColumn("Cond1").([]byte)
@@ -321,6 +321,9 @@ func convertCSToTrades(cs *io.ColumnSeries, symbol string) (*models.Trade, error
 	if !(ok && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9) {
 		return nil, fmt.Errorf("convert ticks to bars. symbol=%s", symbol)
 	}
+	// Correction is optional: buckets written before the column was added will
+	// not have it, so a missing/typed-mismatched column is tolerated (0).
+	correction, _ := cs.GetColumn("Correction").([]byte)
 	for i := range epochs {
 		condition := []modelsenum.TradeCondition{
 			modelsenum.TradeCondition(cond1[i]),
@@ -328,12 +331,17 @@ func convertCSToTrades(cs *io.ColumnSeries, symbol string) (*models.Trade, error
 			modelsenum.TradeCondition(cond3[i]),
 			modelsenum.TradeCondition(cond4[i]),
 		}
+		var corr byte
+		if i < len(correction) {
+			corr = correction[i]
+		}
 		trades.Add(
 			epochs[i], int(nanos[i]),
 			modelsenum.Price(prices[i]),
-			modelsenum.Size(sizes[i]),
+			sizes[i],
 			modelsenum.Exchange(exchanges[i]),
 			modelsenum.Tape(tapeids[i]),
+			corr,
 			condition...)
 	}
 	return trades, nil

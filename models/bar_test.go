@@ -18,19 +18,19 @@ func TestFromTradesFieldExcludes(t *testing.T) {
 	trades := NewTrade(symbol, 10)
 	trades.Add(
 		time.Date(2020, 11, 20, 10, 3, 0, 0, utils.InstanceConfig.Timezone).Unix(), 1,
-		100.1, 10, enum.NYSEAmerican, enum.TapeA, enum.RegularSale,
+		100.1, 10, enum.NYSEAmerican, enum.TapeA, 0, enum.RegularSale,
 	)
 	trades.Add( // Odd-lot is excluded from high/low & last
 		time.Date(2020, 11, 20, 10, 3, 1, 0, utils.InstanceConfig.Timezone).Unix(), 2,
-		111.2, 11, enum.Nasdaq, enum.TapeA, enum.OddLotTrade,
+		111.2, 11, enum.Nasdaq, enum.TapeA, 0, enum.OddLotTrade,
 	)
 	trades.Add( // Corrected Consolidated Close is excluded from volume
 		time.Date(2020, 11, 20, 10, 4, 2, 0, utils.InstanceConfig.Timezone).Unix(), 3,
-		100.2, 12, enum.NYSEAmerican, enum.TapeA, enum.RegularSale, enum.CorrectedConsolidatedClose,
+		100.2, 12, enum.NYSEAmerican, enum.TapeA, 0, enum.RegularSale, enum.CorrectedConsolidatedClose,
 	)
 	trades.Add( // DerivativelyPriced is excluded from last
 		time.Date(2020, 11, 20, 10, 4, 3, 0, utils.InstanceConfig.Timezone).Unix(), 4,
-		99.6, 13, enum.NYSE, enum.TapeA, enum.DerivativelyPriced,
+		99.6, 13, enum.NYSE, enum.TapeA, 0, enum.DerivativelyPriced,
 	)
 
 	// When converted to bars
@@ -65,23 +65,23 @@ func TestFromTradesDailyRollup(t *testing.T) {
 	trades := NewTrade(symbol, 10)
 	trades.Add(
 		time.Date(2020, 11, 20, 10, 3, 0, 0, utils.InstanceConfig.Timezone).Unix(), 1,
-		100.1, 10, enum.NYSEAmerican, enum.TapeA, enum.RegularSale,
+		100.1, 10, enum.NYSEAmerican, enum.TapeA, 0, enum.RegularSale,
 	)
 	trades.Add(
 		time.Date(2020, 11, 20, 10, 3, 1, 0, utils.InstanceConfig.Timezone).Unix(), 2,
-		111.2, 11, enum.Nasdaq, enum.TapeA,
+		111.2, 11, enum.Nasdaq, enum.TapeA, 0,
 	)
 	trades.Add(
 		time.Date(2020, 11, 20, 10, 4, 2, 0, utils.InstanceConfig.Timezone).Unix(), 3,
-		100.2, 12, enum.NYSEAmerican, enum.TapeA, enum.RegularSale,
+		100.2, 12, enum.NYSEAmerican, enum.TapeA, 0, enum.RegularSale,
 	)
 	trades.Add( // MarketCenterOfficialClose should be the last for daily bars
 		time.Date(2020, 11, 20, 10, 4, 3, 0, utils.InstanceConfig.Timezone).Unix(), 4,
-		105.6, 130, enum.NYSE, enum.TapeA, enum.MarketCenterOfficialClose,
+		105.6, 130, enum.NYSE, enum.TapeA, 0, enum.MarketCenterOfficialClose,
 	)
 	trades.Add( // After hours trade
 		time.Date(2020, 11, 20, 10, 4, 3, 0, utils.InstanceConfig.Timezone).Unix(), 4,
-		105.8, 31, enum.NYSE, enum.TapeA, enum.FormT,
+		105.8, 31, enum.NYSE, enum.TapeA, 0, enum.FormT,
 	)
 
 	// When converted to bars
