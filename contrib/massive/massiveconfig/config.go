@@ -109,10 +109,26 @@ type FetcherConfig struct {
 	// S3SecretKey is the secret access key for the Massive flat files S3 endpoint.
 	// Falls back to MASSIVE_S3_SECRET_KEY environment variable.
 	S3SecretKey string `json:"s3_secret_key"`
+	// DynamicTicks enables dynamic, runtime-driven trades/quotes subscriptions.
+	// When true, tick streams (trades/quotes) start with an EMPTY subscription
+	// and are subscribed/unsubscribed per-symbol at runtime via the RPC control
+	// API or an in-process trigger; the static Symbols set is ignored for ticks
+	// (it is still used for aggregate 1Sec/1Min streams and backfill).
+	// Defaults to false (today's static behavior, fully back-compatible).
+	DynamicTicks bool `json:"dynamic_ticks"`
+	// MaxDynamicSymbols is the per-DataType cap on concurrently-subscribed tick
+	// symbols when DynamicTicks is enabled (e.g. 500 permits up to 500 trade
+	// symbols AND up to 500 quote symbols). It is a symbols cap, not a streams
+	// cap. Defaults to DefaultMaxDynamicSymbols when <= 0.
+	MaxDynamicSymbols int `json:"max_dynamic_symbols"`
 	// SymbolInfos is populated at runtime from either Symbols (converted to SymbolInfo with nil dates)
 	// or from the database query results. This field is not parsed from config.
 	SymbolInfos []SymbolInfo `json:"-"`
 }
+
+// DefaultMaxDynamicSymbols is the per-DataType subscription cap applied when
+// MaxDynamicSymbols is not set (or <= 0) and DynamicTicks is enabled.
+const DefaultMaxDynamicSymbols = 500
 
 // ValidWSDataTypes is the set of valid values for WSDataTypes.
 var ValidWSDataTypes = map[string]bool{
@@ -145,6 +161,25 @@ func ValidateConfig(config *FetcherConfig) error {
 			if sq.WriteNewest == "" {
 				return fmt.Errorf("sync_queries[%q].write_newest is required", key)
 			}
+		}
+	}
+
+	if config.DynamicTicks {
+		hasTick := false
+		for _, dt := range config.WSDataTypes {
+			if dt == "trades" || dt == "quotes" {
+				hasTick = true
+				break
+			}
+		}
+		if !hasTick {
+			log.Warn("[massive] dynamic_ticks is true but neither trades nor quotes is in ws_data_types; dynamic mode is a no-op")
+		}
+		if len(config.Symbols) > 0 {
+			log.Warn("[massive] dynamic_ticks is true: the symbols set is IGNORED for trades/quotes (tick streams start empty and are driven at runtime); symbols is still used for aggregate streams and backfill")
+		}
+		if config.MaxDynamicSymbols <= 0 {
+			config.MaxDynamicSymbols = DefaultMaxDynamicSymbols
 		}
 	}
 	return nil

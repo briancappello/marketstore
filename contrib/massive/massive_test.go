@@ -10,8 +10,71 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/subscription"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/ws"
 )
+
+// TestDataTypeToTopicAgreesWithWSDataTypeToTopic ensures the two topic mapping
+// tables cannot drift for the tick data types.
+func TestDataTypeToTopicAgreesWithWSDataTypeToTopic(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, wsDataTypeToTopic["trades"], dataTypeToTopic[subscription.Trades])
+	assert.Equal(t, wsDataTypeToTopic["quotes"], dataTypeToTopic[subscription.Quotes])
+	assert.Equal(t, wsDataTypeToTopic["trades"], topicFor(subscription.Trades))
+	assert.Equal(t, wsDataTypeToTopic["quotes"], topicFor(subscription.Quotes))
+}
+
+// TestSubscriptionControllerLifecycle exercises the dynamic SubscriptionController
+// implementation end-to-end at the manager level (no live WS connection).
+func TestSubscriptionControllerLifecycle(t *testing.T) {
+	t.Parallel()
+
+	worker, err := NewBgWorker(map[string]interface{}{
+		"api_key":             "test-key",
+		"ws_data_types":       []string{"1Sec", "trades", "quotes"},
+		"dynamic_ticks":       true,
+		"max_dynamic_symbols": 2,
+	})
+	require.NoError(t, err)
+
+	mf, ok := worker.(*MassiveFetcher)
+	require.True(t, ok)
+
+	// Subscribe AAPL for both tick types.
+	require.NoError(t, mf.Subscribe("AAPL", []string{"trades", "quotes"}))
+	active := mf.ActiveSubscriptions()
+	assert.ElementsMatch(t, []string{"trades", "quotes"}, active["AAPL"])
+
+	// Unknown data type errors.
+	assert.Error(t, mf.Subscribe("MSFT", []string{"bogus"}))
+
+	// Cap is per-DataType: AAPL + MSFT trades = 2 (ok), GOOG trades = 3 (over cap).
+	require.NoError(t, mf.Subscribe("MSFT", []string{"trades"}))
+	assert.Error(t, mf.Subscribe("GOOG", []string{"trades"}))
+
+	// Unsubscribe AAPL trades; quotes remains.
+	require.NoError(t, mf.Unsubscribe("AAPL", []string{"trades"}))
+	active = mf.ActiveSubscriptions()
+	assert.ElementsMatch(t, []string{"quotes"}, active["AAPL"])
+}
+
+// TestStaticModeNoSubscriptionManager verifies that without dynamic_ticks the
+// manager is nil and the controller methods refuse.
+func TestStaticModeNoSubscriptionManager(t *testing.T) {
+	t.Parallel()
+
+	worker, err := NewBgWorker(map[string]interface{}{
+		"api_key":       "test-key",
+		"ws_data_types": []string{"trades"},
+		"symbols":       []string{"AAPL"},
+	})
+	require.NoError(t, err)
+
+	mf, ok := worker.(*MassiveFetcher)
+	require.True(t, ok)
+	assert.Nil(t, mf.subMgr)
+	assert.Error(t, mf.Subscribe("AAPL", []string{"trades"}))
+}
 
 func TestWSDataTypeToTopic(t *testing.T) {
 	t.Parallel()
@@ -458,6 +521,57 @@ func TestIsDailyOrLonger(t *testing.T) {
 	}
 }
 
+// TestMessageRouterDispatch verifies that the single multiplexed stream routes
+// each message to the handler matching its "ev" field, and ignores events for
+// channels that are not configured.
+func TestMessageRouterDispatch(t *testing.T) {
+	t.Parallel()
+
+	var got []string
+	mk := func(label string) func([]byte) {
+		return func(_ []byte) { got = append(got, label) }
+	}
+
+	topics := []streamTopic{
+		{dataType: "1Sec", topic: ws.StocksSecAggs, handler: mk("A")},
+		{dataType: "1Min", topic: ws.StocksMinAggs, handler: mk("AM")},
+		{dataType: "trades", topic: ws.StocksTrades, handler: mk("T")},
+		{dataType: "quotes", topic: ws.StocksQuotes, handler: mk("Q")},
+	}
+	r := newMessageRouter(topics)
+
+	r.dispatch([]byte(`{"ev":"AM","sym":"AAPL"}`))
+	r.dispatch([]byte(`{"ev":"T","sym":"AAPL"}`))
+	r.dispatch([]byte(`{"ev":"Q","sym":"AAPL"}`))
+	r.dispatch([]byte(`{"ev":"A","sym":"AAPL"}`))
+	// Unconfigured / status event types are ignored.
+	r.dispatch([]byte(`{"ev":"status","status":"success"}`))
+	r.dispatch([]byte(`{"ev":"XYZ"}`))
+	// Malformed JSON is ignored (no panic).
+	r.dispatch([]byte(`not-json`))
+
+	assert.Equal(t, []string{"AM", "T", "Q", "A"}, got)
+}
+
+// TestMessageRouterPartialTopics verifies that only configured channels route;
+// an event for an unconfigured channel (e.g., quotes when only 1Min is enabled)
+// is dropped.
+func TestMessageRouterPartialTopics(t *testing.T) {
+	t.Parallel()
+
+	var hits int
+	topics := []streamTopic{
+		{dataType: "1Min", topic: ws.StocksMinAggs, handler: func(_ []byte) { hits++ }},
+	}
+	r := newMessageRouter(topics)
+
+	r.dispatch([]byte(`{"ev":"AM","sym":"AAPL"}`)) // routed
+	r.dispatch([]byte(`{"ev":"Q","sym":"AAPL"}`))  // dropped (not configured)
+	r.dispatch([]byte(`{"ev":"T","sym":"AAPL"}`))  // dropped
+
+	assert.Equal(t, 1, hits)
+}
+
 func TestErrConnectionLimit(t *testing.T) {
 	t.Parallel()
 
@@ -484,7 +598,7 @@ func TestFlatFileAvailableThrough(t *testing.T) {
 		{
 			name: "before noon ET: available through day-before-yesterday",
 			now:  time.Date(2026, 4, 24, 6, 0, 0, 0, ny), // Fri 6 AM ET
-			want: utcDate(2026, 4, 22),                     // Wednesday
+			want: utcDate(2026, 4, 22),                   // Wednesday
 		},
 		{
 			name: "at 11:59 AM ET: still before cutoff",
@@ -494,27 +608,27 @@ func TestFlatFileAvailableThrough(t *testing.T) {
 		{
 			name: "at noon ET: yesterday is available",
 			now:  time.Date(2026, 4, 24, 12, 0, 0, 0, ny), // Fri noon ET
-			want: utcDate(2026, 4, 23),                      // Thursday
+			want: utcDate(2026, 4, 23),                    // Thursday
 		},
 		{
 			name: "after noon ET: yesterday is available",
 			now:  time.Date(2026, 4, 24, 15, 0, 0, 0, ny), // Fri 3 PM ET
-			want: utcDate(2026, 4, 23),                      // Thursday
+			want: utcDate(2026, 4, 23),                    // Thursday
 		},
 		{
 			name: "Saturday after noon: Friday is available",
 			now:  time.Date(2026, 4, 25, 13, 0, 0, 0, ny), // Sat 1 PM ET
-			want: utcDate(2026, 4, 24),                      // Friday
+			want: utcDate(2026, 4, 24),                    // Friday
 		},
 		{
 			name: "Saturday before noon: Thursday is available",
 			now:  time.Date(2026, 4, 25, 8, 0, 0, 0, ny), // Sat 8 AM ET
-			want: utcDate(2026, 4, 23),                     // Thursday
+			want: utcDate(2026, 4, 23),                   // Thursday
 		},
 		{
 			name: "Sunday after noon: Saturday (flat file dates are calendar, not market)",
 			now:  time.Date(2026, 4, 26, 14, 0, 0, 0, ny), // Sun 2 PM ET
-			want: utcDate(2026, 4, 25),                      // Saturday
+			want: utcDate(2026, 4, 25),                    // Saturday
 		},
 		{
 			name: "midnight ET: before noon, 2 days back",

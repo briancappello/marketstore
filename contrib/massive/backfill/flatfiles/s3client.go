@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
+	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
 // S3Client wraps an S3 client configured for the Massive flat files endpoint.
@@ -96,6 +98,69 @@ func (c *S3Client) DownloadWithPrefix(ctx context.Context, prefix, dataType stri
 	}
 
 	return &gzipReadCloser{gz: gz, body: io.NopCloser(bytes.NewReader(nil))}, nil
+}
+
+// DownloadToTempFile streams the gzipped object for a data type and date to a
+// local temp file, closing the HTTP connection before parsing begins. It
+// returns the temp file path and a cleanup func the caller MUST invoke when
+// done (it removes the temp file).
+//
+// This bounds memory for the large tick day-files (multi-GB) and removes the
+// mid-parse connection-reset risk that streaming directly from S3 would incur
+// under parallel downloads. The caller stream-decompresses from the file via
+// gzip.
+//
+// prefix should be "us_stocks_sip"; dataType should be "trades_v1" or "quotes_v1".
+func (c *S3Client) DownloadToTempFile(ctx context.Context, prefix, dataType string, date time.Time) (path string, cleanup func(), err error) {
+	key := c.objectKey(prefix, dataType, date)
+
+	resp, err := c.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("download s3://%s/%s: %w", c.bucket, key, err)
+	}
+	defer resp.Body.Close()
+
+	tmp, err := os.CreateTemp("", "massive_tick_*.csv.gz")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup = func() {
+		if rmErr := os.Remove(tmpPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Warn("[flatfiles] failed to remove temp file %s: %v", tmpPath, rmErr)
+		}
+	}
+
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		tmp.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("stream s3://%s/%s to temp file: %w", c.bucket, key, err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close temp file %s: %w", tmpPath, err)
+	}
+
+	return tmpPath, cleanup, nil
+}
+
+// OpenTempGzip opens a gzip reader over a temp file previously written by
+// DownloadToTempFile. The returned ReadCloser closes both the gzip reader and
+// the underlying file.
+func OpenTempGzip(path string) (io.ReadCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open temp file %s: %w", path, err)
+	}
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("decompress temp file %s: %w", path, err)
+	}
+	return &gzipReadCloser{gz: gz, body: f}, nil
 }
 
 // objectKey builds the S3 key for a flat file.

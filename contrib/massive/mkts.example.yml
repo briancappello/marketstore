@@ -5,6 +5,58 @@ stop_grace_period: 0
 wal_rotate_interval: 5
 enable_last_known: false
 timezone: "America/New_York"
+
+# attrgroup_types pins the on-disk schema for each attribute group so all
+# buckets of the same type share consistent column types. A feeder column with
+# an incompatible type raises an error, so these MUST match the models written
+# by the massive plugin (trades/quotes) and the ondiskagg aggregation trigger.
+#
+# Supported column types: float32, float64, int16, int32, int64,
+#   uint8, uint16, uint32, uint64, byte, bool, string16
+# record_type can be "fixed" (default, bars) or "variable" (tick data).
+attrgroup_types:
+  OHLCV:
+    columns:
+      Open: float32
+      High: float32
+      Low: float32
+      Close: float32
+      Volume: int64
+    record_type: fixed
+
+  # TRADE - Individual trade executions. Size is float64 to preserve fractional
+  # shares; Correction is the busted/cancelled/errored indicator.
+  # NOTE: do NOT list "Nanoseconds" for variable-length records. The sub-second
+  # offset is stored in the variable record index, not as a column (the writer
+  # strips a "Nanoseconds" column on write), so listing it breaks bucket creation.
+  TRADE:
+    columns:
+      Price: float64
+      Size: float64
+      Exchange: byte
+      TapeID: byte
+      Cond1: byte
+      Cond2: byte
+      Cond3: byte
+      Cond4: byte
+      Correction: byte
+    record_type: variable
+
+  # QUOTE - NBBO quotes. Cond/Cond2/Indicators store raw Massive ints; sizes are
+  # normalized to shares on ingest. (Do NOT list "Nanoseconds"; see TRADE note.)
+  QUOTE:
+    columns:
+      BidPrice: float64
+      AskPrice: float64
+      BidSize: uint64
+      AskSize: uint64
+      BidExchange: byte
+      AskExchange: byte
+      Cond: byte
+      Cond2: byte
+      Indicators: byte
+    record_type: variable
+
 triggers:
   - module: ondiskagg.so
     on: "*/1Min/OHLCV"

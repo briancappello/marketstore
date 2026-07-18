@@ -6,8 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpacahq/marketstore/v4/contrib/massive/mapping"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/metrics"
 	"github.com/alpacahq/marketstore/v4/executor"
+	"github.com/alpacahq/marketstore/v4/models"
+	modelsenum "github.com/alpacahq/marketstore/v4/models/enum"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
@@ -65,68 +68,107 @@ func BarsHandler(msg []byte) {
 	MakeBarsHandler("1Min")(msg)
 }
 
-// TradeHandler processes a single incoming trade message from the Massive
-// WebSocket API and writes it to MarketStore.
-func TradeHandler(msg []byte) {
-	if msg == nil {
-		return
+// MakeTradeHandler creates a handler for trade messages. It writes the FULL
+// trade schema (Exchange, TapeID, Cond1..Cond4, Correction) using models.Trade
+// and the shared mapping package, so the live feed encodes ticks identically to
+// the REST/flat-file backfill paths and merges cleanly into the existing
+// 1Sec/TRADE bucket. exMap maps Massive exchange ids to SIP chars.
+func MakeTradeHandler(exMap *mapping.ExchangeMap) func([]byte) {
+	return func(msg []byte) {
+		if msg == nil {
+			return
+		}
+
+		var t Trade
+		if err := json.Unmarshal(msg, &t); err != nil {
+			log.Warn("[massive] error unmarshalling trade message: %v", err)
+			return
+		}
+
+		if t.Size <= 0 || t.Price <= 0 {
+			return
+		}
+
+		model := buildTradeModel(&t, exMap)
+		if err := model.Write(); err != nil {
+			log.Error("[massive] failed to write trades csm: %v", err)
+			return
+		}
+		metrics.MassiveStreamLastUpdate.WithLabelValues("trade").SetToCurrentTime()
 	}
-
-	var t Trade
-	if err := json.Unmarshal(msg, &t); err != nil {
-		log.Warn("[massive] error unmarshalling trade message: %v", err)
-		return
-	}
-
-	if t.Size <= 0 || t.Price <= 0 {
-		return
-	}
-
-	timestamp := time.Unix(0, int64(millisToNanos*float64(t.Timestamp)))
-	key := fmt.Sprintf("%s/1Sec/TRADE", strings.Replace(t.Symbol, "/", ".", 1))
-	tbk := *io.NewTimeBucketKey(key)
-
-	writeMap := map[io.TimeBucketKey][]tradeRecord{
-		tbk: {{
-			epoch: timestamp.Unix(),
-			nanos: int32(timestamp.Nanosecond()),
-			px:    t.Price,
-			sz:    uint64(t.Size),
-		}},
-	}
-
-	writeTrades(writeMap)
-	metrics.MassiveStreamLastUpdate.WithLabelValues("trade").SetToCurrentTime()
 }
 
-// QuoteHandler processes a single incoming NBBO quote message from the Massive
-// WebSocket API and writes it to MarketStore.
-func QuoteHandler(msg []byte) {
-	if msg == nil {
-		return
+// buildTradeModel converts a decoded WS trade into a single-row models.Trade,
+// encoding exchange/tape/conditions via the shared mapping so the row matches
+// the backfill schema exactly.
+func buildTradeModel(t *Trade, exMap *mapping.ExchangeMap) *models.Trade {
+	timestamp := time.Unix(0, int64(millisToNanos*float64(t.Timestamp)))
+
+	// Map Massive integer condition codes to SIP chars, dropping codes with no
+	// SIP mapping (functionally inert for consolidation), matching the backfill.
+	conditions := make([]modelsenum.TradeCondition, 0, len(t.Conditions))
+	for _, c := range t.Conditions {
+		if sc, ok := mapping.TradeConditionToSIP(c); ok {
+			conditions = append(conditions, sc)
+		}
 	}
 
-	var q Quote
-	if err := json.Unmarshal(msg, &q); err != nil {
-		log.Warn("[massive] error unmarshalling quote message: %v", err)
-		return
-	}
+	model := models.NewTrade(strings.Replace(t.Symbol, "/", ".", 1), 1)
+	model.Add(
+		timestamp.Unix(), timestamp.Nanosecond(),
+		modelsenum.Price(t.Price),
+		float64(t.Size),
+		exMap.Get(t.Exchange),
+		mapping.TapeToChar(t.Tape),
+		0, // correction: live trade messages carry no correction code
+		conditions...,
+	)
+	return model
+}
 
+// MakeQuoteHandler creates a handler for NBBO quote messages. It writes the
+// FULL quote schema (BidExchange, AskExchange, Cond, Cond2, Indicators) using
+// models.Quote so the live feed merges cleanly into the existing 1Sec/QUOTE
+// bucket. The live wire format carries a single condition and no indicators, so
+// Cond2/Indicators are written as 0. exMap maps Massive exchange ids to SIP
+// chars.
+func MakeQuoteHandler(exMap *mapping.ExchangeMap) func([]byte) {
+	return func(msg []byte) {
+		if msg == nil {
+			return
+		}
+
+		var q Quote
+		if err := json.Unmarshal(msg, &q); err != nil {
+			log.Warn("[massive] error unmarshalling quote message: %v", err)
+			return
+		}
+
+		model := buildQuoteModel(&q, exMap)
+		if err := model.Write(); err != nil {
+			log.Error("[massive] failed to write quotes csm: %v", err)
+			return
+		}
+		metrics.MassiveStreamLastUpdate.WithLabelValues("quote").SetToCurrentTime()
+	}
+}
+
+// buildQuoteModel converts a decoded WS quote into a single-row models.Quote.
+// The live wire format carries a single condition and no indicators, so
+// Cond2/Indicators are written as 0. Sizes are in shares (post SEC MDI).
+func buildQuoteModel(q *Quote, exMap *mapping.ExchangeMap) *models.Quote {
 	timestamp := time.Unix(0, int64(millisToNanos*float64(q.Timestamp)))
-	key := fmt.Sprintf("%s/1Min/QUOTE", strings.Replace(q.Symbol, "/", ".", 1))
-	tbk := *io.NewTimeBucketKey(key)
 
-	writeMap := map[io.TimeBucketKey][]quoteRecord{
-		tbk: {{
-			epoch: timestamp.Unix(),
-			nanos: int32(timestamp.Nanosecond()),
-			bidPx: q.BidPrice,
-			askPx: q.AskPrice,
-			bidSz: uint64(q.BidSize),
-			askSz: uint64(q.AskSize),
-		}},
-	}
-
-	writeQuotes(writeMap)
-	metrics.MassiveStreamLastUpdate.WithLabelValues("quote").SetToCurrentTime()
+	model := models.NewQuote(strings.Replace(q.Symbol, "/", ".", 1), 1)
+	model.Add(
+		timestamp.Unix(), timestamp.Nanosecond(),
+		q.BidPrice, q.AskPrice,
+		q.BidSize, q.AskSize,
+		exMap.Get(q.BidExchange),
+		exMap.Get(q.AskExchange),
+		modelsenum.QuoteCondition(q.Condition),
+		0, // cond2: not present on the live quote wire format
+		0, // indicators: not present on the live quote wire format
+	)
+	return model
 }

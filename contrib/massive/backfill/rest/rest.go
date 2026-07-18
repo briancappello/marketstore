@@ -11,6 +11,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/mapping"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/models"
@@ -37,6 +38,41 @@ const (
 
 // NY is the New York timezone used for market-day calculations.
 var NY, _ = time.LoadLocation("America/New_York")
+
+// restExchangeMap resolves exchange ids to SIP chars for the REST backfiller.
+// It is initialized lazily (and falls back to the static table) so the REST
+// path encodes exchanges identically to the flat-file path.
+var (
+	restExchangeMap     *mapping.ExchangeMap
+	restExchangeMapOnce sync.Once
+)
+
+func exchangeMap(client *http.Client) *mapping.ExchangeMap {
+	restExchangeMapOnce.Do(func() {
+		restExchangeMap = mapping.LoadExchangeMap(client)
+	})
+	return restExchangeMap
+}
+
+// roundLotCutoff is the date on/after which Massive reports quote bid/ask sizes
+// in shares; before it, sizes are in round lots and must be multiplied by the
+// symbol's round_lot to normalize to shares (SEC MDI transition).
+var roundLotCutoff = time.Date(2025, 11, 3, 0, 0, 0, 0, time.UTC)
+
+// defaultRoundLot is used when the symbol's round_lot is unknown.
+const defaultRoundLot = 100
+
+// normalizeQuoteSize converts a raw Massive quote size to shares given the
+// quote's timestamp and the symbol's round lot.
+func normalizeQuoteSize(rawSize float64, ts time.Time, roundLot int) uint64 {
+	if ts.Before(roundLotCutoff) {
+		if roundLot <= 0 {
+			roundLot = defaultRoundLot
+		}
+		return uint64(rawSize * float64(roundLot))
+	}
+	return uint64(rawSize)
+}
 
 // timeframeChunkDays estimates how many calendar days can fit in one API request
 // for a given timeframe, staying under the 50k record limit.
@@ -259,7 +295,7 @@ func Bars(
 	}
 
 	writerWP.Do(func() {
-		if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol); err != nil {
+		if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol, false); err != nil {
 			log.Error("[massive] failed to write %s bars for %s: %v", timeframe, symbol, err)
 		}
 	})
@@ -267,12 +303,16 @@ func Bars(
 	return nil
 }
 
-// writeModel writes a model's CSM using the provided writer, or falls back to direct disk write.
-func writeModel(csm *io.ColumnSeriesMap, writer backfill.Writer, dataType, symbol string) error {
+// writeModel writes a model's CSM using the provided writer, or falls back to
+// direct disk write. isVariableLength selects the on-disk record layout: bars
+// are fixed (false); tick data (trades/quotes) MUST be variable (true) so that
+// multiple records can share a 1Sec interval and nanosecond IntervalTicks are
+// preserved.
+func writeModel(csm *io.ColumnSeriesMap, writer backfill.Writer, dataType, symbol string, isVariableLength bool) error {
 	if writer != nil {
-		return writer.WriteCSM(*csm, false)
+		return writer.WriteCSM(*csm, isVariableLength)
 	}
-	return executor.WriteCSM(*csm, false)
+	return executor.WriteCSM(*csm, isVariableLength)
 }
 
 // fetchAndWriteBars is a helper for single-chunk bar fetches (no parallelization).
@@ -320,7 +360,7 @@ func fetchAndWriteBars(
 	}
 
 	writerWP.Do(func() {
-		if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol); err != nil {
+		if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol, false); err != nil {
 			log.Error("[massive] failed to write %s bars for %s: %v", timeframe, symbol, err)
 		}
 	})
@@ -480,29 +520,34 @@ func Trades(
 		return nil
 	}
 
+	exMap := exchangeMap(client)
 	model := models.NewTrade(symbol, len(allTrades))
 	for i := range allTrades {
 		tick := &allTrades[i]
 		timestamp := time.Unix(0, tick.SIPTimestamp)
 
-		// Convert Massive condition codes to MarketStore enum values.
-		conditions := make([]modelsenum.TradeCondition, len(tick.Conditions))
-		for j, c := range tick.Conditions {
-			conditions[j] = modelsenum.TradeCondition(c)
+		// Map Massive integer condition codes to SIP chars, dropping codes
+		// that have no SIP mapping (functionally inert for consolidation).
+		conditions := make([]modelsenum.TradeCondition, 0, len(tick.Conditions))
+		for _, c := range tick.Conditions {
+			if sc, ok := mapping.TradeConditionToSIP(c); ok {
+				conditions = append(conditions, sc)
+			}
 		}
 
 		model.Add(
 			timestamp.Unix(), timestamp.Nanosecond(),
 			modelsenum.Price(tick.Price),
-			modelsenum.Size(tick.Size),
-			modelsenum.Exchange(tick.Exchange),
-			modelsenum.Tape(tick.Tape),
+			tick.Size,
+			exMap.Get(tick.Exchange),
+			mapping.TapeToChar(tick.Tape),
+			byte(tick.Correction),
 			conditions...,
 		)
 	}
 
 	writerWP.Do(func() {
-		if err := writeModel(model.BuildCsm(), writer, "trades", symbol); err != nil {
+		if err := writeModel(model.BuildCsm(), writer, "trades", symbol, true); err != nil {
 			log.Error("[massive] failed to write trades for %s: %v", symbol, err)
 		}
 	})
@@ -624,27 +669,42 @@ func Quotes(
 		return nil
 	}
 
+	exMap := exchangeMap(client)
+	// The REST path does not fetch per-symbol round_lot; use the default.
+	roundLot := defaultRoundLot
 	model := models.NewQuote(symbol, len(allQuotes))
 	for _, tick := range allQuotes {
 		timestamp := time.Unix(0, tick.SIPTimestamp)
 
+		// Quote conditions/indicators have no SIP mapping; store raw ints.
 		var cond modelsenum.QuoteCondition
 		if len(tick.Conditions) > 0 {
 			cond = modelsenum.QuoteCondition(tick.Conditions[0])
 		}
+		var cond2 byte
+		if len(tick.Conditions) > 1 {
+			cond2 = byte(tick.Conditions[1])
+		}
+		var indicator byte
+		if len(tick.Indicators) > 0 {
+			indicator = byte(tick.Indicators[0])
+		}
+
+		bidSize := normalizeQuoteSize(tick.BidSize, timestamp, roundLot)
+		askSize := normalizeQuoteSize(tick.AskSize, timestamp, roundLot)
 
 		model.Add(
 			timestamp.Unix(), timestamp.Nanosecond(),
 			tick.BidPrice, tick.AskPrice,
-			int(tick.BidSize), int(tick.AskSize),
-			modelsenum.Exchange(tick.BidExchange),
-			modelsenum.Exchange(tick.AskExchange),
-			cond,
+			int(bidSize), int(askSize),
+			exMap.Get(tick.BidExchange),
+			exMap.Get(tick.AskExchange),
+			cond, cond2, indicator,
 		)
 	}
 
 	writerWP.Do(func() {
-		if err := writeModel(model.BuildCsm(), writer, "quotes", symbol); err != nil {
+		if err := writeModel(model.BuildCsm(), writer, "quotes", symbol, true); err != nil {
 			log.Error("[massive] failed to write quotes for %s: %v", symbol, err)
 		}
 	})

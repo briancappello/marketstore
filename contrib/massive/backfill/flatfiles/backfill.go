@@ -32,14 +32,32 @@ type FlatFileType struct {
 	S3Prefix string
 	// S3DataType is the data type subdirectory (e.g., "day_aggs_v1" or "minute_aggs_v1").
 	S3DataType string
+	// Tick is true for tick-level data ("trades"/"quotes"), which routes to
+	// BackfillTicks (variable-length, per-symbol streaming) rather than the
+	// bar path BackfillDates. For bar types the map key is also the timeframe;
+	// for tick types the key is a data-type name (the bucket uses 1Sec).
+	Tick bool
 }
 
 // DataTypes maps query_start keys to their S3 flat file location.
 // Only these data types are supported by the flat file backfiller.
+//
+// The bar keys ("1D", "1Min", "1D-index") are also MarketStore timeframes; the
+// tick keys ("trades", "quotes") are data-type names and MUST route to
+// BackfillTicks (see IsTickKey).
 var DataTypes = map[string]FlatFileType{
 	"1D":       {S3Prefix: massiveconfig.DefaultS3Prefix, S3DataType: "day_aggs_v1"},
 	"1Min":     {S3Prefix: massiveconfig.DefaultS3Prefix, S3DataType: "minute_aggs_v1"},
 	"1D-index": {S3Prefix: massiveconfig.DefaultS3IndicesPrefix, S3DataType: "day_aggs_v1"},
+	"trades":   {S3Prefix: massiveconfig.DefaultS3Prefix, S3DataType: "trades_v1", Tick: true},
+	"quotes":   {S3Prefix: massiveconfig.DefaultS3Prefix, S3DataType: "quotes_v1", Tick: true},
+}
+
+// IsTickKey reports whether a -from/query_start key refers to tick-level data
+// ("trades"/"quotes") that must be processed by BackfillTicks.
+func IsTickKey(key string) bool {
+	ft, ok := DataTypes[key]
+	return ok && ft.Tick
 }
 
 // ProgressFunc is called when the contiguous high-water mark of completed dates

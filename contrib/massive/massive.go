@@ -21,7 +21,9 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/flatfiles"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/rest"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/handlers"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/mapping"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/subscription"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/ws"
 	"github.com/alpacahq/marketstore/v4/executor"
@@ -55,6 +57,60 @@ var wsDataTypeToTopic = map[string]ws.Topic{
 	"quotes": ws.StocksQuotes,
 }
 
+// dataTypeToTopic is the single mapping from subscription.DataType to ws.Topic.
+// It mirrors wsDataTypeToTopic for the tick types and lives here (not in the
+// subscription package) because subscription must not import ws — that would
+// pull the ws client into the trigger's dependency graph.
+var dataTypeToTopic = map[subscription.DataType]ws.Topic{
+	subscription.Trades: ws.StocksTrades,
+	subscription.Quotes: ws.StocksQuotes,
+}
+
+// topicFor returns the ws.Topic for a subscription.DataType.
+func topicFor(dt subscription.DataType) ws.Topic { return dataTypeToTopic[dt] }
+
+// reconcileInterval is the slow safety-net cadence at which the control loop
+// re-applies the manager's Active() snapshot onto live clients. It is a
+// correctness backstop for dropped edge events / server-side resets, not the
+// primary latency path.
+const reconcileInterval = 30 * time.Second
+
+// dynClientRegistry is the seam between the connection lifecycle (which
+// creates/tears down the shared ws.Client per reconnect) and the single control
+// goroutine (which reads from it). Mutex-guarded because both sides touch it.
+//
+// Since the account permits only one connection, all configured dynamic tick
+// DataTypes (Trades, Quotes) map to the SAME *ws.Client instance. The map is
+// keyed by DataType so the control loop can ask "is the connection for this
+// data type live?" independently; the topic (T vs Q) still distinguishes the
+// subscription frames on the shared wire.
+type dynClientRegistry struct {
+	mu      sync.Mutex
+	clients map[subscription.DataType]*ws.Client
+}
+
+func newDynClientRegistry() *dynClientRegistry {
+	return &dynClientRegistry{clients: map[subscription.DataType]*ws.Client{}}
+}
+
+func (r *dynClientRegistry) set(dt subscription.DataType, c *ws.Client) {
+	r.mu.Lock()
+	r.clients[dt] = c
+	r.mu.Unlock()
+}
+
+func (r *dynClientRegistry) clear(dt subscription.DataType) {
+	r.mu.Lock()
+	delete(r.clients, dt)
+	r.mu.Unlock()
+}
+
+func (r *dynClientRegistry) get(dt subscription.DataType) *ws.Client {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.clients[dt]
+}
+
 // Use jsoniter because it supports marshal/unmarshal of map[interface{}]interface{} type.
 // When the config file contains nested structures like query_start: {1Min: "2024-01-01"},
 // the standard "encoding/json" library cannot marshal the structure because the config
@@ -77,6 +133,16 @@ type MassiveFetcher struct {
 	// don't re-pay TCP dial + TLS handshake costs and don't leak
 	// orphaned idle connections from prior cycles.
 	httpClient *http.Client
+
+	// subMgr is the ref-counted source of truth for dynamic tick
+	// subscriptions. Non-nil only when dynamic_ticks is enabled.
+	subMgr *subscription.Manager
+	// dynClients is the registry of currently-live dynamic tick clients,
+	// keyed by DataType. Non-nil only when dynamic_ticks is enabled.
+	dynClients *dynClientRegistry
+	// enabledTickTypes is the set of tick DataTypes in ws_data_types
+	// (subset of {Trades, Quotes}). Used by the control loop's reconcile sweep.
+	enabledTickTypes []subscription.DataType
 }
 
 // NewBgWorker returns a new instance of MassiveFetcher.
@@ -142,6 +208,26 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 		}
 	}
 
+	// Dynamic tick subscriptions (optional). When enabled, trades/quotes
+	// streams start empty and are driven at runtime.
+	var (
+		subMgr           *subscription.Manager
+		dynClients       *dynClientRegistry
+		enabledTickTypes []subscription.DataType
+	)
+	if config.DynamicTicks {
+		for _, dt := range subscription.AllDataTypes {
+			if _, ok := wsDataTypes[dt.String()]; ok {
+				enabledTickTypes = append(enabledTickTypes, dt)
+			}
+		}
+		subMgr = subscription.New(config.MaxDynamicSymbols)
+		dynClients = newDynClientRegistry()
+		// Publish the singleton so an in-process trigger (Approach A) reaches
+		// the same Manager the bgworker owns.
+		subscription.Default = subMgr
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Long-lived HTTP client, shared across every runBackfill() invocation.
@@ -156,11 +242,14 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 	}
 
 	return &MassiveFetcher{
-		config:      config,
-		wsDataTypes: wsDataTypes,
-		ctx:         ctx,
-		cancel:      cancel,
-		httpClient:  httpClient,
+		config:           config,
+		wsDataTypes:      wsDataTypes,
+		ctx:              ctx,
+		cancel:           cancel,
+		httpClient:       httpClient,
+		subMgr:           subMgr,
+		dynClients:       dynClients,
+		enabledTickTypes: enabledTickTypes,
 	}, nil
 }
 
@@ -172,6 +261,14 @@ func (mf *MassiveFetcher) Run() {
 
 	if mf.config.BaseURL != "" {
 		api.SetBaseURL(mf.config.BaseURL)
+	}
+
+	// Start the single dynamic-subscription control goroutine (if enabled)
+	// before streaming so it is ready to route Change events as soon as the
+	// shared connection registers its tick topics.
+	if mf.subMgr != nil {
+		mf.wg.Add(1)
+		go mf.runControlLoop()
 	}
 
 	// Start WebSocket streaming immediately to avoid missing real-time data.
@@ -194,25 +291,66 @@ func (mf *MassiveFetcher) Run() {
 	log.Info("[massive] shutdown complete")
 }
 
-// startStreaming connects each configured data type to the Massive WebSocket API
-// sequentially (so no two connections are dialing at the same time), then launches
-// a goroutine per data type to run the message loop.
+// streamTopic bundles a configured WebSocket topic with everything needed to
+// (re)subscribe it on the single shared connection and route its messages.
+type streamTopic struct {
+	dataType string                 // config name: "1Min", "1Sec", "trades", "quotes"
+	topic    ws.Topic               // wire topic (A/AM/T/Q)
+	handler  func([]byte)           // writes the decoded message to MarketStore
+	tickers  []string               // static tickers to subscribe at handshake (nil for dynamic)
+	dynamic  *subscription.DataType // non-nil if this topic is driven at runtime
+}
+
+// startStreaming opens a SINGLE WebSocket connection that multiplexes every
+// configured data type (1Min/1Sec/trades/quotes) onto one socket.
 //
-// Sequential connection ensures the server has fully registered each connection's
-// subscription before the next one dials. This prevents transient "bare" connections
-// that count against the account's connection limit.
+// The Massive account permits exactly ONE concurrent WebSocket connection, but
+// that connection may subscribe to all channels (A, AM, T, Q) at once. Opening
+// a separate connection per data type trips the server's max_connections limit
+// (all but the first are rejected), so everything shares one client.
+//
+// Static topics are subscribed during the handshake; dynamic tick topics
+// (trades/quotes under dynamic_ticks) connect empty and are driven at runtime
+// by the control loop.
 func (mf *MassiveFetcher) startStreaming() {
 	feed := ws.Feed(ws.RealTime)
 	if mf.config.WSServer != "" {
 		feed = ws.Feed(mf.config.WSServer)
 	}
 
-	// Map data types to their handlers.
+	topics := mf.buildStreamTopics()
+	if len(topics) == 0 {
+		log.Error("[massive] no valid ws_data_types to stream")
+		return
+	}
+
+	// Connect once, subscribing all static topics during the handshake.
+	client, err := mf.wsConnect(feed, topics)
+	if err != nil {
+		log.Error("[massive] initial connection failed: %v", err)
+		// Retry loop will sleep until the next pre-market open and try again.
+		mf.wg.Add(1)
+		go mf.streamWithRestart(feed, topics, streamState{})
+		return
+	}
+
+	mf.wg.Add(1)
+	go mf.streamWithRestart(feed, topics, streamState{client: client})
+}
+
+// buildStreamTopics resolves the configured ws_data_types into the ordered set
+// of topics to multiplex onto the shared connection.
+func (mf *MassiveFetcher) buildStreamTopics() []streamTopic {
+	// Tick handlers encode the FULL trade/quote schema using the shared mapping
+	// (exchange ids → SIP chars) so the live feed merges into the same on-disk
+	// buckets the REST/flat-file backfills write. Load the exchange map once.
+	exMap := mapping.LoadExchangeMap(mf.httpClient)
+
 	dataTypeHandlers := map[string]func([]byte){
 		"1Min":   handlers.MakeBarsHandler("1Min"),
 		"1Sec":   handlers.MakeBarsHandler("1Sec"),
-		"trades": handlers.TradeHandler,
-		"quotes": handlers.QuoteHandler,
+		"trades": handlers.MakeTradeHandler(exMap),
+		"quotes": handlers.MakeQuoteHandler(exMap),
 	}
 
 	tickers := mf.config.Symbols
@@ -220,6 +358,7 @@ func (mf *MassiveFetcher) startStreaming() {
 		tickers = []string{"*"}
 	}
 
+	var topics []streamTopic
 	for dataType := range mf.wsDataTypes {
 		topic, ok := wsDataTypeToTopic[dataType]
 		if !ok {
@@ -227,39 +366,50 @@ func (mf *MassiveFetcher) startStreaming() {
 			continue
 		}
 
-		handler := dataTypeHandlers[dataType]
-
-		// Connect sequentially: dial, auth, subscribe, and wait for confirmation
-		// before moving on to the next data type.
-		client, err := mf.wsConnect(dataType, topic, feed, tickers)
-		if err != nil {
-			log.Error("[massive] %s: initial connection failed: %v", dataType, err)
-			// Launch the retry goroutine which will sleep until the next
-			// pre-market open and try again.
-			mf.wg.Add(1)
-			go mf.streamWithRestart(dataType, topic, handler, feed, tickers)
-			continue
+		st := streamTopic{
+			dataType: dataType,
+			topic:    topic,
+			handler:  dataTypeHandlers[dataType],
+			tickers:  tickers,
 		}
 
-		log.Info("[massive] streaming %s (%d symbols)", dataType, len(tickers))
+		// Dynamic tick topics connect with no subscription; symbols are added
+		// and removed at runtime by the control loop.
+		if dynDT := mf.dynamicDataType(dataType); dynDT != nil {
+			st.tickers = nil
+			st.dynamic = dynDT
+		}
 
-		mf.wg.Add(1)
-		go mf.streamWithRestart(dataType, topic, handler, feed, tickers, withClient(client))
+		topics = append(topics, st)
 	}
+	return topics
 }
 
-// streamOption allows startStreaming to pass an already-connected client to
-// streamWithRestart for the initial run, skipping the first connect.
-type streamOption func(*streamState)
+// dynamicDataType returns a non-nil DataType when the given config data type is
+// a tick stream running in dynamic mode; otherwise nil (static).
+func (mf *MassiveFetcher) dynamicDataType(dataType string) *subscription.DataType {
+	if mf.subMgr == nil {
+		return nil
+	}
+	dt, ok := subscription.ParseDataType(dataType)
+	if !ok {
+		return nil
+	}
+	for _, e := range mf.enabledTickTypes {
+		if e == dt {
+			return &dt
+		}
+	}
+	return nil
+}
+
+// streamState carries the mutable state of the single connection's retry loop:
+// an optional pre-connected client (used for the first iteration so
+// startStreaming's successful dial is not wasted) and whether the current
+// attempt is a reconnect (which triggers a gap-fill backfill).
 type streamState struct {
 	client      *ws.Client
 	isReconnect bool
-}
-
-func withClient(c *ws.Client) streamOption {
-	return func(s *streamState) {
-		s.client = c
-	}
 }
 
 // streamWithRestart is the outer retry loop for a single data type's WebSocket
@@ -267,32 +417,20 @@ func withClient(c *ws.Client) streamOption {
 // until the next pre-market open (3:58 AM ET) and retries. On a successful
 // reconnect it also triggers a backfill to cover any data gap.
 //
-// If called with withClient(), uses the pre-connected client for the first
+// state.client, if set, is the pre-connected client used for the first
 // iteration (skipping the connect step, since startStreaming already did it).
-func (mf *MassiveFetcher) streamWithRestart(
-	dataType string,
-	topic ws.Topic,
-	handler func([]byte),
-	feed ws.Feed,
-	tickers []string,
-	opts ...streamOption,
-) {
+func (mf *MassiveFetcher) streamWithRestart(feed ws.Feed, topics []streamTopic, state streamState) {
 	defer mf.wg.Done()
-
-	state := streamState{}
-	for _, opt := range opts {
-		opt(&state)
-	}
 
 	for {
 		var err error
 		if state.client != nil {
 			// Use the pre-connected client (first iteration from startStreaming).
-			err = mf.stream(dataType, handler, state.client, state.isReconnect)
+			err = mf.stream(topics, state.client, state.isReconnect)
 			state.client = nil // consumed; next iteration connects fresh
 		} else {
 			// Connect and stream.
-			err = mf.connectAndStream(dataType, topic, handler, feed, tickers, state.isReconnect)
+			err = mf.connectAndStream(feed, topics, state.isReconnect)
 		}
 
 		if err == nil {
@@ -302,65 +440,60 @@ func (mf *MassiveFetcher) streamWithRestart(
 
 		// Log differently for connection-limit vs other fatal errors.
 		if errors.Is(err, ws.ErrConnectionLimit) {
-			log.Error("[massive] %s: connection limit reached, scheduling retry at next pre-market open", dataType)
+			log.Error("[massive] connection limit reached, scheduling retry at next pre-market open")
 		} else {
-			log.Error("[massive] %s: stream failed (%v), scheduling retry at next pre-market open", dataType, err)
+			log.Error("[massive] stream failed (%v), scheduling retry at next pre-market open", err)
 		}
 
 		// Sleep until 3:58 AM ET on the next trading day.
 		wakeTime := nextPreMarketOpen(time.Now())
-		log.Info("[massive] %s: next reconnect attempt at %s", dataType, wakeTime.Format(time.RFC3339))
+		log.Info("[massive] next reconnect attempt at %s", wakeTime.Format(time.RFC3339))
 
 		select {
 		case <-mf.ctx.Done():
 			return
 		case <-time.After(time.Until(wakeTime)):
-			log.Info("[massive] %s: waking up for scheduled reconnect", dataType)
+			log.Info("[massive] waking up for scheduled reconnect")
 		}
 
 		state.isReconnect = true
 	}
 }
 
-// wsConnect creates a new WebSocket client, registers the subscription, and
-// performs the full synchronous handshake (dial → auth → subscribe → confirmation).
-// Returns the connected client ready for streaming.
-func (mf *MassiveFetcher) wsConnect(
-	dataType string,
-	topic ws.Topic,
-	feed ws.Feed,
-	tickers []string,
-) (*ws.Client, error) {
+// wsConnect creates the single WebSocket client, registers every static topic's
+// subscription, and performs the full synchronous handshake (dial → auth →
+// subscribe → confirmation). Dynamic tick topics are NOT subscribed here; they
+// connect empty and are driven at runtime by the control loop.
+func (mf *MassiveFetcher) wsConnect(feed ws.Feed, topics []streamTopic) (*ws.Client, error) {
 	client := ws.New(mf.config.APIKey, feed)
-	client.Subscribe(topic, tickers...)
+	for _, st := range topics {
+		if st.dynamic != nil {
+			continue // dynamic ticks subscribe at runtime
+		}
+		client.Subscribe(st.topic, st.tickers...)
+	}
 
 	if err := client.Connect(); err != nil {
-		return nil, fmt.Errorf("connect %s: %w", dataType, err)
+		return nil, fmt.Errorf("connect: %w", err)
 	}
 	return client, nil
 }
 
-// connectAndStream creates a WebSocket client, connects, and streams messages
+// connectAndStream creates the WebSocket client, connects, and streams messages
 // until a fatal error or context cancellation. Used by streamWithRestart for
 // reconnection attempts (the initial connection is done by startStreaming).
-func (mf *MassiveFetcher) connectAndStream(
-	dataType string,
-	topic ws.Topic,
-	handler func([]byte),
-	feed ws.Feed,
-	tickers []string,
-	isReconnect bool,
-) error {
-	client, err := mf.wsConnect(dataType, topic, feed, tickers)
+func (mf *MassiveFetcher) connectAndStream(feed ws.Feed, topics []streamTopic, isReconnect bool) error {
+	client, err := mf.wsConnect(feed, topics)
 	if err != nil {
 		return err
 	}
-	log.Info("[massive] streaming %s (%d symbols)", dataType, len(tickers))
-	return mf.stream(dataType, handler, client, isReconnect)
+	return mf.stream(topics, client, isReconnect)
 }
 
-// stream runs the message loop for an already-connected client until the
-// connection drops or the context is cancelled.
+// stream runs the message loop for the already-connected shared client until
+// the connection drops or the context is cancelled. The single socket carries
+// messages for every configured topic; each message is routed to the matching
+// handler by its "ev" (event type) field.
 //
 // It returns:
 //   - nil on clean shutdown (context cancelled)
@@ -370,13 +503,31 @@ func (mf *MassiveFetcher) connectAndStream(
 //
 // When isReconnect is true, a background backfill is triggered to fill any data
 // gap from the time the stream was down.
-func (mf *MassiveFetcher) stream(
-	dataType string,
-	handler func([]byte),
-	client *ws.Client,
-	isReconnect bool,
-) error {
+func (mf *MassiveFetcher) stream(topics []streamTopic, client *ws.Client, isReconnect bool) error {
 	defer client.Close()
+
+	router := newMessageRouter(topics)
+
+	// Log what we're streaming.
+	names := make([]string, len(topics))
+	for i, st := range topics {
+		names[i] = st.dataType
+	}
+	log.Info("[massive] streaming %v on a single connection", names)
+
+	// For each dynamic tick topic: register this fresh client and immediately
+	// replay the current desired set onto it (the connection was established
+	// with an empty tick subscription). Deregister when the connection ends so
+	// the control loop skips edge events until the next reconnect replays.
+	for _, st := range topics {
+		if st.dynamic == nil {
+			continue
+		}
+		dt := *st.dynamic
+		mf.dynClients.set(dt, client)
+		mf.replaceSubscriptions(client, dt, mf.subMgr.Active(dt))
+		defer mf.dynClients.clear(dt)
+	}
 
 	// On reconnect, backfill any data gap in the background.
 	if isReconnect && len(mf.config.QueryStart) > 0 && !utils.InstanceConfig.NoBackfill {
@@ -395,23 +546,221 @@ func (mf *MassiveFetcher) stream(
 			// was cancelled (e.g., backfill detected HTTP 401 first).
 			select {
 			case err := <-client.Err():
-				log.Error("[massive] %s error during shutdown: %v", dataType, err)
+				log.Error("[massive] error during shutdown: %v", err)
 			default:
 			}
-			log.Info("[massive] stopping stream for %s", dataType)
+			log.Info("[massive] stopping stream")
 			return nil
 		case <-client.Done():
 			// Connection lost. Retrieve the error.
 			select {
 			case err := <-client.Err():
-				return fmt.Errorf("fatal error on %s: %w", dataType, err)
+				return fmt.Errorf("fatal stream error: %w", err)
 			default:
-				return fmt.Errorf("connection closed unexpectedly for %s", dataType)
+				return fmt.Errorf("connection closed unexpectedly")
 			}
 		case msg := <-client.Output():
-			handler(msg)
+			router.dispatch(msg)
 		}
 	}
+}
+
+// messageRouter dispatches each incoming WebSocket message to the handler for
+// its event type. The single multiplexed socket carries A/AM/T/Q events, so the
+// "ev" field identifies which configured handler should process it.
+type messageRouter struct {
+	byEvent map[string]func([]byte)
+}
+
+// evHeader is the minimal envelope used to read just the event-type tag.
+type evHeader struct {
+	Ev string `json:"ev"`
+}
+
+// newMessageRouter builds an ev→handler map from the configured topics. The
+// wire event type matches the topic prefix (A, AM, T, Q).
+func newMessageRouter(topics []streamTopic) *messageRouter {
+	byEvent := make(map[string]func([]byte), len(topics))
+	for _, st := range topics {
+		byEvent[st.topic.Prefix()] = st.handler
+	}
+	return &messageRouter{byEvent: byEvent}
+}
+
+// dispatch routes a single message to its handler based on the "ev" field.
+func (r *messageRouter) dispatch(msg []byte) {
+	var h evHeader
+	if err := jsonAPI.Unmarshal(msg, &h); err != nil {
+		log.Warn("[massive] could not read event type from message: %v", err)
+		return
+	}
+	handler, ok := r.byEvent[h.Ev]
+	if !ok {
+		// Unconfigured event type (e.g., a status frame that slipped through,
+		// or a channel we don't handle). Ignore quietly.
+		return
+	}
+	handler(msg)
+}
+
+// runControlLoop is the single goroutine that drives dynamic tick subscriptions
+// on the shared client. It consumes the manager's single Change channel and
+// applies each event to the connection using the event's DataType→topic mapping
+// (edge-triggered), with a slow reconcile sweep as a level-fallback safety net.
+// There is exactly ONE such goroutine for the whole worker — a Go channel
+// delivers each value to one receiver, so a second consumer would steal events.
+func (mf *MassiveFetcher) runControlLoop() {
+	defer mf.wg.Done()
+
+	changes := mf.subMgr.Changes()
+	ticker := time.NewTicker(reconcileInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-mf.ctx.Done():
+			return
+		case chg := <-changes: // edge (primary path)
+			client := mf.dynClients.get(chg.DataType)
+			if client == nil {
+				// Connection is down/mid-reconnect; the post-reconnect replay
+				// will apply the current Active() set.
+				continue
+			}
+			topic := topicFor(chg.DataType)
+			var err error
+			if chg.Active {
+				err = client.AddTickers(topic, chg.Symbol)
+			} else {
+				err = client.RemoveTickers(topic, chg.Symbol)
+			}
+			if err != nil {
+				// Intentionally logged-and-continued: the reconcile sweep is the
+				// backstop. A wedged/closed client converges on the next replay.
+				log.Warn("[massive] control: %s %s/%s failed: %v",
+					actionLabel(chg.Active), chg.Symbol, chg.DataType, err)
+			}
+		case <-ticker.C: // level fallback (safety net)
+			for _, dt := range mf.enabledTickTypes {
+				if client := mf.dynClients.get(dt); client != nil {
+					mf.replaceSubscriptions(client, dt, mf.subMgr.Active(dt))
+				}
+			}
+		}
+	}
+}
+
+func actionLabel(active bool) string {
+	if active {
+		return "subscribe"
+	}
+	return "unsubscribe"
+}
+
+// replaceSubscriptions makes the client's live subscription for dt match want
+// exactly. It diffs against the client's retained set and issues the minimal
+// add/remove. Used for the post-reconnect replay and the periodic reconcile.
+func (mf *MassiveFetcher) replaceSubscriptions(client *ws.Client, dt subscription.DataType, want []string) {
+	topic := topicFor(dt)
+	have := client.RetainedTickers(topic)
+
+	wantSet := make(map[string]struct{}, len(want))
+	for _, s := range want {
+		wantSet[s] = struct{}{}
+	}
+	haveSet := make(map[string]struct{}, len(have))
+	for _, s := range have {
+		haveSet[s] = struct{}{}
+	}
+
+	var toAdd, toRemove []string
+	for s := range wantSet {
+		if _, ok := haveSet[s]; !ok {
+			toAdd = append(toAdd, s)
+		}
+	}
+	for s := range haveSet {
+		if _, ok := wantSet[s]; !ok {
+			toRemove = append(toRemove, s)
+		}
+	}
+
+	if len(toAdd) > 0 {
+		if err := client.AddTickers(topic, toAdd...); err != nil {
+			log.Warn("[massive] control: reconcile add %v on %s failed: %v", toAdd, dt, err)
+		}
+	}
+	if len(toRemove) > 0 {
+		if err := client.RemoveTickers(topic, toRemove...); err != nil {
+			log.Warn("[massive] control: reconcile remove %v on %s failed: %v", toRemove, dt, err)
+		}
+	}
+}
+
+// --- SubscriptionController implementation (Approach B) ---
+
+// Subscribe acquires a runtime subscription for symbol on each named data type.
+func (mf *MassiveFetcher) Subscribe(symbol string, dataTypes []string) error {
+	if mf.subMgr == nil {
+		return fmt.Errorf("dynamic subscriptions not enabled (set dynamic_ticks: true)")
+	}
+	dts, err := mf.parseDataTypes(dataTypes)
+	if err != nil {
+		return err
+	}
+	for _, dt := range dts {
+		if _, err := mf.subMgr.Acquire(symbol, dt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Unsubscribe releases a runtime subscription for symbol on each named data type.
+func (mf *MassiveFetcher) Unsubscribe(symbol string, dataTypes []string) error {
+	if mf.subMgr == nil {
+		return fmt.Errorf("dynamic subscriptions not enabled (set dynamic_ticks: true)")
+	}
+	dts, err := mf.parseDataTypes(dataTypes)
+	if err != nil {
+		return err
+	}
+	for _, dt := range dts {
+		mf.subMgr.Release(symbol, dt)
+	}
+	return nil
+}
+
+// ActiveSubscriptions returns the current intended subscription set as
+// symbol -> data types.
+func (mf *MassiveFetcher) ActiveSubscriptions() map[string][]string {
+	out := map[string][]string{}
+	if mf.subMgr == nil {
+		return out
+	}
+	for _, dt := range subscription.AllDataTypes {
+		for _, sym := range mf.subMgr.Active(dt) {
+			out[sym] = append(out[sym], dt.String())
+		}
+	}
+	return out
+}
+
+// parseDataTypes converts the wire data-type names to DataTypes, erroring on
+// any unrecognized name (no silent drop).
+func (mf *MassiveFetcher) parseDataTypes(names []string) ([]subscription.DataType, error) {
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no data types provided")
+	}
+	out := make([]subscription.DataType, 0, len(names))
+	for _, n := range names {
+		dt, ok := subscription.ParseDataType(n)
+		if !ok {
+			return nil, fmt.Errorf("unknown data type %q: must be one of trades, quotes", n)
+		}
+		out = append(out, dt)
+	}
+	return out, nil
 }
 
 // nextPreMarketOpen returns 3:58 AM ET on the next applicable trading day.

@@ -55,6 +55,10 @@ var (
 	ErrConnectionLimit = errors.New("connection limit exceeded")
 )
 
+// errConnClosed is returned to control callers (UpdateSubscription) when the
+// connection is gone before/while their control frame could be written.
+var errConnClosed = errors.New("connection closed")
+
 // Feed is the WebSocket server URL to connect to.
 type Feed string
 
@@ -73,8 +77,10 @@ const (
 	StocksQuotes
 )
 
-// prefix returns the subscription prefix for a topic (e.g., "AM" for minute aggs).
-func (t Topic) prefix() string {
+// Prefix returns the subscription/event prefix for a topic (e.g., "AM" for
+// minute aggs). It is also the "ev" field value the server stamps on each
+// streaming message, so callers can route a multiplexed stream by topic.
+func (t Topic) Prefix() string {
 	switch t {
 	case StocksSecAggs:
 		return "A"
@@ -110,8 +116,9 @@ func (t Topic) String() string {
 type action string
 
 const (
-	actionAuth      action = "auth"
-	actionSubscribe action = "subscribe"
+	actionAuth        action = "auth"
+	actionSubscribe   action = "subscribe"
+	actionUnsubscribe action = "unsubscribe"
 )
 
 // controlMessage is the JSON structure for auth, subscribe, and status messages.
@@ -125,16 +132,37 @@ type controlMessage struct {
 
 // --- Client ---
 
+// controlReq is a request to write a control frame (subscribe/unsubscribe) on
+// the live connection. It is sent on ctrlCh and serviced by writeLoop, keeping
+// the write side single-goroutine.
+type controlReq struct {
+	act    action
+	params string
+	// result receives exactly one value: the result of writing the control
+	// frame (nil on success, non-nil on write error). It MUST be created
+	// buffered with capacity 1 by the sender so that writeLoop's single send
+	// never blocks — even if the caller has already abandoned the request
+	// (e.g. timed out or saw done close). Confirmation of the server's
+	// "success" status is handled asynchronously by handleStreamingStatus.
+	result chan error
+}
+
 // Client is a WebSocket client for the Massive real-time data API.
-// It is not safe for concurrent use — callers should use one Client per
-// goroutine and create a new Client for each connection attempt.
+//
+// After Connect(), the client is safe for concurrent UpdateSubscription /
+// AddTickers / RemoveTickers calls: these are serialized via ctrlCh (writes
+// flow through the single writeLoop goroutine) and subMu (guards the retained
+// subscription set). Output / Err / Done / Close behave as before.
 type Client struct {
 	apiKey string
 	url    string
 
 	conn *websocket.Conn
 
-	subs []subscription // registered subscriptions
+	subMu sync.Mutex     // guards subs (mutated at runtime by UpdateSubscription)
+	subs  []subscription // registered subscriptions
+
+	ctrlCh chan controlReq // live control writes, drained by writeLoop
 
 	outCh chan json.RawMessage // data messages (buffered)
 	errCh chan error           // fatal errors (buffered, size 1)
@@ -155,6 +183,7 @@ func New(apiKey string, feed Feed) *Client {
 	return &Client{
 		apiKey: apiKey,
 		url:    url,
+		ctrlCh: make(chan controlReq, 64),
 		outCh:  make(chan json.RawMessage, 100000),
 		errCh:  make(chan error, 1),
 		done:   make(chan struct{}),
@@ -167,7 +196,122 @@ func (c *Client) Subscribe(topic Topic, tickers ...string) {
 	if len(tickers) == 0 {
 		tickers = []string{"*"}
 	}
+	c.subMu.Lock()
 	c.subs = append(c.subs, subscription{topic: topic, tickers: tickers})
+	c.subMu.Unlock()
+}
+
+// UpdateSubscription adds or removes tickers for a topic on the LIVE
+// connection. Safe to call after Connect() and concurrently. It updates the
+// retained subscription set (so a later reconnect replays the current set) and
+// writes the control frame. Returns an error if the connection is closed or the
+// write fails. A nil return means the frame was written successfully; it does
+// NOT mean the server has acked the (un)subscribe (acks are handled
+// asynchronously and logged, see handleStreamingStatus).
+func (c *Client) UpdateSubscription(act action, topic Topic, tickers ...string) error {
+	if len(tickers) == 0 {
+		return nil
+	}
+
+	// 1. Update the retained set so a reconnect replays the current state.
+	c.subMu.Lock()
+	switch act {
+	case actionSubscribe:
+		c.mergeTickersLocked(topic, tickers)
+	case actionUnsubscribe:
+		c.pruneTickersLocked(topic, tickers)
+	}
+	c.subMu.Unlock()
+
+	// 2. Build params.
+	params := buildSubParams(topic, tickers)
+
+	// 3. Hand the control write to writeLoop and wait for the outcome. The
+	// result channel is buffered size 1 so writeLoop's send never blocks even
+	// if we stop waiting first (on done or timeout).
+	req := controlReq{act: act, params: params, result: make(chan error, 1)}
+
+	timer := time.NewTimer(writeWait)
+	defer timer.Stop()
+
+	select {
+	case c.ctrlCh <- req:
+	case <-c.done:
+		return errConnClosed
+	case <-timer.C:
+		return fmt.Errorf("control write timed out queueing %s", act)
+	}
+
+	select {
+	case err := <-req.result:
+		return err
+	case <-c.done:
+		return errConnClosed
+	case <-timer.C:
+		return fmt.Errorf("control write timed out awaiting %s", act)
+	}
+}
+
+// AddTickers subscribes additional tickers for a topic on the live connection.
+func (c *Client) AddTickers(topic Topic, tickers ...string) error {
+	return c.UpdateSubscription(actionSubscribe, topic, tickers...)
+}
+
+// RemoveTickers unsubscribes tickers for a topic on the live connection.
+func (c *Client) RemoveTickers(topic Topic, tickers ...string) error {
+	return c.UpdateSubscription(actionUnsubscribe, topic, tickers...)
+}
+
+// mergeTickersLocked adds tickers to the retained subscription for topic.
+// Caller must hold subMu.
+func (c *Client) mergeTickersLocked(topic Topic, tickers []string) {
+	idx := -1
+	for i := range c.subs {
+		if c.subs[i].topic == topic {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		c.subs = append(c.subs, subscription{topic: topic, tickers: append([]string(nil), tickers...)})
+		return
+	}
+	existing := make(map[string]struct{}, len(c.subs[idx].tickers))
+	for _, t := range c.subs[idx].tickers {
+		existing[t] = struct{}{}
+	}
+	for _, t := range tickers {
+		if _, ok := existing[t]; !ok {
+			c.subs[idx].tickers = append(c.subs[idx].tickers, t)
+			existing[t] = struct{}{}
+		}
+	}
+}
+
+// pruneTickersLocked removes tickers from the retained subscription for topic.
+// Caller must hold subMu.
+func (c *Client) pruneTickersLocked(topic Topic, tickers []string) {
+	idx := -1
+	for i := range c.subs {
+		if c.subs[i].topic == topic {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return
+	}
+	remove := make(map[string]struct{}, len(tickers))
+	for _, t := range tickers {
+		remove[t] = struct{}{}
+	}
+	kept := c.subs[idx].tickers[:0]
+	for _, t := range c.subs[idx].tickers {
+		if _, ok := remove[t]; !ok {
+			kept = append(kept, t)
+		}
+	}
+	c.subs[idx].tickers = kept
 }
 
 // Connect dials the server and performs the full handshake synchronously:
@@ -215,8 +359,15 @@ func (c *Client) Connect() error {
 		return err // ErrAuthFailed or ErrConnectionLimit are returned unwrapped
 	}
 
-	// Send subscriptions and wait for each confirmation.
-	for _, sub := range c.subs {
+	// Send subscriptions and wait for each confirmation. Snapshot the retained
+	// set under subMu (it may be mutated concurrently by UpdateSubscription
+	// once streaming begins, but during the handshake we are the only writer;
+	// the lock keeps the read race-free).
+	c.subMu.Lock()
+	subsSnapshot := make([]subscription, len(c.subs))
+	copy(subsSnapshot, c.subs)
+	c.subMu.Unlock()
+	for _, sub := range subsSnapshot {
 		params := buildSubParams(sub.topic, sub.tickers)
 		if err := c.sendControl(actionSubscribe, params); err != nil {
 			c.conn.Close()
@@ -243,6 +394,22 @@ func (c *Client) Connect() error {
 	go c.readLoop()
 	go c.writeLoop()
 
+	return nil
+}
+
+// RetainedTickers returns a copy of the retained tickers for a topic — the set
+// that will be replayed on reconnect. It reflects runtime UpdateSubscription
+// adds/removes. Returns nil if the topic has no subscription.
+func (c *Client) RetainedTickers(topic Topic) []string {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	for i := range c.subs {
+		if c.subs[i].topic == topic {
+			out := make([]string, len(c.subs[i].tickers))
+			copy(out, c.subs[i].tickers)
+			return out
+		}
+	}
 	return nil
 }
 
@@ -336,7 +503,7 @@ func (c *Client) expectStatus(want string) error {
 // buildSubParams creates the comma-separated subscription parameter string
 // (e.g., "AM.AAPL,AM.MSFT" or "AM.*").
 func buildSubParams(topic Topic, tickers []string) string {
-	prefix := topic.prefix()
+	prefix := topic.Prefix()
 	parts := make([]string, len(tickers))
 	for i, t := range tickers {
 		parts[i] = prefix + "." + t
@@ -419,18 +586,26 @@ func (c *Client) handleStreamingStatus(cm controlMessage) {
 		c.pushErr(ErrConnectionLimit)
 		c.conn.Close() // force readLoop to exit
 	case "error":
-		log.Error("[massive/ws] server error: %s", cm.Message)
+		log.Error("[massive/ws] server error: %s (params=%q)", cm.Message, cm.Params)
 	case "success":
-		log.Debug("[massive/ws] %s", cm.Message)
+		log.Debug("[massive/ws] %s (params=%q)", cm.Message, cm.Params)
 	default:
 		log.Info("[massive/ws] status %q: %s", cm.Status, cm.Message)
 	}
 }
 
-// writeLoop sends periodic pings to keep the connection alive.
+// writeLoop sends periodic pings to keep the connection alive and drains
+// control requests (subscribe/unsubscribe) so all writes flow through a single
+// goroutine. On exit it fails any pending control requests so their callers
+// never park forever (see the TOCTOU note in UpdateSubscription).
 func (c *Client) writeLoop() {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
+	// On exit, fail any control requests still buffered in ctrlCh. done is
+	// closed only by readLoop, so there is a window where writeLoop has
+	// returned (e.g. on its own write failure) but done is not yet closed; this
+	// drain answers those requests immediately rather than letting them hang.
+	defer c.failPendingControl()
 
 	for {
 		select {
@@ -441,6 +616,29 @@ func (c *Client) writeLoop() {
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
+		case req := <-c.ctrlCh:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			err := c.sendControl(req.act, req.params)
+			// Never blocks: result is buffered size 1, so this succeeds even
+			// if the caller already gave up waiting.
+			req.result <- err
+			if err != nil {
+				return // write failure tears down like a ping failure
+			}
+		}
+	}
+}
+
+// failPendingControl drains ctrlCh non-blockingly and replies to each pending
+// request with errConnClosed. Each result is buffered size 1, so every reply
+// succeeds without blocking.
+func (c *Client) failPendingControl() {
+	for {
+		select {
+		case req := <-c.ctrlCh:
+			req.result <- errConnClosed
+		default:
+			return
 		}
 	}
 }

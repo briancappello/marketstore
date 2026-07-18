@@ -5,7 +5,65 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/alpacahq/marketstore/v4/contrib/massive/mapping"
 )
+
+// tradeSchemaColumns is the full on-disk TRADE bucket column set (mkts schema).
+var tradeSchemaColumns = []string{
+	"Epoch", "Nanoseconds", "Price", "Size", "Exchange", "TapeID",
+	"Cond1", "Cond2", "Cond3", "Cond4", "Correction",
+}
+
+// quoteSchemaColumns is the full on-disk QUOTE bucket column set (mkts schema).
+var quoteSchemaColumns = []string{
+	"Epoch", "Nanoseconds", "BidPrice", "AskPrice", "BidSize", "AskSize",
+	"BidExchange", "AskExchange", "Cond", "Cond2", "Indicators",
+}
+
+// TestTradeModelHasFullSchema verifies a live trade message produces a CSM with
+// every column the 1Sec/TRADE bucket requires (the bug was a reduced column set
+// that failed schema merge on write).
+func TestTradeModelHasFullSchema(t *testing.T) {
+	t.Parallel()
+
+	tr := Trade{
+		Symbol: "MSFT", Exchange: 4, Tape: 3,
+		Price: 114.125, Size: 100, Conditions: []int{0, 12},
+		Timestamp: 1536036818784,
+	}
+	model := buildTradeModel(&tr, mapping.StaticExchangeMap())
+	csm := *model.BuildCsm()
+
+	require.Len(t, csm, 1)
+	for _, cs := range csm {
+		for _, col := range tradeSchemaColumns {
+			assert.Contains(t, cs.GetColumnNames(), col, "TRADE column %q must be present", col)
+		}
+	}
+}
+
+// TestQuoteModelHasFullSchema verifies a live quote message produces a CSM with
+// every column the 1Sec/QUOTE bucket requires.
+func TestQuoteModelHasFullSchema(t *testing.T) {
+	t.Parallel()
+
+	q := Quote{
+		Symbol: "MSFT", BidExchange: 4, AskExchange: 7,
+		BidPrice: 114.125, AskPrice: 114.128, BidSize: 100, AskSize: 160,
+		Condition: 0, Timestamp: 1536036818784,
+	}
+	model := buildQuoteModel(&q, mapping.StaticExchangeMap())
+	csm := *model.BuildCsm()
+
+	require.Len(t, csm, 1)
+	for _, cs := range csm {
+		for _, col := range quoteSchemaColumns {
+			assert.Contains(t, cs.GetColumnNames(), col, "QUOTE column %q must be present", col)
+		}
+	}
+}
 
 func TestAggregateUnmarshal(t *testing.T) {
 	t.Parallel()

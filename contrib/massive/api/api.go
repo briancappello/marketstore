@@ -17,10 +17,12 @@ import (
 )
 
 const (
-	aggsURL    = "%s/v2/aggs/ticker/%s/range/%d/%s/%s/%s"
-	tradesURL  = "%s/v3/trades/%s"
-	quotesURL  = "%s/v3/quotes/%s"
-	tickersURL = "%s/v3/reference/tickers"
+	aggsURL      = "%s/v2/aggs/ticker/%s/range/%d/%s/%s/%s"
+	tradesURL    = "%s/v3/trades/%s"
+	quotesURL    = "%s/v3/quotes/%s"
+	tickersURL   = "%s/v3/reference/tickers"
+	exchangesURL = "%s/v3/reference/exchanges"
+	overviewURL  = "%s/v3/reference/tickers/%s"
 
 	retryCount     = 10
 	defaultTimeout = 10 * time.Second
@@ -352,6 +354,100 @@ func ListTickers(client *http.Client) ([]Ticker, error) {
 	}
 
 	return allTickers, nil
+}
+
+// --- Exchanges ---
+
+// ListExchangesResponse is the response from GET /v3/reference/exchanges.
+type ListExchangesResponse struct {
+	Results   []Exchange `json:"results"`
+	Status    string     `json:"status"`
+	Count     int        `json:"count"`
+	RequestID string     `json:"request_id"`
+}
+
+// Exchange is a single entry in the exchanges reference list.
+// ParticipantID is the ASCII char SIPs use to represent this exchange.
+type Exchange struct {
+	ID            int    `json:"id"`
+	Type          string `json:"type"` // "exchange", "TRF", or "SIP"
+	AssetClass    string `json:"asset_class"`
+	Locale        string `json:"locale"`
+	Name          string `json:"name"`
+	Acronym       string `json:"acronym"`
+	MIC           string `json:"mic"`
+	OperatingMIC  string `json:"operating_mic"`
+	ParticipantID string `json:"participant_id"`
+	URL           string `json:"url"`
+}
+
+// ListExchanges fetches the stock exchange reference list (GET
+// /v3/reference/exchanges). This endpoint is not paginated.
+func ListExchanges(client *http.Client) ([]Exchange, error) {
+	u, err := url.Parse(fmt.Sprintf(exchangesURL, baseURL))
+	if err != nil {
+		return nil, fmt.Errorf("parse exchanges URL: %w", err)
+	}
+
+	q := u.Query()
+	q.Set("apiKey", apiKey)
+	q.Set("asset_class", "stocks")
+	q.Set("locale", "us")
+	u.RawQuery = q.Encode()
+
+	body, err := download(client, u.String())
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &ListExchangesResponse{}
+	if err := json.Unmarshal(body, resp); err != nil {
+		return nil, fmt.Errorf("unmarshal exchanges: %w", err)
+	}
+
+	return resp.Results, nil
+}
+
+// --- Ticker Overview (round lot) ---
+
+// TickerOverviewResponse is the response from GET /v3/reference/tickers/{ticker}.
+type TickerOverviewResponse struct {
+	Results   TickerOverview `json:"results"`
+	Status    string         `json:"status"`
+	RequestID string         `json:"request_id"`
+}
+
+// TickerOverview holds the subset of the Ticker Overview we use.
+type TickerOverview struct {
+	Ticker   string `json:"ticker"`
+	Name     string `json:"name"`
+	RoundLot int    `json:"round_lot"`
+}
+
+// GetTickerRoundLot fetches the current round lot for a ticker via the Ticker
+// Overview endpoint. Returns 0 (and no error) when the field is absent so the
+// caller can apply its own default.
+func GetTickerRoundLot(client *http.Client, ticker string) (int, error) {
+	u, err := url.Parse(fmt.Sprintf(overviewURL, baseURL, ticker))
+	if err != nil {
+		return 0, fmt.Errorf("parse overview URL: %w", err)
+	}
+
+	q := u.Query()
+	q.Set("apiKey", apiKey)
+	u.RawQuery = q.Encode()
+
+	body, err := download(client, u.String())
+	if err != nil {
+		return 0, err
+	}
+
+	resp := &TickerOverviewResponse{}
+	if err := json.Unmarshal(body, resp); err != nil {
+		return 0, fmt.Errorf("unmarshal ticker overview: %w", err)
+	}
+
+	return resp.Results.RoundLot, nil
 }
 
 // --- helpers ---

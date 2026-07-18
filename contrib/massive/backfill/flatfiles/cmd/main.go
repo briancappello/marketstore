@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/flatfiles"
+	"github.com/alpacahq/marketstore/v4/contrib/massive/mapping"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/massiveconfig"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/internal/di"
@@ -80,7 +82,7 @@ func (f *fromFlags) Set(value string) error {
 	}
 
 	if _, ok := flatFileDataTypes[key]; !ok {
-		return fmt.Errorf("unsupported data type %q: flat files support 1D, 1Min, and 1D-index", key)
+		return fmt.Errorf("unsupported data type %q: flat files support 1D, 1Min, 1D-index, trades, and quotes", key)
 	}
 
 	(*f)[key] = dateStr
@@ -100,10 +102,15 @@ var (
 	noRPC            bool
 	pprofAddr        string
 	progressMode     string
+	assumeYes        bool
 
 	// writeConcurrencySet reports whether -write-concurrency was passed
 	// explicitly on the command line.
 	writeConcurrencySet bool
+
+	// symbolsIsWildcard reports whether the resolved -symbols input was a glob
+	// pattern (e.g. "*"), used to gate full-universe tick backfills.
+	symbolsIsWildcard bool
 )
 
 func parseFlags() {
@@ -132,6 +139,10 @@ func parseFlags() {
 		"address for pprof HTTP server (e.g., localhost:6060). Disabled if empty.")
 	flag.StringVar(&progressMode, "progress", "auto",
 		"interactive progress bar with ETA: auto (only when stderr is a terminal), always, or never")
+	flag.BoolVar(&assumeYes, "yes", false,
+		"assume yes to confirmation prompts (required for full-universe '*' tick backfills in non-interactive runs)")
+	flag.BoolVar(&assumeYes, "y", false, "alias for --yes")
+	flag.BoolVar(&assumeYes, "force", false, "alias for --yes")
 
 	flag.Parse()
 
@@ -249,9 +260,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	// If any tick data type is requested, build the shared exchange map (one
+	// API call) and a per-symbol round_lot resolver, and gate full-universe
+	// '*' backfills.
+	var tickRes *tickResources
+	for key := range fromDates {
+		if flatfiles.IsTickKey(key) {
+			if symbolsIsWildcard && !confirmFullUniverse() {
+				log.Error("[flatfiles] full-universe tick backfill declined; aborting")
+				if instanceMeta != nil {
+					instanceMeta.WALFile.Shutdown()
+				}
+				os.Exit(1)
+			}
+			tickRes = newTickResources(apiKey)
+			break
+		}
+	}
+
 	startTime := time.Now()
 
-	// Process each data type (1D, 1Min, 1D-index).
+	// Process each data type (1D, 1Min, 1D-index, trades, quotes).
 	for key, startDateStr := range fromDates {
 		select {
 		case <-ctx.Done():
@@ -275,7 +304,11 @@ func main() {
 			continue
 		}
 
-		runFlatFileBackfill(ctx, s3Client, w, symbolSet, key, ffType, configStart, endDate, parallelism)
+		if ffType.Tick {
+			runTickBackfill(ctx, s3Client, w, symbolSet, key, ffType, configStart, endDate, parallelism, tickRes)
+		} else {
+			runFlatFileBackfill(ctx, s3Client, w, symbolSet, key, ffType, configStart, endDate, parallelism)
+		}
 	}
 
 	if instanceMeta != nil {
@@ -316,6 +349,137 @@ func runFlatFileBackfill(
 	}
 }
 
+// tickResources holds the shared exchange map and round_lot resolver used by
+// tick (trades/quotes) backfills.
+type tickResources struct {
+	exMap    *mapping.ExchangeMap
+	roundLot func(string) int
+}
+
+// newTickResources builds the exchange map (one API call, static fallback on
+// error) and a cached per-symbol round_lot resolver. If no API key is
+// available, the static exchange table is used and round_lot defaults to 100.
+func newTickResources(apiKey string) *tickResources {
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
+			MaxConnsPerHost:     defaultMaxConnsPerHost,
+		},
+		Timeout: 30 * time.Second,
+	}
+
+	var exMap *mapping.ExchangeMap
+	if apiKey != "" {
+		api.SetAPIKey(apiKey)
+		exMap = mapping.LoadExchangeMap(client)
+	} else {
+		log.Warn("[flatfiles] no API key; using static exchange table and default round_lot=100")
+		exMap = mapping.StaticExchangeMap()
+	}
+
+	var mu sync.Mutex
+	cache := make(map[string]int)
+	roundLot := func(sym string) int {
+		mu.Lock()
+		if v, ok := cache[sym]; ok {
+			mu.Unlock()
+			return v
+		}
+		mu.Unlock()
+
+		rl := 100
+		if apiKey != "" {
+			if v, err := api.GetTickerRoundLot(client, sym); err == nil && v > 0 {
+				rl = v
+			}
+		}
+
+		mu.Lock()
+		cache[sym] = rl
+		mu.Unlock()
+		return rl
+	}
+
+	return &tickResources{exMap: exMap, roundLot: roundLot}
+}
+
+// confirmFullUniverse gates a full-universe ('*') tick backfill. It returns
+// true if the run may proceed. With --yes it always proceeds. Otherwise, if
+// stdin is not a TTY it refuses (returns false) without blocking; if stdin is a
+// TTY it prompts interactively.
+func confirmFullUniverse() bool {
+	if assumeYes {
+		return true
+	}
+
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		log.Error("[flatfiles] full-universe ('*') tick backfill requested without --yes in a " +
+			"non-interactive session. Tick volumes are enormous (~155M trades / ~497M quotes per " +
+			"day). Re-run with --yes to proceed.")
+		return false
+	}
+
+	fmt.Fprintln(os.Stderr,
+		"WARNING: full-universe ('*') tick backfill. Tick volumes are enormous "+
+			"(~155M trades / ~497M quotes per day) and this is not optimized for bulk history.")
+	fmt.Fprint(os.Stderr, "Proceed? [y/N]: ")
+	var resp string
+	if _, err := fmt.Fscanln(os.Stdin, &resp); err != nil {
+		return false
+	}
+	resp = strings.ToLower(strings.TrimSpace(resp))
+	return resp == "y" || resp == "yes"
+}
+
+// runTickBackfill processes all dates in [startDate, endDate] for a tick data
+// type (trades/quotes), streaming per-symbol writes to MarketStore.
+func runTickBackfill(
+	ctx context.Context,
+	s3Client *flatfiles.S3Client,
+	w backfill.Writer,
+	symbolSet map[string]bool,
+	dataType string, // "trades" | "quotes"
+	ffType flatfiles.FlatFileType,
+	startDate, endDate time.Time,
+	parallelism int,
+	res *tickResources,
+) {
+	dates := flatfiles.MarketDays(startDate, endDate)
+	if len(dates) == 0 {
+		log.Info("[flatfiles] no market days in range for %s", dataType)
+		return
+	}
+
+	log.Info("[flatfiles] backfilling %s: %d market days from %s to %s for %d symbols",
+		dataType, len(dates), startDate.Format(dateFormat), endDate.Format(dateFormat), len(symbolSet))
+
+	var roundLot func(string) int
+	exMap := mapping.StaticExchangeMap()
+	if res != nil {
+		exMap = res.exMap
+		roundLot = res.roundLot
+	}
+
+	// Tick downloads are large; use a lower default parallelism unless the
+	// user explicitly raised it.
+	tickParallelism := parallelism
+	if tickParallelism > 4 {
+		tickParallelism = 4
+	}
+
+	_, _, err := flatfiles.BackfillTicks(ctx, s3Client, w, symbolSet, dataType,
+		ffType.S3Prefix, ffType.S3DataType, exMap, roundLot, dates, flatfiles.BackfillConfig{
+			Parallelism:      tickParallelism,
+			WriteConcurrency: writeConcurrency,
+			WriteBufferSize:  writeBuffer,
+			ProgressBar:      progressMode,
+		})
+	if err != nil && ctx.Err() == nil {
+		log.Warn("[flatfiles] %s backfill encountered errors: %v", dataType, err)
+	}
+}
+
 // applyConfigDefaults applies defaults from the massive bgworker config
 // for any flags that weren't explicitly set.
 func applyConfigDefaults(cfg *massiveconfig.FetcherConfig) {
@@ -337,7 +501,7 @@ func applyConfigDefaults(cfg *massiveconfig.FetcherConfig) {
 	if len(fromDates) == 0 && len(cfg.QueryStart) > 0 {
 		for key, dateStr := range cfg.QueryStart {
 			if _, ok := flatFileDataTypes[key]; !ok {
-				continue // skip non-bar types like "trades", "quotes"
+				continue // skip unsupported data types
 			}
 			if _, err := time.Parse(dateFormat, dateStr); err != nil {
 				log.Warn("[flatfiles] invalid query_start date %q for %s in config, skipping", dateStr, key)
@@ -413,6 +577,11 @@ func resolveSymbolInfos(apiKey string, cfg *massiveconfig.FetcherConfig) []massi
 //   - A single symbol: "AAPL" -> used directly
 //   - A glob pattern: "*" or "AA*" -> resolved via the Massive ticker API
 func resolveSymbolsFromInput(apiKey, input string) []massiveconfig.SymbolInfo {
+	if strings.ContainsAny(input, "*?[") {
+		// A glob pattern (but not a brace list) is treated as a wildcard for
+		// the purpose of the full-universe tick gate.
+		symbolsIsWildcard = true
+	}
 	if !strings.ContainsAny(input, "*?{[") {
 		parts := strings.Split(input, ",")
 		result := make([]massiveconfig.SymbolInfo, 0, len(parts))
