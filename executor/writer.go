@@ -210,15 +210,23 @@ func WriteBufferToFileIndirect(fp stdio.ReadWriteSeeker, buffer wal.OffsetIndexB
 		dataLen = int64(len(dataToBeWritten))
 	}
 
-	// Determine if this is a continuation write
-	endOfCurrentBucketData := currentRecInfo[0].Offset + currentRecInfo[0].Len
+	// Always append the (re)written block at the end of the file rather than
+	// overwriting the previous block in place.
+	//
+	// Variable blocks are append-only: a continuation write reads the old block,
+	// prepends it to the new data, and rewrites the WHOLE block (already done
+	// above), then publishes it by updating the 24-byte index slot last. Writing
+	// the new block at EOF — instead of overwriting the old block's bytes —
+	// guarantees that a concurrent reader which already captured the OLD index
+	// slot {offset, len} still reads an intact, decodable block at that offset.
+	//
+	// Overwriting in place (the previous optimization, only valid when the block
+	// was the last in the file) mutated bytes a reader could be mid-read on,
+	// producing "snappy: corrupt input" / torn reads. The old block becomes dead
+	// space, which is acceptable: the same recompress-and-rewrite already happens
+	// for any block that is not last in the file, so this changes only the write
+	// location, not the write cost.
 	endOfFileOffset, _ := fp.Seek(0, stdio.SeekEnd)
-	if endOfCurrentBucketData == endOfFileOffset {
-		endOfFileOffset = currentRecInfo[0].Offset
-		if _, err = fp.Seek(endOfFileOffset, stdio.SeekStart); err != nil {
-			return fmt.Errorf("failed to seek endOfFileOffset:%w", err)
-		}
-	}
 
 	/*
 		Sort the data by the timestamp to maintain on-disk sorted order
@@ -311,8 +319,19 @@ func (w *Writer) WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) error {
 
 			var finalShapes []io.DataShape
 			if configSchema != nil {
+				// Variable-length records do not store a separate "Nanoseconds"
+				// column (the sub-second offset is folded into the variable
+				// record index, and it was stripped from the input CSM above).
+				// A config schema may still list it as a logical column, so drop
+				// it here before merging to avoid a spurious "missing required
+				// column" failure on bucket creation.
+				mergeSchema := configSchema
+				if isVariableLength {
+					mergeSchema = schemaWithoutNanoseconds(configSchema)
+				}
+
 				// Merge config schema with input shapes
-				mergedShapes, coercions, mergeErr := io.MergeSchemaWithInput(configSchema, inputShapes)
+				mergedShapes, coercions, mergeErr := io.MergeSchemaWithInput(mergeSchema, inputShapes)
 				if mergeErr != nil {
 					return fmt.Errorf("schema merge for %s: %w", tbk, mergeErr)
 				}
@@ -417,4 +436,23 @@ func getAttrGroupSchemaFromConfig(attrGroupName string) *io.AttrGroupSchema {
 	configTypes[attrGroupName] = cfg
 
 	return io.GetAttrGroupSchema(attrGroupName, configTypes)
+}
+
+// schemaWithoutNanoseconds returns a copy of the schema with any "Nanoseconds"
+// column removed. Variable-length records store the sub-second offset inside the
+// variable record index rather than as a standalone column (WriteCSM strips it
+// from the input CSM), so a config schema that lists "Nanoseconds" must not
+// require it during bucket-creation schema merge.
+func schemaWithoutNanoseconds(schema *io.AttrGroupSchema) *io.AttrGroupSchema {
+	filtered := make([]io.DataShape, 0, len(schema.DataShapes))
+	for _, ds := range schema.DataShapes {
+		if ds.Name == "Nanoseconds" {
+			continue
+		}
+		filtered = append(filtered, ds)
+	}
+	return &io.AttrGroupSchema{
+		DataShapes: filtered,
+		RecordType: schema.RecordType,
+	}
 }

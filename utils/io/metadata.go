@@ -77,6 +77,10 @@ type TimeBucketInfo struct {
 	elementTypes []EnumElementType
 
 	once sync.Once
+	// varRecLenOnce guards the lazy computation of variableRecordLength in
+	// GetVariableRecordLength so concurrent callers (e.g. a writer and a
+	// reader-triggered query on the same bucket) don't race on the field.
+	varRecLenOnce sync.Once
 }
 
 func AlignedSize(unalignedSize int) (alignedSize int) {
@@ -228,10 +232,17 @@ func (f *TimeBucketInfo) GetVariableRecordLength() int32 {
 	const intervalTicksLenBytes = 4
 	f.once.Do(f.initFromFile)
 
-	if f.recordType == VARIABLE && f.variableRecordLength == 0 {
-		// Variable records use the raw element sizes plus a 4-byte trailer for interval ticks
-		f.variableRecordLength = int32(f.getFieldRecordLength()) + intervalTicksLenBytes
-	}
+	// Compute the variable record length exactly once. Guarding with a
+	// sync.Once (rather than the plain `== 0` check + assignment) makes this
+	// safe when a writer and a reader-triggered query touch the same shared
+	// *TimeBucketInfo concurrently.
+	f.varRecLenOnce.Do(func() {
+		if f.recordType == VARIABLE && f.variableRecordLength == 0 {
+			// Variable records use the raw element sizes plus a 4-byte trailer
+			// for interval ticks.
+			f.variableRecordLength = int32(f.getFieldRecordLength()) + intervalTicksLenBytes
+		}
+	})
 	return f.variableRecordLength
 }
 
