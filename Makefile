@@ -1,4 +1,9 @@
-.PHONY: plugins deploy
+.PHONY: plugins deploy external-plugins
+
+# Sibling plugin repos built alongside marketstore. Each must have its own
+# Makefile with an `all` target that produces a .so. Build tags MUST match
+# GO_BUILD_TAGS below, otherwise plugin.Open() fails with a build ID mismatch.
+EXTERNAL_PLUGIN_DIRS := ../marketstore-watchlists
 
 # Build tags applied to every `go` invocation (host binary, plugins, helpers).
 #
@@ -55,6 +60,17 @@ plugins:
 	$(MAKE) -C contrib/streamreplay
 	$(MAKE) -C contrib/watchlist
 	#$(MAKE) -C contrib/xignitefeeder
+	$(MAKE) external-plugins
+
+external-plugins:
+	@for dir in $(EXTERNAL_PLUGIN_DIRS); do \
+		if [ -d "$$dir" ]; then \
+			echo "Building external plugin in $$dir"; \
+			$(MAKE) -C "$$dir"; \
+		else \
+			echo "Skipping external plugin (not found): $$dir"; \
+		fi; \
+	done
 
 fmt:
 	GOFLAGS=$(GOFLAGS) go fmt ./...
