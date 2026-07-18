@@ -58,3 +58,6 @@ Thumbs.db
 # 临时文件
 *.tmp
 *.temp
+
+/probe
+/Conditions & Indicators _ Massive.pdf
