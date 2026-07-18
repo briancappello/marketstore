@@ -30,6 +30,14 @@ func RunBgWorkers(bgWorkers []*utils.BgWorkerSetting) []bgworker.BgWorker {
 				log.Info("Registered watchlist data source from BgWorker %s", bgWorkerSetting.Name)
 			}
 
+			// If the worker implements SubscriptionController, register it as
+			// the frontend's controller so Subscribe RPC calls can drive live
+			// tick subscriptions at runtime.
+			if sc, ok := bgWorker.(bgworker.SubscriptionController); ok {
+				frontend.RegisterSubscriptionController(&subscriptionAdapter{src: sc})
+				log.Info("Registered subscription controller from BgWorker %s", bgWorkerSetting.Name)
+			}
+
 			go bgWorker.Run()
 		}
 	}
@@ -90,6 +98,27 @@ func convertBgRanking(ranking []bgworker.WatchlistRankingEntry) []frontend.Watch
 		}
 	}
 	return entries
+}
+
+// subscriptionAdapter bridges bgworker.SubscriptionController (shared with the
+// plugin) to frontend.SubscriptionController (used by the RPC layer). This runs
+// in the host process. The two interfaces are identical by construction; the
+// indirection exists only because the frontend and plugin packages cannot
+// import each other (same rationale as watchlistAdapter).
+type subscriptionAdapter struct {
+	src bgworker.SubscriptionController
+}
+
+func (a *subscriptionAdapter) Subscribe(symbol string, dataTypes []string) error {
+	return a.src.Subscribe(symbol, dataTypes)
+}
+
+func (a *subscriptionAdapter) Unsubscribe(symbol string, dataTypes []string) error {
+	return a.src.Unsubscribe(symbol, dataTypes)
+}
+
+func (a *subscriptionAdapter) ActiveSubscriptions() map[string][]string {
+	return a.src.ActiveSubscriptions()
 }
 
 func NewBgWorker(s *utils.BgWorkerSetting) bgworker.BgWorker {

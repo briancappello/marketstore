@@ -60,6 +60,23 @@ type WatchlistDataSource interface {
 	AllWatchlistRankings() map[string][]WatchlistRankingEntry
 }
 
+// SubscriptionController is an optional interface a BgWorker can implement to
+// allow the RPC layer to drive live tick subscriptions at runtime. The host
+// checks for this interface after loading the plugin and wires it into the
+// frontend (mirroring WatchlistDataSource).
+type SubscriptionController interface {
+	// Subscribe acquires a runtime subscription for the given symbol on each of
+	// the named data types ("trades", "quotes"). An unrecognized data type
+	// returns an error.
+	Subscribe(symbol string, dataTypes []string) error
+	// Unsubscribe releases a runtime subscription for the given symbol on each
+	// of the named data types.
+	Unsubscribe(symbol string, dataTypes []string) error
+	// ActiveSubscriptions returns the current intended subscription set as a
+	// map of symbol -> data types.
+	ActiveSubscriptions() map[string][]string
+}
+
 // SymbolLoader is an interface to retrieve symbol object from plugin.
 type SymbolLoader interface {
 	LoadSymbol(symbolName string) (interface{}, error)

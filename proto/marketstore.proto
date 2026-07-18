@@ -193,6 +193,25 @@ message ListWatchlistsResponse {
     repeated WatchlistRanking watchlists = 1;
 }
 
+// SubscribeRequest drives a live tick subscription (trades/quotes) for a symbol.
+message SubscribeRequest {
+    string symbol = 1;
+    repeated string data_types = 2; // "trades","quotes"
+    string action = 3;              // "subscribe" | "unsubscribe"
+}
+
+// DataTypeList wraps a repeated string because proto3 maps cannot have a
+// repeated value type.
+message DataTypeList {
+    repeated string data_types = 1;
+}
+
+// SubscribeResponse returns the controller's current intended subscription set
+// (symbol -> data types). It reflects INTENT, not confirmed live streaming.
+message SubscribeResponse {
+    map<string, DataTypeList> active = 1;
+}
+
 service Marketstore {
     rpc Query (MultiQueryRequest) returns (MultiQueryResponse);
     rpc Create (MultiCreateRequest) returns (MultiServerResponse);
@@ -201,4 +220,5 @@ service Marketstore {
     rpc ListSymbols (ListSymbolsRequest) returns (ListSymbolsResponse);
     rpc ServerVersion (ServerVersionRequest) returns (ServerVersionResponse);
     rpc ListWatchlists (ListWatchlistsRequest) returns (ListWatchlistsResponse);
+    rpc Subscribe (SubscribeRequest) returns (SubscribeResponse);
 }

@@ -505,3 +505,48 @@ func convertRankingToProto(name string, entries []WatchlistRankingEntry) *proto.
 		Entries: protoEntries,
 	}
 }
+
+// Subscribe drives a live tick subscription (trades/quotes) for a symbol via
+// the registered SubscriptionController. The returned Active map reflects
+// intent, not confirmed live streaming (see frontend/subscribe.go).
+func (s GRPCService) Subscribe(ctx context.Context, req *proto.SubscribeRequest,
+) (*proto.SubscribeResponse, error) {
+	if atomic.LoadUint32(&Queryable) == 0 {
+		return nil, errNotQueryable
+	}
+
+	controller := GetSubscriptionController()
+	if controller == nil {
+		return nil, fmt.Errorf("dynamic subscriptions not available")
+	}
+
+	if req == nil {
+		return nil, fmt.Errorf("nil request")
+	}
+	if req.Symbol == "" {
+		return nil, fmt.Errorf("symbol is required")
+	}
+	if len(req.DataTypes) == 0 {
+		return nil, fmt.Errorf("data_types is required (e.g. [\"trades\",\"quotes\"])")
+	}
+
+	switch req.Action {
+	case "subscribe":
+		if err := controller.Subscribe(req.Symbol, req.DataTypes); err != nil {
+			return nil, err
+		}
+	case "unsubscribe":
+		if err := controller.Unsubscribe(req.Symbol, req.DataTypes); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("invalid action %q: must be \"subscribe\" or \"unsubscribe\"", req.Action)
+	}
+
+	active := controller.ActiveSubscriptions()
+	out := make(map[string]*proto.DataTypeList, len(active))
+	for sym, dts := range active {
+		out[sym] = &proto.DataTypeList{DataTypes: dts}
+	}
+	return &proto.SubscribeResponse{Active: out}, nil
+}
