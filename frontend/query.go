@@ -76,6 +76,10 @@ func (resp *MultiQueryResponse) ToColumnSeriesMap() (*io.ColumnSeriesMap, error)
 
 	for _, ds := range resp.Responses { // Datasets are packed in a slice, each has a NumpyMultiDataset inside
 		nmds := ds.Result
+		if nmds == nil {
+			// a query that matched no data leaves Result nil; skip it rather than deref
+			continue
+		}
 		for tbkStr, startIndex := range nmds.StartIndex {
 			cs, err := nmds.ToColumnSeries(startIndex, nmds.Lengths[tbkStr])
 			if err != nil {

@@ -224,7 +224,26 @@ func ToNumpyMultiDataSet(p *proto.NumpyMultiDataset) *io.NumpyMultiDataset {
 	}
 }
 
+// ToProtoNumpyMultiDataSet converts a NumpyMultiDataset to its protobuf form.
+//
+// A nil nmds means the query matched no data at all: Query leaves its accumulator
+// nil when the ColumnSeriesMap is empty (an out-of-range time window, or a symbol
+// with no records), so the result must still be a well-formed empty dataset rather
+// than a nil dereference. Returning an empty message instead of nil also keeps the
+// one-response-per-request correspondence gRPC clients rely on.
 func ToProtoNumpyMultiDataSet(nmds *io.NumpyMultiDataset) *proto.NumpyMultiDataset {
+	if nmds == nil {
+		return &proto.NumpyMultiDataset{
+			Data: &proto.NumpyDataset{
+				ColumnTypes: []string{},
+				ColumnNames: []string{},
+				ColumnData:  [][]byte{},
+				Length:      0,
+			},
+			StartIndex: map[string]int32{},
+			Lengths:    map[string]int32{},
+		}
+	}
 	return &proto.NumpyMultiDataset{
 		Data: &proto.NumpyDataset{
 			ColumnTypes: nmds.ColumnTypes,

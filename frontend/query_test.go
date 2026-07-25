@@ -37,6 +37,18 @@ func setup(t *testing.T,
 	return rootDir, metadata, writer, qs
 }
 
+// A query that matched no data leaves QueryResponse.Result nil, which used to panic here.
+func TestToColumnSeriesMapSkipsNilResult(t *testing.T) {
+	resp := &frontend.MultiQueryResponse{
+		Responses: []frontend.QueryResponse{{Result: nil}},
+	}
+
+	csm, err := resp.ToColumnSeriesMap()
+
+	assert.Nil(t, err)
+	assert.Len(t, *csm, 0)
+}
+
 func TestQueryCustomTimeframes(t *testing.T) {
 	// TODO: Support custom timeframes
 
