@@ -61,3 +61,7 @@ Thumbs.db
 
 /probe
 /Conditions & Indicators _ Massive.pdf
+
+# local agent tooling (machine-specific paths, regenerated on demand)
+/.atl/
+/.codegraph/
