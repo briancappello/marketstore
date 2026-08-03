@@ -46,10 +46,17 @@ func TestRetryer_Run(t *testing.T) {
 			wantErr:   true,
 		},
 		{
-			name:      "retryable error",
+			// Run retries a retryable error until the context is canceled, so
+			// this case needs a deadline -- with context.Background() it would
+			// loop forever on an exponentially growing backoff.
+			name:      "retryable error until the context expires",
 			retryFunc: func(ctx context.Context) error { return replication.ErrRetryable },
-			context:   context.Background(),
-			wantErr:   true,
+			context: func() context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				_ = cancel
+				return ctx
+			}(),
+			wantErr: true,
 		},
 		{
 			name: "succeed at the 3rd try",
