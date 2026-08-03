@@ -88,17 +88,22 @@ func getSymbols() ([]string, error) {
 // NewBgWorker returns the new instance of GdaxFetcher.  See FetcherConfig
 // for the details of available configurations.
 func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
-	symbols, err := getSymbols()
-	if err != nil {
-		return nil, err
-	}
-
 	config, err := recast(conf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to cast config: %w", err)
 	}
-	if len(config.Symbols) > 0 {
-		symbols = config.Symbols
+
+	// Only discover symbols remotely when the config does not list them.
+	// Fetching first meant every construction hit the network even though the
+	// result was discarded whenever symbols were configured -- and that
+	// endpoint (Coinbase Pro) has since been retired, so the call now fails
+	// and takes construction down with it.
+	symbols := config.Symbols
+	if len(symbols) == 0 {
+		symbols, err = getSymbols()
+		if err != nil {
+			return nil, err
+		}
 	}
 	var queryStart time.Time
 	if config.QueryStart != "" {
