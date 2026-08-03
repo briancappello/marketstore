@@ -76,13 +76,7 @@ func (r *Reader) readSecondStage(bufMeta []bufferMeta) (rb []byte, err error) {
 			rbTemp := RewriteBuffer(buffer,
 				uint32(varRecLen), uint32(numVarRecords), uint32(md.Intervals), uint64(intervalStartEpoch))
 
-			// rb = append(rb, rbTemp...)
-			if (rbCursor + len(rbTemp)) > totalDatalen {
-				totalDatalen += totalDatalen
-				rb2 := make([]byte, totalDatalen)
-				copy(rb2[:rbCursor], rb[:rbCursor])
-				rb = rb2
-			}
+			rb = growResultBuffer(rb, rbCursor, rbCursor+len(rbTemp))
 			copy(rb[rbCursor:], rbTemp)
 			rbCursor += len(rbTemp)
 		}
@@ -92,4 +86,32 @@ func (r *Reader) readSecondStage(bufMeta []bufferMeta) (rb []byte, err error) {
 		totalBuf = append(totalBuf, rb...)
 	}
 	return totalBuf, nil
+}
+
+// growResultBuffer returns a buffer of at least need bytes, preserving the
+// first cursor bytes of buf.
+//
+// totalDatalen in readSecondStage is only an *estimate* for snappy-compressed
+// data (sum of compressed lengths * 4). The real requirement is the
+// decompressed length scaled by (varRecLen+8)/varRecLen, because RewriteBuffer
+// prepends an 8-byte epoch to every variable record. When that exceeds the
+// estimate by more than 2x, doubling once still leaves the buffer short:
+// copy() then truncates silently while the caller's cursor advances by the
+// full length, so the final `rb[:rbCursor]` reslice panics with
+// "slice bounds out of range". Grow until it actually fits.
+func growResultBuffer(buf []byte, cursor, need int) []byte {
+	if need <= len(buf) {
+		return buf
+	}
+	size := len(buf)
+	if size == 0 {
+		// Doubling zero never terminates.
+		size = need
+	}
+	for size < need {
+		size *= 2
+	}
+	grown := make([]byte, size)
+	copy(grown[:cursor], buf[:cursor])
+	return grown
 }

@@ -53,7 +53,17 @@ func (r *Retryer) Run(ctx context.Context) error {
 				interval := retryInterval(r.interval, r.backoffCoeff, cnt)
 				log.Warn("caught a retryable error. It will be retried after an interval:" +
 					strconv.FormatInt(interval.Milliseconds(), decimal) + "[ms], err=" + err.Error())
-				time.Sleep(interval)
+				// Sleep, but stay responsive to cancellation: a bare
+				// time.Sleep would ignore ctx for the whole interval, which
+				// grows exponentially and breaks this function's documented
+				// "or the context is canceled" contract.
+				timer := time.NewTimer(interval)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return errors.New("context canceled")
+				case <-timer.C:
+				}
 				continue
 			} else {
 				// not retryable error, give up.

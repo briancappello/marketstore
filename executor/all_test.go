@@ -1,7 +1,6 @@
 package executor_test
 
 import (
-	"fmt"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -422,7 +421,7 @@ func TestSortedFiles(t *testing.T) {
 	)
 	parsed, err := q.Parse()
 	if err != nil {
-		t.Fatalf(fmt.Sprintf("Failed to parse query %s", err))
+		t.Fatalf("Failed to parse query %s", err)
 	}
 	scanner, err := executor.NewReader(parsed)
 	if err != nil {
@@ -459,7 +458,7 @@ func TestSortedFiles(t *testing.T) {
 	q.SetRowLimit(FIRST, 200)
 	parsed, err = q.Parse()
 	if err != nil {
-		t.Fatalf(fmt.Sprintf("Failed to parse query %s", err))
+		t.Fatalf("Failed to parse query %s", err)
 	}
 	scanner, err = executor.NewReader(parsed)
 	assert.Nil(t, err)
@@ -485,7 +484,7 @@ func TestSortedFiles(t *testing.T) {
 	q.SetRowLimit(LAST, 200)
 	parsed, err = q.Parse()
 	if err != nil {
-		t.Fatalf(fmt.Sprintf("Failed to parse query %s", err))
+		t.Fatalf("Failed to parse query %s", err)
 	}
 	scanner, err = executor.NewReader(parsed)
 	assert.Nil(t, err)
