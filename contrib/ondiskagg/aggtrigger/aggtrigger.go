@@ -58,6 +58,10 @@ type OnDiskAggTrigger struct {
 	// filter by market hours if this is "nasdaq"
 	filter   string
 	aggCache *sync.Map
+	// keyLocks serializes the aggCache read-modify-write per source bucket.
+	// One mutex per TimeBucketKey, so different symbols still aggregate in
+	// parallel.
+	keyLocks *sync.Map
 }
 
 var _ trigger.Trigger = &OnDiskAggTrigger{}
@@ -103,6 +107,7 @@ func NewTrigger(conf map[string]interface{}) (trigger.Trigger, error) {
 		destinations: tfs,
 		filter:       filter,
 		aggCache:     &sync.Map{},
+		keyLocks:     &sync.Map{},
 	}, nil
 }
 
@@ -117,6 +122,16 @@ func (s *OnDiskAggTrigger) Fire(keyPath string, records []trigger.Record) {
 		return
 	}
 	tbk := io.NewTimeBucketKey(strings.Join(elements[:len(elements)-1], "/"))
+
+	// The dispatcher fires a goroutine per write batch (executor/written.go),
+	// and the block below is a read-modify-write of aggCache: Load, union the
+	// batch onto the cached series, then Store the result. sync.Map makes each
+	// operation atomic but not the sequence, so two concurrent fires for the
+	// same bucket both load cache C and each stores "C + own batch" -- the
+	// loser's bars vanish from the daily aggregate. Serialize per bucket.
+	mu := s.lockFor(tbk.String())
+	mu.Lock()
+	defer mu.Unlock()
 
 	head := io.IndexToTime(
 		records[0].Index(),
@@ -157,7 +172,14 @@ func (s *OnDiskAggTrigger) Fire(keyPath string, records []trigger.Record) {
 			return
 		}
 
-		cs = io.ColumnSeriesUnion(cs, &c.cs)
+		// Argument order matters: ColumnSeriesUnion lets the RIGHT side win on
+		// duplicate epochs, and the batch is fresher than the cache. The
+		// upstream cascade rewrites the current source bar as more data lands
+		// inside it (1Sec/OHLCV -> 1Min re-emits the same minute with a growing
+		// cumulative volume), so putting the cache on the right pinned every
+		// bar to the first version seen and the aggregate kept only a few
+		// seconds of each minute.
+		cs = io.ColumnSeriesUnion(&c.cs, cs)
 
 		s.write(tbk, cs, tail, head, elements)
 
@@ -425,4 +447,12 @@ func (s *OnDiskAggTrigger) query(
 	}
 
 	return &csm, nil
+}
+
+// lockFor returns the mutex guarding aggregation state for a source bucket,
+// creating it on first use.
+func (s *OnDiskAggTrigger) lockFor(key string) *sync.Mutex {
+	v, _ := s.keyLocks.LoadOrStore(key, &sync.Mutex{})
+	mu, _ := v.(*sync.Mutex)
+	return mu
 }
