@@ -1,13 +1,12 @@
 package plugins
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"plugin"
 	"strings"
-
-	"github.com/pkg/errors"
 
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
@@ -41,10 +40,15 @@ func (l *SymbolLoader) LoadSymbol(symbolName string) (interface{}, error) {
 // loaded from one of the current GOPATH directories or current working directory.
 // If the path is an absolute path, it loads from the path. err is nil
 // if it succeeds.
-func Load(pluginName string) (pi *plugin.Plugin, err error) {
+func Load(pluginName string) (*plugin.Plugin, error) {
 	if filepath.IsAbs(pluginName) {
-		return plugin.Open(pluginName)
+		pi, err := plugin.Open(pluginName)
+		if err != nil {
+			return nil, fmt.Errorf("open plugin %s: %w", pluginName, err)
+		}
+		return pi, nil
 	}
+
 	envGOPATH := os.Getenv("GOPATH")
 	if envGOPATH == "" {
 		// Use default GOPATH when not set (Go 1.8+)
@@ -54,26 +58,34 @@ func Load(pluginName string) (pi *plugin.Plugin, err error) {
 		}
 		envGOPATH = filepath.Join(homeDir, "go")
 	}
+
 	gopaths := strings.Split(envGOPATH, ":")
+	candidates := make([]string, 0, len(gopaths)+1)
 	for _, path := range gopaths {
-		pluginPath := filepath.Join(filepath.Join(path, "bin"), pluginName)
+		candidates = append(candidates, filepath.Join(path, "bin", pluginName))
+	}
+	// The working directory is checked last - helpful for testing.
+	candidates = append(candidates, filepath.Join(".", pluginName))
+
+	// Every attempt's error is retained. The GOPATH attempt is normally the
+	// informative one: a plugin built against different package versions or
+	// build tags than the host fails with a specific message naming the
+	// package. The working-directory attempt then fails with a bare "realpath
+	// failed" simply because nothing is there. Reporting only the last error
+	// hides the actual cause behind that, and logging the earlier ones at
+	// debug means they are invisible at the default level.
+	errs := make([]error, 0, len(candidates))
+	for _, pluginPath := range candidates {
 		log.Info("Trying to load module from path: %s...\n", pluginPath)
-		pi, err = plugin.Open(pluginPath)
+		pi, err := plugin.Open(pluginPath)
 		if err == nil {
 			log.Info("Success loading module %s.\n", pluginPath)
 			return pi, nil
 		}
+		log.Warn("failed to load module from %s: %v", pluginPath, err)
+		errs = append(errs, fmt.Errorf("%s: %w", pluginPath, err))
 	}
-	log.Debug("failed to load module from GOPATHs. err=" + err.Error())
-	/*
-		Check the local directory - helpful for testing
-	*/
-	pluginPath := filepath.Join(".", pluginName)
-	pi, err = plugin.Open(pluginPath)
-	if err != nil {
-		return nil,
-			errors.Wrap(err, fmt.Sprintf("module %s not found in bin under any paths in GOPATH=%s or local directory\n",
-				pluginName, envGOPATH))
-	}
-	return pi, err
+
+	return nil, fmt.Errorf("module %s not found in bin under any path in GOPATH=%s or the working directory: %w",
+		pluginName, envGOPATH, errors.Join(errs...))
 }
