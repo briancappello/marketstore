@@ -904,7 +904,11 @@ func (mf *MassiveFetcher) runBackfill() error {
 			// Iterate over query_start keys to determine what to backfill.
 			// Keys are either timeframes (e.g., "1Min", "1D") for bars,
 			// or "trades"/"quotes" for tick data.
-			for key, startDateStr := range mf.config.QueryStart {
+			//
+			// Finest granularity first, 1D last (see
+			// massiveconfig.OrderedBackfillKeys).
+			for _, key := range massiveconfig.OrderedBackfillKeys(mf.config.QueryStart) {
+				startDateStr := mf.config.QueryStart[key]
 				// Skip keys already handled by flat file backfill.
 				if flatFileDone[key] {
 					continue
@@ -1004,7 +1008,11 @@ func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endEx
 
 	w := &backfill.DirectWriter{}
 
-	for key, startDateStr := range mf.config.QueryStart {
+	// Finest granularity first, 1D last: the ondiskagg 1Min->1D trigger would
+	// otherwise overwrite the authoritative vendor daily bar. See
+	// massiveconfig.OrderedBackfillKeys.
+	for _, key := range massiveconfig.OrderedBackfillKeys(mf.config.QueryStart) {
+		startDateStr := mf.config.QueryStart[key]
 		select {
 		case <-mf.ctx.Done():
 			return done
@@ -1149,7 +1157,8 @@ func (mf *MassiveFetcher) restBackfillCurrentDay(
 ) {
 	restStart := flatFileAvailableThrough(now).AddDate(0, 0, 1)
 
-	for key := range mf.config.QueryStart {
+	// Finest granularity first, 1D last (see massiveconfig.OrderedBackfillKeys).
+	for _, key := range massiveconfig.OrderedBackfillKeys(mf.config.QueryStart) {
 		select {
 		case <-mf.ctx.Done():
 			return

@@ -248,3 +248,73 @@ func TestValidateConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestOrderedBackfillKeys(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input map[string]string
+		want  []string
+	}{
+		{
+			name:  "1Min before 1D (the clobbering case)",
+			input: map[string]string{"1D": "2016-01-01", "1Min": "2025-06-01"},
+			want:  []string{"1Min", "1D"},
+		},
+		{
+			name: "ticks before bars, 1D-index last",
+			input: map[string]string{
+				"1D-index": "2020-01-01", "1D": "2016-01-01",
+				"1Min": "2025-06-01", "trades": "2024-01-01", "quotes": "2024-01-01",
+			},
+			want: []string{"quotes", "trades", "1Min", "1D", "1D-index"},
+		},
+		{
+			name:  "unknown keys sort last, alphabetically",
+			input: map[string]string{"zebra": "2020-01-01", "1D": "2016-01-01", "alpha": "2020-01-01"},
+			want:  []string{"1D", "alpha", "zebra"},
+		},
+		{
+			name:  "empty",
+			input: map[string]string{},
+			want:  []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, OrderedBackfillKeys(tt.input))
+		})
+	}
+}
+
+// TestOrderedBackfillKeysIsDeterministic guards against a regression to raw map
+// iteration, whose order Go randomizes per run.
+func TestOrderedBackfillKeysIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	in := map[string]string{
+		"1D": "2016-01-01", "1Min": "2025-06-01",
+		"trades": "2024-01-01", "quotes": "2024-01-01", "1D-index": "2020-01-01",
+	}
+	first := OrderedBackfillKeys(in)
+	for i := 0; i < 200; i++ {
+		assert.Equal(t, first, OrderedBackfillKeys(in), "iteration %d diverged", i)
+	}
+
+	// 1Min must always precede 1D; this is the invariant that protects the
+	// authoritative vendor daily bar from the ondiskagg 1Min->1D trigger.
+	var iMin, iDay int
+	for i, k := range first {
+		switch k {
+		case "1Min":
+			iMin = i
+		case "1D":
+			iDay = i
+		}
+	}
+	assert.Less(t, iMin, iDay, "1Min must be written before 1D")
+}
