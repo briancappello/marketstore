@@ -49,6 +49,10 @@ import (
 type Config struct {
 	Destinations []string `json:"destinations"`
 	Filter       string   `json:"filter"`
+	// CurrentPeriodOnly, when true, restricts writes to destination windows of
+	// >= 1 day to the period currently in progress. Completed days are left
+	// untouched. See OnDiskAggTrigger.currentPeriodOnly.
+	CurrentPeriodOnly bool `json:"current_period_only"`
 }
 
 // OnDiskAggTrigger is the main trigger.
@@ -56,8 +60,22 @@ type OnDiskAggTrigger struct {
 	config       map[string]interface{}
 	destinations timeframes
 	// filter by market hours if this is "nasdaq"
-	filter   string
-	aggCache *sync.Map
+	filter string
+	// currentPeriodOnly suppresses daily-or-longer aggregates for periods that
+	// have already completed.
+	//
+	// Rationale: when an authoritative vendor daily bar is backfilled into the
+	// same bucket this trigger writes to, the two race. Every 1Min write fires
+	// this trigger, executor.WriteCSM overwrites by epoch, and triggers run
+	// asynchronously (executor/written.go fires each in its own goroutine), so
+	// merely writing 1Min before 1D does NOT guarantee the vendor bar lands
+	// last -- measured ~9% of daily bars were still overwritten that way.
+	//
+	// With this set, a 1Min write dated to a completed day produces no daily
+	// bar at all, so the vendor bar can never be clobbered regardless of write
+	// order or goroutine timing. The in-progress day is still aggregated live.
+	currentPeriodOnly bool
+	aggCache          *sync.Map
 	// keyLocks serializes the aggCache read-modify-write per source bucket.
 	// One mutex per TimeBucketKey, so different symbols still aggregate in
 	// parallel.
@@ -102,12 +120,17 @@ func NewTrigger(conf map[string]interface{}) (trigger.Trigger, error) {
 		tfs = append(tfs, *tf)
 	}
 
+	if config.CurrentPeriodOnly {
+		log.Info("current_period_only enabled: completed daily+ periods will not be re-aggregated\n")
+	}
+
 	return &OnDiskAggTrigger{
-		config:       conf,
-		destinations: tfs,
-		filter:       filter,
-		aggCache:     &sync.Map{},
-		keyLocks:     &sync.Map{},
+		config:            conf,
+		destinations:      tfs,
+		filter:            filter,
+		currentPeriodOnly: config.CurrentPeriodOnly,
+		aggCache:          &sync.Map{},
+		keyLocks:          &sync.Map{},
 	}, nil
 }
 
@@ -256,9 +279,31 @@ func (s *OnDiskAggTrigger) writeAggregates(
 		return nil
 	}
 
+	isDailyOrLonger := window.Duration() >= utils.Day
+
+	// Suppress re-aggregation of periods that have already closed, so an
+	// authoritative daily bar written by a backfiller is never overwritten.
+	// Only the in-progress period is derived from the base timeframe.
+	if s.currentPeriodOnly && isDailyOrLonger {
+		currentStart := window.Truncate(time.Now().In(calendar.Nasdaq.Tz())).Unix()
+		if end < currentStart {
+			return nil
+		}
+		if start < currentStart {
+			start = currentStart
+			slc, err = io.SliceColumnSeriesByEpoch(cs, &start, &end)
+			if err != nil {
+				return err
+			}
+			if len(slc.GetEpoch()) == 0 {
+				return nil
+			}
+		}
+	}
+
 	// decide whether to apply market-hour filter
 	applyingFilter := false
-	if s.filter == "nasdaq" && window.Duration() >= utils.Day {
+	if s.filter == "nasdaq" && isDailyOrLonger {
 		calendarTz := calendar.Nasdaq.Tz()
 		if utils.InstanceConfig.Timezone.String() != calendarTz.String() {
 			log.Warn("misconfiguration... system must be configure in %s\n", calendarTz)
@@ -290,7 +335,14 @@ func (s *OnDiskAggTrigger) writeAggregates(
 	)
 	// apply the filter
 	if applyingFilter {
-		tqSlc = slc.ApplyTimeQual(calendar.Nasdaq.EpochIsMarketOpen)
+		// Daily+ bars must reflect the REGULAR session (09:30-16:00 ET).
+		// EpochIsMarketOpen spans EXTENDED hours (04:00-20:00 ET) and is
+		// therefore a no-op for vendor 1Min data, which is already confined to
+		// that range -- it let pre/post-market prints set the daily high, low
+		// and volume. applyingFilter is only ever true for daily-or-longer
+		// windows, so the regular-session qualifier is always the right one
+		// here.
+		tqSlc = slc.ApplyTimeQual(calendar.Nasdaq.EpochIsRegularMarketOpen)
 
 		// normally this will always be true, but when there are random bars
 		// on the weekend, it won't be, so checking to avoid panic
