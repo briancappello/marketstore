@@ -209,3 +209,77 @@ func TestNextMarketDay(t *testing.T) {
 		})
 	}
 }
+
+// TestEpochIsRegularMarketOpen pins the regular-session boundary and, crucially,
+// its divergence from the extended-hours EpochIsMarketOpen. Daily OHLC
+// aggregation depends on this distinction: using the extended-hours qualifier
+// lets pre/post-market prints set the daily high, low and volume.
+func TestEpochIsRegularMarketOpen(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		t            time.Time
+		wantRegular  bool
+		wantExtended bool
+	}{
+		// Normal session day (Tue 2021-08-31).
+		{"03:00 before pre-market", time.Date(2021, 8, 31, 3, 0, 0, 0, NY), false, false},
+		{"05:00 pre-market", time.Date(2021, 8, 31, 5, 0, 0, 0, NY), false, true},
+		{"09:29 just before open", time.Date(2021, 8, 31, 9, 29, 0, 0, NY), false, true},
+		{"09:30 open (inclusive)", time.Date(2021, 8, 31, 9, 30, 0, 0, NY), true, true},
+		{"11:00 midday", time.Date(2021, 8, 31, 11, 0, 0, 0, NY), true, true},
+		{"15:59 just before close", time.Date(2021, 8, 31, 15, 59, 0, 0, NY), true, true},
+		{"16:00 close (exclusive)", time.Date(2021, 8, 31, 16, 0, 0, 0, NY), false, true},
+		{"19:00 after-hours", time.Date(2021, 8, 31, 19, 0, 0, 0, NY), false, true},
+		{"21:00 after extended close", time.Date(2021, 8, 31, 21, 0, 0, 0, NY), false, false},
+
+		// Early close day (2018-07-03, regular close 13:00, extended 17:00).
+		{"early-close 11:00", time.Date(2018, 7, 3, 11, 0, 0, 0, NY), true, true},
+		{"early-close 13:00 closed", time.Date(2018, 7, 3, 13, 0, 0, 0, NY), false, true},
+		{"early-close 16:00 ext only", time.Date(2018, 7, 3, 16, 0, 0, 0, NY), false, true},
+
+		// Non-trading days.
+		{"weekend", time.Date(2017, 1, 1, 11, 0, 0, 0, NY), false, false},
+		{"MLK holiday", time.Date(2018, 1, 15, 11, 0, 0, 0, NY), false, false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.wantRegular, Nasdaq.IsRegularMarketOpen(tt.t), "IsRegularMarketOpen")
+			assert.Equal(t, tt.wantRegular, Nasdaq.EpochIsRegularMarketOpen(tt.t.Unix()),
+				"EpochIsRegularMarketOpen must agree with IsRegularMarketOpen")
+			assert.Equal(t, tt.wantExtended, Nasdaq.EpochIsMarketOpen(tt.t.Unix()), "EpochIsMarketOpen")
+		})
+	}
+}
+
+// TestRegularIsStrictSubsetOfExtended guards the invariant that makes the
+// daily-bar filter meaningful: anything in the regular session is also in
+// extended hours, and pre/post-market is in extended but not regular.
+func TestRegularIsStrictSubsetOfExtended(t *testing.T) {
+	t.Parallel()
+
+	day := time.Date(2021, 8, 31, 0, 0, 0, 0, NY)
+	var regular, extended, extendedOnly int
+	for m := 0; m < 24*60; m++ {
+		ts := day.Add(time.Duration(m) * time.Minute).Unix()
+		r := Nasdaq.EpochIsRegularMarketOpen(ts)
+		e := Nasdaq.EpochIsMarketOpen(ts)
+		if r {
+			regular++
+			assert.True(t, e, "regular-open minute must also be extended-open")
+		}
+		if e {
+			extended++
+			if !r {
+				extendedOnly++
+			}
+		}
+	}
+	assert.Equal(t, 390, regular, "regular session is 390 minutes (09:30-16:00)")
+	assert.Equal(t, 960, extended, "extended session is 960 minutes (04:00-20:00)")
+	assert.Equal(t, 570, extendedOnly, "570 extended-only minutes previously polluted daily bars")
+}

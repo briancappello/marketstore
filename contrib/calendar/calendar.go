@@ -102,10 +102,25 @@ func (calendar *Calendar) IsMarketDay(t time.Time) bool {
 	return true
 }
 
-// EpochIsMarketOpen returns true if epoch in calendar's timezone is in the market hours.
+// EpochIsMarketOpen returns true if epoch in calendar's timezone is in the
+// EXTENDED market hours (04:00-20:00 ET). For the regular session only, use
+// EpochIsRegularMarketOpen.
 func (calendar *Calendar) EpochIsMarketOpen(epoch int64) bool {
 	t := time.Unix(epoch, 0).In(calendar.tz)
 	return calendar.IsMarketOpen(t)
+}
+
+// EpochIsRegularMarketOpen returns true if epoch in calendar's timezone falls
+// within the REGULAR session (09:30-16:00 ET, or the early close on half days).
+//
+// This is the epoch-based counterpart to IsRegularMarketOpen, provided so
+// callers such as the ondiskagg daily aggregation can time-qualify a column
+// series to the regular session. EpochIsMarketOpen is deliberately wider
+// (extended hours) and is the wrong choice for daily OHLC bars, whose high,
+// low and volume should not include pre/post-market prints.
+func (calendar *Calendar) EpochIsRegularMarketOpen(epoch int64) bool {
+	t := time.Unix(epoch, 0).In(calendar.tz)
+	return calendar.IsRegularMarketOpen(t)
 }
 
 // IsMarketOpen returns true if t is in the extended market hours.

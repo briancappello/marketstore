@@ -281,7 +281,12 @@ func main() {
 	startTime := time.Now()
 
 	// Process each data type (1D, 1Min, 1D-index, trades, quotes).
-	for key, startDateStr := range fromDates {
+	//
+	// Finest granularity first, 1D last: writing 1Min after 1D lets the
+	// ondiskagg 1Min->1D trigger overwrite the authoritative vendor daily bar
+	// (see massiveconfig.OrderedBackfillKeys).
+	for _, key := range massiveconfig.OrderedBackfillKeys(fromDates) {
+		startDateStr := fromDates[key]
 		select {
 		case <-ctx.Done():
 			log.Info("[flatfiles] backfill cancelled")

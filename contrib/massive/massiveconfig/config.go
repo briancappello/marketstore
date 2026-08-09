@@ -3,6 +3,7 @@ package massiveconfig
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -266,6 +267,55 @@ func parseListingDate(val interface{}) (time.Time, error) {
 	default:
 		return time.Time{}, fmt.Errorf("unsupported date type %T", val)
 	}
+}
+
+// backfillKeyRank orders query_start keys from finest to coarsest granularity.
+// Unknown keys sort last (rank 99) but remain deterministic via the name
+// tie-break in OrderedBackfillKeys.
+var backfillKeyRank = map[string]int{
+	"quotes":   0,
+	"trades":   1,
+	"1Sec":     2,
+	"1Min":     3,
+	"5Min":     4,
+	"15Min":    5,
+	"1H":       6,
+	"1D":       7,
+	"1D-index": 8,
+}
+
+// OrderedBackfillKeys returns the keys of a query_start map in a deterministic,
+// aggregation-safe order: finest granularity first, coarsest last.
+//
+// This ordering is load-bearing, not cosmetic. The ondiskagg trigger derives
+// coarser bars from finer ones on every write (e.g. 1Min -> 1D), and
+// executor.WriteCSM overwrites by epoch. If the authoritative vendor 1D bar is
+// written before the 1Min bars for the same date, the trigger re-derives that
+// day's 1D bar from 1Min and silently replaces the vendor bar. Writing 1Min
+// first and 1D last means the vendor bar lands last and wins.
+//
+// Go randomizes map iteration order, so iterating query_start directly made
+// this a coin flip per run. Always range over this instead.
+func OrderedBackfillKeys(queryStart map[string]string) []string {
+	keys := make([]string, 0, len(queryStart))
+	for k := range queryStart {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		ri, ok := backfillKeyRank[keys[i]]
+		if !ok {
+			ri = 99
+		}
+		rj, ok := backfillKeyRank[keys[j]]
+		if !ok {
+			rj = 99
+		}
+		if ri != rj {
+			return ri < rj
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
 }
 
 // EffectiveBackfillStart returns the effective start date for backfilling a symbol.

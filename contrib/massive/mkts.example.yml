@@ -61,7 +61,17 @@ triggers:
   - module: ondiskagg.so
     on: "*/1Min/OHLCV"
     config:
+      # Time-qualifies daily+ aggregates to the regular session
+      # (09:30-16:00 ET) so pre/post-market prints cannot set the daily
+      # high, low or volume. Has no effect on sub-daily destinations.
       filter: nasdaq
+      # Only derive the in-progress period for daily+ destinations. Without
+      # this, every 1Min write re-aggregates that date's daily bar and
+      # overwrites the authoritative vendor day_aggs bar written by the
+      # backfiller (executor.WriteCSM overwrites by epoch). Ordering the
+      # backfill 1Min-before-1D is not sufficient on its own, because
+      # triggers fire asynchronously and can land after the 1D write.
+      current_period_only: true
       destinations: [ '5Min', '15Min', '1H', '1D' ]
 bgworkers:
   - module: massive.so
