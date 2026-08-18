@@ -13,7 +13,16 @@ EXTERNAL_PLUGIN_DIRS := ../marketstore-watchlists
 # be built with the same tag set, otherwise plugin.Open() fails with a build
 # ID mismatch.
 GO_BUILD_TAGS ?= netgo
-export GOFLAGS := -tags=$(GO_BUILD_TAGS) $(GOFLAGS)
+
+# -trimpath strips absolute filesystem paths (source tree + module cache) from
+# compiled packages. This is REQUIRED for plugin ABI compatibility: Go hashes
+# those paths into each package's build ID, so a plugin built in a different
+# directory or GOPATH than the host otherwise fails plugin.Open() with
+# "plugin was built with a different version of package <X>" — even when every
+# dependency version is identical. It also makes release builds reproducible.
+# The debug target overrides GOFLAGS to drop -trimpath so Delve can still map
+# the binary back to source files.
+export GOFLAGS := -tags=$(GO_BUILD_TAGS) -trimpath $(GOFLAGS)
 
 GOPATH0 := $(firstword $(subst :, ,$(GOPATH)))
 ifeq ($(GOPATH0),)
@@ -22,11 +31,14 @@ endif
 UTIL_PATH := github.com/alpacahq/marketstore/v4/utils
 
 build: plugins
-	GOFLAGS=$(GOFLAGS) go build -ldflags "-s -X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" .
+	GOFLAGS="$(GOFLAGS)" go build -ldflags "-s -X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" .
 
 install:
-	GOFLAGS=$(GOFLAGS) go install -ldflags "-s -X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" .
+	GOFLAGS="$(GOFLAGS)" go install -ldflags "-s -X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" .
 
+# Debug builds keep absolute paths (no -trimpath) so Delve can resolve sources.
+# This override is exported, so the contrib debug sub-makes inherit it too.
+debug: export GOFLAGS := -tags=$(GO_BUILD_TAGS)
 debug:
 	#$(MAKE) debug -C contrib/bitmexfeeder
 	#$(MAKE) debug -C contrib/gdaxfeeder
@@ -38,16 +50,16 @@ debug:
 	$(MAKE) debug -C contrib/streamreplay
 	$(MAKE) debug -C contrib/watchlist
 	#$(MAKE) debug -C contrib/xignitefeeder
-	GOFLAGS=$(GOFLAGS) go install -gcflags="all=-N -l" -ldflags "-X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" ./...
+	GOFLAGS="$(GOFLAGS)" go install -gcflags="all=-N -l" -ldflags "-X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" ./...
 
 generate:
-	GOFLAGS=$(GOFLAGS) go generate $(shell find . -path ./vendor -prune -o -name \*.go -exec grep -q go:generate {} \; -print | while read file; do echo `dirname $$file`; done | xargs)
+	GOFLAGS="$(GOFLAGS)" go generate $(shell find . -path ./vendor -prune -o -name \*.go -exec grep -q go:generate {} \; -print | while read file; do echo `dirname $$file`; done | xargs)
 
 generate-sql:
 	make -C sqlparser
 
 update:
-	GOFLAGS=$(GOFLAGS) go mod tidy
+	GOFLAGS="$(GOFLAGS)" go mod tidy
 
 plugins:
 	#$(MAKE) -C contrib/bitmexfeeder
@@ -73,12 +85,12 @@ external-plugins:
 	done
 
 fmt:
-	GOFLAGS=$(GOFLAGS) go fmt ./...
+	GOFLAGS="$(GOFLAGS)" go fmt ./...
 
 unit-test:
 	# marketstore/contrib/stream/shelf/shelf_test.go fails if "-race" enabled...
-	# GOFLAGS=$(GOFLAGS) go test -race -coverprofile=coverage.txt -covermode=atomic ./...
-	GOFLAGS=$(GOFLAGS) go test -coverprofile=coverage.txt -covermode=atomic ./...
+	# GOFLAGS="$(GOFLAGS)" go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+	GOFLAGS="$(GOFLAGS)" go test -coverprofile=coverage.txt -covermode=atomic ./...
 
 import-csv-test:
 	@tests/integ/bin/runtests.sh
