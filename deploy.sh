@@ -32,6 +32,14 @@ PROD_DIR="${HOME}/.local/share/marketstore"
 PROD_BRANCH="prod"
 SERVICE_NAME="marketstore"
 
+# External plugin repos that live alongside this one (siblings of DEV_DIR) and
+# reference marketstore via `replace => ../marketstore` in their go.mod. mkts.yml
+# loads them by absolute path, so deploy rebuilds them in place to keep their .so
+# ABI-compatible with the host we just built. Missing ones are skipped; a
+# present-but-failing one fails the deploy (a stale .so would fail plugin.Open).
+# Override with EXTERNAL_PLUGIN_REPOS="repo-a repo-b".
+EXTERNAL_PLUGIN_REPOS="${EXTERNAL_PLUGIN_REPOS:-marketstore-watchlists}"
+
 if [[ "$SYSTEM_SERVICE" == true ]]; then
     SYSTEMCTL="systemctl"
 else
@@ -106,6 +114,29 @@ fi
 info "Building marketstore binary and plugins..."
 (cd "$PROD_DIR" && GOPATH="$PROD_DIR/build" make build)
 success "Binary and plugins rebuilt to $PROD_DIR/build/bin/"
+
+# ---------------------------------------------------------------------------
+# 4b. Rebuild external plugin repos that live alongside this one (if present)
+# ---------------------------------------------------------------------------
+# The Makefile's external-plugins target resolves paths relative to the build
+# CWD (the prod worktree), so it can't find these; rebuild them here from their
+# real location (siblings of the dev checkout) with the host's GOPATH so their
+# .so stays ABI-compatible with the binary we just built.
+PARENT_DIR="$(cd "$DEV_DIR/.." && pwd)"
+for repo in $EXTERNAL_PLUGIN_REPOS; do
+    ext_dir="$PARENT_DIR/$repo"
+    if [[ -d "$ext_dir" ]]; then
+        info "Building external plugin: $repo ($ext_dir)"
+        if ! (cd "$ext_dir" && GOPATH="$PROD_DIR/build" make); then
+            echo "ERROR: external plugin '$repo' failed to build."
+            echo "       A stale .so would fail plugin.Open() at load time; aborting."
+            exit 1
+        fi
+        success "External plugin built: $repo"
+    else
+        info "External plugin not present, skipping: $repo ($ext_dir)"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # 5. Restart the service
