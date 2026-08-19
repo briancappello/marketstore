@@ -94,6 +94,26 @@ type BackfillConfig struct {
 	// it only when stderr is a terminal. The bar shows percent complete,
 	// processing rate (dates/sec), and ETA.
 	ProgressBar string
+
+	// SymbolsForDate narrows a date's flat file to the symbols that still need
+	// that date, so a file downloaded to fill one symbol's gap is not rewritten
+	// for symbols that already have it. When nil, the static symbolSet passed to
+	// BackfillDates is used for every date (the whole-universe behaviour).
+	//
+	// When set, it fully replaces symbolSet for filtering; symbolSet is then
+	// only the universe reported in logs.
+	//
+	// Returning an empty set skips the download for that date entirely.
+	SymbolsForDate func(date time.Time) map[string]bool
+}
+
+// resolveSymbolsForDate returns the symbol set to apply to a single date's flat
+// file: the per-date set when a resolver is configured, otherwise the static set.
+func resolveSymbolsForDate(cfg BackfillConfig, staticSet map[string]bool, date time.Time) map[string]bool {
+	if cfg.SymbolsForDate == nil {
+		return staticSet
+	}
+	return cfg.SymbolsForDate(date)
 }
 
 // writeJob is a unit of work for the writer goroutines.
@@ -261,9 +281,18 @@ func BackfillDates(
 
 		currentDate := date
 		downloadWP.Do(func() {
+			// Narrow to the symbols that still need this date. A date present
+			// only because another symbol's gap needs it must not rewrite
+			// symbols that already have it.
+			dateSymbols := resolveSymbolsForDate(cfg, symbolSet, currentDate)
+			if cfg.SymbolsForDate != nil && len(dateSymbols) == 0 {
+				markComplete(dateIndex[currentDate])
+				return
+			}
+
 			// Download.
 			dlStart := time.Now()
-			csm, stats, ok := downloadAndParse(ctx, s3Client, symbolSet, s3Prefix, s3DataType, timeframe, currentDate)
+			csm, stats, ok := downloadAndParse(ctx, s3Client, dateSymbols, s3Prefix, s3DataType, timeframe, currentDate)
 			dlDuration := time.Since(dlStart)
 			if !ok {
 				return

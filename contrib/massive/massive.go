@@ -873,7 +873,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 	phase1.Add(1)
 	go func() {
 		defer phase1.Done()
-		flatFileDone = mf.runFlatFileBackfill(parallelism, endRegular, endExtended, now)
+		flatFileDone = mf.runFlatFileBackfill(pgPool, parallelism, endRegular, endExtended, now)
 	}()
 
 	phase1.Add(1)
@@ -969,7 +969,13 @@ func (mf *MassiveFetcher) runBackfill() error {
 //
 // Returns a set of query_start keys that were successfully handled, so the
 // subsequent REST backfill loop can skip them.
-func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endExtended, now time.Time) map[string]bool {
+//
+// Coverage is tracked per symbol via sync_queries (the same store the REST
+// backfill uses) whenever a database is configured. Without a database there is
+// no per-symbol store, so the global checkpoint file is used instead.
+func (mf *MassiveFetcher) runFlatFileBackfill(
+	pgPool *pgxpool.Pool, parallelism int, endRegular, endExtended, now time.Time,
+) map[string]bool {
 	done := make(map[string]bool)
 
 	// Check for S3 credentials.
@@ -1044,6 +1050,18 @@ func (mf *MassiveFetcher) runFlatFileBackfill(parallelism int, endRegular, endEx
 		maxFlatFile := flatFileAvailableThrough(now)
 		if endDate.After(maxFlatFile) {
 			endDate = maxFlatFile
+		}
+
+		// Preferred path: per-symbol coverage, shared with the REST backfill.
+		// The global checkpoint records dates the downloader processed, not
+		// coverage each symbol actually has, so a symbol added after a range
+		// was downloaded would otherwise never be backfilled for that range.
+		if syncQueries, haveSQ := mf.config.SyncQueries[key]; haveSQ && pgPool != nil {
+			flatfiles.RunSyncedBackfill(mf.ctx, s3Client, w, pgPool, mf.config.SymbolInfos,
+				syncQueries, key, ffType, configStart, endDate,
+				flatfiles.BackfillConfig{Parallelism: parallelism})
+			done[key] = true
+			continue
 		}
 
 		sw := checkpoint[key]

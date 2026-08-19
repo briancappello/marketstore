@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gobwas/glob"
+	"github.com/jackc/pgx/v5/pgxpool"
 	jsoniter "github.com/json-iterator/go"
 
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
@@ -254,6 +255,21 @@ func main() {
 
 	log.Info("[flatfiles] selected %d symbols", len(symbolSet))
 
+	// When symbols come from the DB, each carries its asset ID; combined with a
+	// SymbolsDSN + sync_queries this lets the CLI read/write asset_data_vendor
+	// coverage, so it fetches only outstanding dates and updates only the rows
+	// that actually changed -- exactly like the massive.go bgworker. Absent a
+	// DSN (static -symbols), pgPool stays nil and the backfill runs verbatim.
+	var pgPool *pgxpool.Pool
+	if massiveConfig != nil && massiveConfig.SymbolsDSN != "" {
+		pgPool, err = pgxpool.New(ctx, massiveConfig.SymbolsDSN)
+		if err != nil {
+			log.Error("[flatfiles] failed to connect to symbols DSN for sync: %v", err)
+			os.Exit(1)
+		}
+		defer pgPool.Close()
+	}
+
 	endDate, err := time.Parse(dateFormat, to)
 	if err != nil {
 		log.Error("[flatfiles] failed to parse -to: %v", err)
@@ -312,7 +328,14 @@ func main() {
 		if ffType.Tick {
 			runTickBackfill(ctx, s3Client, w, symbolSet, key, ffType, configStart, endDate, parallelism, tickRes)
 		} else {
-			runFlatFileBackfill(ctx, s3Client, w, symbolSet, key, ffType, configStart, endDate, parallelism)
+			// syncQueries for this key drives coverage read/write; zero value
+			// (no entry) leaves runFlatFileBackfill in verbatim mode.
+			var syncQueries massiveconfig.SyncQuerySet
+			if massiveConfig != nil {
+				syncQueries = massiveConfig.SyncQueries[key]
+			}
+			runFlatFileBackfill(ctx, s3Client, w, symbolInfos, symbolSet, pgPool, syncQueries,
+				key, ffType, configStart, endDate, parallelism)
 		}
 	}
 
@@ -322,18 +345,38 @@ func main() {
 	log.Info("[flatfiles] backfill complete in %s", time.Since(startTime))
 }
 
-// runFlatFileBackfill processes all dates in [startDate, endDate] for a single
-// data type, downloading flat files from S3 and writing bars to MarketStore.
+// runFlatFileBackfill processes dates in [startDate, endDate] for a single data
+// type, downloading flat files from S3 and writing bars to MarketStore.
+//
+// When pgPool is non-nil and syncQueries is populated (i.e. symbols came from
+// the DB and carry asset IDs), it runs sync-aware: it reads each symbol's
+// confirmed coverage from asset_data_vendor, downloads only the outstanding
+// dates via BuildPlan, and writes coverage back only for symbols that changed.
+// Otherwise it falls back to the verbatim whole-range download.
 func runFlatFileBackfill(
 	ctx context.Context,
 	s3Client *flatfiles.S3Client,
 	w backfill.Writer,
+	symbolInfos []massiveconfig.SymbolInfo,
 	symbolSet map[string]bool,
+	pgPool *pgxpool.Pool,
+	syncQueries massiveconfig.SyncQuerySet,
 	timeframe string, // "1D", "1Min", or "1D-index"
 	ffType flatfiles.FlatFileType,
 	startDate, endDate time.Time,
 	parallelism int,
 ) {
+	if pgPool != nil && syncQueries.Read != "" {
+		flatfiles.RunSyncedBackfill(ctx, s3Client, w, pgPool, symbolInfos, syncQueries,
+			timeframe, ffType, startDate, endDate, flatfiles.BackfillConfig{
+				Parallelism:      parallelism,
+				WriteConcurrency: writeConcurrency,
+				WriteBufferSize:  writeBuffer,
+				ProgressBar:      progressMode,
+			})
+		return
+	}
+
 	dates := flatfiles.MarketDays(startDate, endDate)
 	if len(dates) == 0 {
 		log.Info("[flatfiles] no market days in range for %s", timeframe)
