@@ -155,6 +155,12 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
+	// Start the replication backfill reconciler (bootstrap + periodic catch-up).
+	if driver := c.GetReplicationBackfillDriver(); driver != nil {
+		log.Info("initializing replication backfill reconciler")
+		go driver.Run(globalCtx, config.Replication.ReconcileInterval, func() int64 { return time.Now().Unix() })
+	}
+
 	// register grpc server
 	pb.RegisterMarketstoreServer(c.GetGRPCServer(), c.GetGRPCService())
 

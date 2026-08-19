@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"path/filepath"
 
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -13,6 +14,8 @@ import (
 
 	pb "github.com/alpacahq/marketstore/v4/proto"
 	"github.com/alpacahq/marketstore/v4/replication"
+	"github.com/alpacahq/marketstore/v4/replication/backfill"
+	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -149,4 +152,39 @@ func (c *Container) GetReplicationClientWithRetry() ReplicationClient {
 	)
 
 	return c.replicationClient
+}
+
+// GetReplicationBackfillDriver builds the replica-side backfill reconciler.
+// Returns nil when this instance is not a backfill replica (no
+// master_query_host configured — i.e. a master, or a live-only replica).
+func (c *Container) GetReplicationBackfillDriver() *backfill.Driver {
+	if c.mktsConfig.Replication.MasterQueryHost == "" {
+		return nil // live-only or master; no backfill
+	}
+	if c.replicationBackfill != nil {
+		return c.replicationBackfill
+	}
+
+	conn, err := grpc.Dial(c.mktsConfig.Replication.MasterQueryHost,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		panic(fmt.Sprintf("replication backfill: dial %s: %v", c.mktsConfig.Replication.MasterQueryHost, err))
+	}
+	api := backfill.NewGRPCClient(conn)
+
+	wmPath := filepath.Join(c.GetAbsRootDir(), "replication_watermarks.json")
+	wm, err := backfill.NewWatermarks(wmPath)
+	if err != nil {
+		panic(fmt.Sprintf("replication backfill: watermarks: %v", err))
+	}
+
+	writer := c.GetDefaultWriter()
+	write := func(csm io.ColumnSeriesMap, isVar bool) error { return writer.WriteCSM(csm, isVar) }
+	catDir := c.GetCatalogDir()
+	isVar := func(tbk string) bool { return backfill.IsVariableTBK(catDir, tbk) }
+
+	c.replicationBackfill = backfill.NewDriver(api, write, wm,
+		c.mktsConfig.Replication.BackfillParallelism,
+		c.mktsConfig.Replication.BackfillLookback, isVar)
+	return c.replicationBackfill
 }
