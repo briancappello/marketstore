@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 
+	"github.com/alpacahq/marketstore/v4/metrics"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
@@ -45,5 +46,12 @@ func (s *Sender) Run(ctx context.Context) {
 }
 
 func (s *Sender) Send(transactionGroup []byte) {
-	s.channel <- transactionGroup
+	select {
+	case s.channel <- transactionGroup:
+	default:
+		// Buffer full: drop rather than block the caller (the WAL flush).
+		// The replica heals the gap via its backfill reconciler.
+		metrics.ReplicationDroppedMessages.Inc()
+		log.Debug("replication sender buffer full; dropped a transaction group")
+	}
 }

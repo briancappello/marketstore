@@ -51,6 +51,29 @@ func TestSender_Run_Sender(t *testing.T) {
 	}
 }
 
+func TestSenderSendDoesNotBlockWhenBufferFull(t *testing.T) {
+	t.Parallel()
+
+	// A Sender whose Run loop is never started will never drain its channel.
+	s := replication.NewSender(&MockReplicationService{})
+
+	// defaultSenderChannelSize is 500; push far more than that. If Send blocks
+	// when full, this test hangs (and the suite times out) instead of passing.
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 5000; i++ {
+			s.Send([]byte("x"))
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send blocked when the buffer was full")
+	}
+}
+
 func TestSender_Run_Context_Done(t *testing.T) {
 	t.Parallel()
 

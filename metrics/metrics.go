@@ -92,4 +92,15 @@ var (
 			Name:      "os_threads",
 			Help:      "Current count of OS threads owned by the Go runtime (/sched/threads/total).",
 		})
+
+	// ReplicationDroppedMessages counts transaction groups dropped by the
+	// master because a replication buffer was full. Non-zero means a replica
+	// was too slow; the gap is healed by the replica's backfill reconciler.
+	ReplicationDroppedMessages = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "replication_dropped_messages_total",
+			Help:      "Transaction groups dropped due to a full replication buffer.",
+		})
 )
