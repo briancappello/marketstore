@@ -3,7 +3,7 @@
 #
 # Uses a Go image to build a release binary.
 #
-FROM golang:1.18.1-buster as builder
+FROM golang:1.26.5-bookworm AS builder
 ARG tag=latest
 ARG INCLUDE_PLUGINS=true
 ENV DOCKER_TAG=$tag
@@ -18,7 +18,7 @@ RUN if [ "$INCLUDE_PLUGINS" = "true" ] ; then make build plugins ; else make bui
 #
 # Create final image
 #
-FROM debian:10.3
+FROM debian:12-slim
 WORKDIR /
 
 RUN apt-get update && \
@@ -27,13 +27,16 @@ RUN apt-get update && \
 
 COPY --from=builder /go/src/github.com/alpacahq/marketstore/marketstore /bin/
 COPY --from=builder /go/bin /bin/
-COPY --from=builder /go/src/github.com/alpacahq/marketstore/contrib/polygon/polygon-backfill-*.sh /bin/
 COPY --from=builder /go/src/github.com/alpacahq/marketstore/contrib/ice/ca-sync-*.sh /bin/
 
 ENV GOPATH=/
 
 RUN ["marketstore", "init"]
 RUN mv mkts.yml /etc/
+# Pre-create the workdir used by the test harness (docker/podman create
+# --workdir /project). docker cp auto-creates it, podman cp does not, so
+# making it part of the image keeps `create -> cp -> start` portable.
+RUN mkdir -p /project
 VOLUME /data
 EXPOSE 5993
 
