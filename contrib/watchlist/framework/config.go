@@ -1,12 +1,36 @@
 package framework
 
-// Use jsoniter because gopkg.in/yaml.v2 decodes nested YAML maps as
-// map[interface{}]interface{}, which encoding/json cannot marshal.
-// jsoniter handles this transparently by converting interface{} keys
-// to their string representations.
-import jsoniter "github.com/json-iterator/go"
+import (
+	"encoding/json"
+	"fmt"
+)
 
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
+// normalizeMapKeys recursively converts map[interface{}]interface{} (produced by
+// gopkg.in/yaml.v2 for nested YAML maps) into map[string]interface{} so the
+// stdlib encoding/json can marshal it. We deliberately avoid jsoniter/reflect2:
+// they are unmaintained and their unsafe reflect internals crash under Go 1.26.
+func normalizeMapKeys(v interface{}) interface{} {
+	switch m := v.(type) {
+	case map[interface{}]interface{}:
+		out := make(map[string]interface{}, len(m))
+		for k, val := range m {
+			out[fmt.Sprint(k)] = normalizeMapKeys(val)
+		}
+		return out
+	case map[string]interface{}:
+		for k, val := range m {
+			m[k] = normalizeMapKeys(val)
+		}
+		return m
+	case []interface{}:
+		for i, val := range m {
+			m[i] = normalizeMapKeys(val)
+		}
+		return m
+	default:
+		return v
+	}
+}
 
 // TriggerConfig is the config block for the watchlist trigger in mkts.yml.
 type TriggerConfig struct {
@@ -49,7 +73,7 @@ type WorkerConfig struct {
 
 // ParseTriggerConfig parses a raw config map into a TriggerConfig.
 func ParseTriggerConfig(raw map[string]interface{}) (*TriggerConfig, error) {
-	data, err := json.Marshal(raw)
+	data, err := json.Marshal(normalizeMapKeys(raw))
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +86,7 @@ func ParseTriggerConfig(raw map[string]interface{}) (*TriggerConfig, error) {
 
 // ParseWorkerConfig parses a raw config map into a WorkerConfig.
 func ParseWorkerConfig(raw map[string]interface{}) (*WorkerConfig, error) {
-	data, err := json.Marshal(raw)
+	data, err := json.Marshal(normalizeMapKeys(raw))
 	if err != nil {
 		return nil, err
 	}

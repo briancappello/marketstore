@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gobwas/glob"
-	jsoniter "github.com/json-iterator/go"
 
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
@@ -29,9 +29,32 @@ import (
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
-// json iter supports marshal/unmarshal of map[interface{}]interface{} type
-// which is produced by gopkg.in/yaml.v2 for nested maps.
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
+// normalizeMapKeys recursively converts map[interface{}]interface{} (produced by
+// gopkg.in/yaml.v2 for nested maps) into map[string]interface{} so the stdlib
+// encoding/json can marshal it. We avoid jsoniter/reflect2: they are unmaintained
+// and their unsafe reflect internals crash under Go 1.26.
+func normalizeMapKeys(v interface{}) interface{} {
+	switch m := v.(type) {
+	case map[interface{}]interface{}:
+		out := make(map[string]interface{}, len(m))
+		for k, val := range m {
+			out[fmt.Sprint(k)] = normalizeMapKeys(val)
+		}
+		return out
+	case map[string]interface{}:
+		for k, val := range m {
+			m[k] = normalizeMapKeys(val)
+		}
+		return m
+	case []interface{}:
+		for i, val := range m {
+			m[i] = normalizeMapKeys(val)
+		}
+		return m
+	default:
+		return v
+	}
+}
 
 const (
 	dateFormat                 = "2006-01-02"
@@ -552,8 +575,7 @@ func findMassiveBgWorkerConfig(config *utils.MktsConfig) *massiveconfig.FetcherC
 	for _, bg := range config.BgWorkers {
 		if bg.Module == "massive.so" {
 			// Marshal the config map to JSON, then unmarshal to FetcherConfig.
-			// Using jsoniter to handle map[interface{}]interface{} from YAML.
-			data, err := json.Marshal(bg.Config)
+			data, err := json.Marshal(normalizeMapKeys(bg.Config))
 			if err != nil {
 				log.Warn("[massive] failed to marshal bgworker config: %v", err)
 				return nil
