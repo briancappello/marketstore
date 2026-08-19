@@ -10,3 +10,8 @@ start_time: 2016-09-15 13:45
 replication:
   # when master_host is set, this instance works as a replica instance
   master_host: "replication_tests_mstore_master:5998"
+  # master_query_host is the master's MAIN gRPC address (grpc_listen_port),
+  # used by the backfill reconciler to pull historical ranges.
+  master_query_host: "replication_tests_mstore_master:5997"
+  reconcile_interval: 2s
+  backfill_parallelism: 4
