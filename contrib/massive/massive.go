@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	jsonit "github.com/json-iterator/go"
 
 	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
@@ -111,12 +111,34 @@ func (r *dynClientRegistry) get(dt subscription.DataType) *ws.Client {
 	return r.clients[dt]
 }
 
-// Use jsoniter because it supports marshal/unmarshal of map[interface{}]interface{} type.
-// When the config file contains nested structures like query_start: {1Min: "2024-01-01"},
-// the standard "encoding/json" library cannot marshal the structure because the config
-// is parsed from a YAML file to map[string]interface{}, and nested maps become
-// map[interface{}]interface{} which encoding/json doesn't support.
-var jsonAPI = jsonit.ConfigCompatibleWithStandardLibrary
+// normalizeMapKeys recursively converts map[interface{}]interface{} (produced by
+// gopkg.in/yaml.v2 for nested config maps) into map[string]interface{} so the
+// stdlib encoding/json can marshal it. We deliberately do NOT use jsoniter here:
+// jsoniter v1.1.12 + modern-go/reflect2 v1.0.2 are unmaintained and their unsafe
+// reflect internals corrupt/crash under Go 1.26 when decoders are built under
+// concurrency (the massive plugin's streaming dispatch faulted this way).
+func normalizeMapKeys(v interface{}) interface{} {
+	switch m := v.(type) {
+	case map[interface{}]interface{}:
+		out := make(map[string]interface{}, len(m))
+		for k, val := range m {
+			out[fmt.Sprint(k)] = normalizeMapKeys(val)
+		}
+		return out
+	case map[string]interface{}:
+		for k, val := range m {
+			m[k] = normalizeMapKeys(val)
+		}
+		return m
+	case []interface{}:
+		for i, val := range m {
+			m[i] = normalizeMapKeys(val)
+		}
+		return m
+	default:
+		return v
+	}
+}
 
 // MassiveFetcher is a MarketStore background worker that streams
 // real-time market data from the Massive WebSocket API, with optional
@@ -148,9 +170,9 @@ type MassiveFetcher struct {
 // NewBgWorker returns a new instance of MassiveFetcher.
 // nolint:deadcode // plugin interface
 func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
-	data, _ := jsonAPI.Marshal(conf)
+	data, _ := json.Marshal(normalizeMapKeys(conf))
 	config := massiveconfig.FetcherConfig{}
-	if err := jsonAPI.Unmarshal(data, &config); err != nil {
+	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("parse massive config: %w", err)
 	}
 
@@ -590,7 +612,7 @@ func newMessageRouter(topics []streamTopic) *messageRouter {
 // dispatch routes a single message to its handler based on the "ev" field.
 func (r *messageRouter) dispatch(msg []byte) {
 	var h evHeader
-	if err := jsonAPI.Unmarshal(msg, &h); err != nil {
+	if err := json.Unmarshal(msg, &h); err != nil {
 		log.Warn("[massive] could not read event type from message: %v", err)
 		return
 	}
