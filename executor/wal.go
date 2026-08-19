@@ -712,7 +712,7 @@ func sanityCheckValue(fp *os.File, value int64) (isSane bool) {
 	return value < sanityLen
 }
 
-var haveWALWriter = false
+var haveWALWriter atomic.Bool
 
 func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRotateInterval int) {
 	/*
@@ -722,7 +722,7 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 		numTickerCheckPerWALRefresh = 100
 		writeChannelCapThreshold    = 0.8
 	)
-	haveWALWriter = true
+	haveWALWriter.Store(true)
 	tickerWAL := time.NewTicker(walRefresh)
 	tickerPrimary := time.NewTicker(primaryRefresh)
 	tickerCheck := time.NewTicker(walRefresh / numTickerCheckPerWALRefresh)
@@ -765,7 +765,7 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 				}
 			}
 		} else {
-			haveWALWriter = false
+			haveWALWriter.Store(false)
 			log.Info("Flushing to WAL...")
 			err := wf.FlushToWAL()
 			if err != nil {
@@ -788,7 +788,7 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 // returns if there is already one queued which will handle the data
 // present in the write channel, as it will flush as soon as possible.
 func (wf *WALFileType) RequestFlush() {
-	if !haveWALWriter {
+	if !haveWALWriter.Load() {
 		if err := wf.FlushToWAL(); err != nil {
 			log.Error("failed to flush WAL", zap.Error(err))
 		}
