@@ -6,6 +6,17 @@ MASTER_CONTAINER_NAME := replication_tests_mstore_master
 REPLICA_CONTAINER_NAME := replication_tests_mstore_replica1
 PYMARKETSTORE_CONTAINER_NAME := replication_tests_pymarketstore
 
+# Container-engine detection so test_master_isolation can freeze the replica by
+# controlling a sibling container from inside the pyclient. Works under docker
+# and podman: the pyclient bind-mounts ENGINE_SOCK to /var/run/docker.sock and
+# uses its bundled docker CLI (podman exposes a docker-compatible API socket).
+IS_PODMAN := $(shell docker --version 2>/dev/null | grep -qi podman && echo yes)
+ifeq ($(IS_PODMAN),yes)
+ENGINE_SOCK := $(shell echo $${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}/podman/podman.sock)
+else
+ENGINE_SOCK := /var/run/docker.sock
+endif
+
 .PHONY:clean
 clean:
 	# "| true" is a trick to continue even if the command is failed
@@ -67,7 +78,16 @@ run-replica:
 	fi
 
 run-pyclient:
-	docker create --name $(PYMARKETSTORE_CONTAINER_NAME) --net=host $(PYMARKETSTORE_IMAGE_NAME) tail -f /dev/null
+ifeq ($(IS_PODMAN),yes)
+	# podman's docker-compatible API socket is socket-activated but may not be
+	# up yet; start it so the in-container docker CLI can reach the engine.
+	-systemctl --user start podman.socket
+endif
+	# Bind-mount the engine socket so the isolation test can pause/unpause the
+	# replica container from inside the pyclient (see ENGINE_SOCK above).
+	docker create --name $(PYMARKETSTORE_CONTAINER_NAME) --net=host \
+		-v $(ENGINE_SOCK):/var/run/docker.sock \
+		$(PYMARKETSTORE_IMAGE_NAME) tail -f /dev/null
 	docker start $(PYMARKETSTORE_CONTAINER_NAME)
 	# Copy after start (the container just runs `tail`), so /project — the
 	# image WORKDIR — is materialized. podman cp cannot write into a

@@ -2,6 +2,11 @@
 Integration test for the master-isolation guarantee (design §3, F1-F3):
 a frozen/slow replica must NEVER stall the master's write path.
 
+NOTE: this file is named to sort LAST (pytest collects alphabetically). Freezing
+the replica disrupts its live stream, which then needs its retry interval to
+reconnect; running this last keeps that disruption from failing tests that
+expect fast live replication.
+
 Strategy: freeze the replica container so it stops draining its replication
 stream, then hammer the master with writes and assert every write still
 returns quickly and the master keeps serving.
@@ -54,18 +59,29 @@ def _engine(*args) -> bool:
         return False
 
 
+# Master-side replication buffers: Sender.channel (defaultSenderChannelSize=500)
+# plus each replica's stream channel (defaultReplicationStreamChannelSize=500).
+# A blocking (pre-F1/F2) implementation only stalls once BOTH fill, so the write
+# burst must exceed their combined size to prove the guarantee.
+WRITES = 2000
+
+
 def test_master_writes_survive_frozen_replica():
     # Freeze the replica so it stops draining its replication stream.
     if not _engine("pause", REPLICA_CONTAINER):
         pytest.skip("no container engine (docker/podman) reachable from the test "
                     "container; isolation is covered by the Go -race unit tests")
     try:
-        for i in range(200):
-            data = np.array([((pd.Timestamp('2019-01-01 00:00').value / 10 ** 9) + i, 1.0, 2.0)],
+        base = pd.Timestamp('2019-01-01 00:00').value / 10 ** 9
+        for i in range(WRITES):
+            data = np.array([(base + i, 1.0, 2.0)],
                             dtype=[('Epoch', 'i8'), ('High', 'f4'), ('Low', 'f4')])
             t0 = time.time()
             master.write(data, 'ISO/1Min/OHLCV')
-            assert time.time() - t0 < 2.0, "master write stalled while replica was frozen"
+            assert time.time() - t0 < 2.0, \
+                f"master write #{i} stalled ({time.time() - t0:.1f}s) while the replica was frozen"
     finally:
         _engine("unpause", REPLICA_CONTAINER)
+        # Let the replica reconnect its live stream before later tests run.
+        time.sleep(3)
     master.destroy('ISO/1Min/OHLCV')
