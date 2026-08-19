@@ -28,6 +28,19 @@ type ReplicationSetting struct {
 	MasterHost        string
 	RetryInterval     time.Duration
 	RetryBackoffCoeff int
+	// MasterQueryHost is the master's MAIN gRPC address (e.g. "10.0.0.5:5995")
+	// used by the replica's backfill client. Distinct from MasterHost (the
+	// replication stream port). Empty disables backfill (live-only).
+	MasterQueryHost string
+	// ReconcileInterval is how often the replica re-pulls [watermark, now] for
+	// every bucket to heal any gaps the best-effort live stream missed.
+	ReconcileInterval time.Duration
+	// BackfillParallelism bounds concurrent per-bucket backfill queries.
+	BackfillParallelism int
+	// BackfillLookback is the trailing window re-pulled on every reconcile,
+	// healing master-side corrections to recent epochs that were missed while
+	// disconnected. Re-pulling held data is harmless (idempotent by epoch).
+	BackfillLookback time.Duration
 }
 
 type TriggerSetting struct {
@@ -119,8 +132,11 @@ func NewDefaultConfig(rootDir string) *MktsConfig {
 			ListenPort: defaultReplicationMasterListenPort,
 			MasterHost: "",
 			// default retry intervals are 10s -> 20s -> 40s -> ...
-			RetryInterval:     10 * time.Second,
-			RetryBackoffCoeff: 2,
+			RetryInterval:       10 * time.Second,
+			RetryBackoffCoeff:   2,
+			ReconcileInterval:   5 * time.Minute,
+			BackfillParallelism: 8,
+			BackfillLookback:    24 * time.Hour,
 		},
 		Triggers:       nil,
 		BgWorkers:      nil,
@@ -152,10 +168,14 @@ type aux struct {
 		CertFile   string `yaml:"cert_file"`
 		KeyFile    string `yaml:"key_file"`
 		// ListenPort is used for the replication protocol by the master instance
-		ListenPort        int           `yaml:"listen_port"`
-		MasterHost        string        `yaml:"master_host"`
-		RetryInterval     time.Duration `yaml:"retry_interval"`
-		RetryBackoffCoeff int           `yaml:"retry_backoff_coeff"`
+		ListenPort          int           `yaml:"listen_port"`
+		MasterHost          string        `yaml:"master_host"`
+		RetryInterval       time.Duration `yaml:"retry_interval"`
+		RetryBackoffCoeff   int           `yaml:"retry_backoff_coeff"`
+		MasterQueryHost     string        `yaml:"master_query_host"`
+		ReconcileInterval   time.Duration `yaml:"reconcile_interval"`
+		BackfillParallelism int           `yaml:"backfill_parallelism"`
+		BackfillLookback    time.Duration `yaml:"backfill_lookback"`
 	} `yaml:"replication"`
 	Triggers []struct {
 		Module string                 `yaml:"module"`
@@ -291,6 +311,17 @@ func ParseConfig(data []byte) (*MktsConfig, error) {
 
 	if a.Replication.RetryBackoffCoeff != 0 {
 		m.Replication.RetryBackoffCoeff = a.Replication.RetryBackoffCoeff
+	}
+
+	m.Replication.MasterQueryHost = a.Replication.MasterQueryHost
+	if a.Replication.ReconcileInterval != 0 {
+		m.Replication.ReconcileInterval = a.Replication.ReconcileInterval
+	}
+	if a.Replication.BackfillParallelism != 0 {
+		m.Replication.BackfillParallelism = a.Replication.BackfillParallelism
+	}
+	if a.Replication.BackfillLookback != 0 {
+		m.Replication.BackfillLookback = a.Replication.BackfillLookback
 	}
 
 	m.ListenURL = fmt.Sprintf("%v:%v", a.ListenHost, a.ListenPort)

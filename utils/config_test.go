@@ -2,10 +2,32 @@ package utils
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestParseConfig_ReplicaBackfillFields(t *testing.T) {
+	t.Parallel()
+
+	yml := []byte(`
+root_directory: /tmp/x
+listen_port: 5993
+replication:
+  master_host: "10.0.0.5:5996"
+  master_query_host: "10.0.0.5:5995"
+  reconcile_interval: 30s
+  backfill_parallelism: 4
+  backfill_lookback: 1h
+`)
+	cfg, err := ParseConfig(yml)
+	assert.Nil(t, err)
+	assert.Equal(t, "10.0.0.5:5995", cfg.Replication.MasterQueryHost)
+	assert.Equal(t, 30*time.Second, cfg.Replication.ReconcileInterval)
+	assert.Equal(t, 4, cfg.Replication.BackfillParallelism)
+	assert.Equal(t, time.Hour, cfg.Replication.BackfillLookback)
+}
 
 func TestParseConfig_AttrGroupTypes(t *testing.T) {
 	t.Parallel()
