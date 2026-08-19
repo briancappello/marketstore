@@ -1,0 +1,58 @@
+# Example MarketStore config for a REPLICATION REPLICA (slave).
+#
+# A replica is a normal MarketStore instance that, on top of serving local
+# reads, mirrors a master via two independent mechanisms:
+#   1. Live tail   - subscribes to the master's WAL stream (replication.master_host).
+#   2. Backfill    - pulls historical/missed ranges from the master's gRPC API
+#                    (replication.master_query_host) and heals gaps on a timer.
+# The live stream is best-effort (it may drop under load or a disconnect); the
+# backfill reconciler guarantees completeness. See
+# docs/design/logical_replication_design.md.
+#
+# Replace MASTER_HOST with the master's hostname/IP reachable from this replica.
+# Point the two addresses at the master's replication port (5996) and its MAIN
+# gRPC port (5995) respectively.
+#
+# NOTE: variable-length (tick: TRADE/QUOTE) buckets are delivered by the live
+# stream only; they are intentionally NOT backfilled (their writes append rather
+# than overwrite by epoch, so re-pulling would duplicate rows). Fixed buckets
+# (OHLCV bars) get full bootstrap + gap healing.
+
+root_directory: /data/mktsdb
+listen_port: 5993
+grpc_listen_port: 5995
+log_level: info
+stop_grace_period: 5
+wal_rotate_interval: 5
+timezone: "America/New_York"
+
+replication:
+  # Setting master_host makes this instance a replica: it subscribes to the
+  # master's live WAL stream at this address (the master's replication.listen_port).
+  master_host: "MASTER_HOST:5996"
+
+  # master_query_host is the master's MAIN gRPC address (grpc_listen_port), used
+  # by the backfill client to read historical ranges. Distinct from master_host.
+  # Leave empty to run live-stream-only (no bootstrap, no gap healing).
+  master_query_host: "MASTER_HOST:5995"
+
+  # How often to re-pull [watermark, now] for every fixed bucket to heal any
+  # gaps the best-effort live stream missed. Seconds-fresh is fine for a dev
+  # mirror; lower it for faster catch-up at the cost of more query volume.
+  reconcile_interval: 5m
+
+  # Trailing window re-pulled on every reconcile, to heal master-side
+  # corrections to recent epochs that were missed while disconnected. Re-pulling
+  # already-held data is harmless (idempotent by epoch for fixed records).
+  backfill_lookback: 24h
+
+  # Bounds concurrent per-bucket backfill queries.
+  backfill_parallelism: 8
+
+  # Live-stream reconnect backoff (10s -> 20s -> 40s -> ...).
+  retry_interval: 10s
+  retry_backoff_coeff: 2
+
+  # TLS is optional and off by default. If the master enables TLS, set:
+  # tls_enabled: true
+  # cert_file: /etc/marketstore/replication.crt

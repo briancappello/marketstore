@@ -1,0 +1,31 @@
+# Example MarketStore config for a REPLICATION MASTER.
+#
+# The master serves normal reads/writes AND streams its write-ahead log to any
+# replicas that connect. See docs/design/logical_replication_design.md.
+#
+# Ports (defaults):
+#   5993  JSON-RPC API        (listen_port)
+#   5995  gRPC API            (grpc_listen_port)  <- replicas backfill from here
+#   5996  replication stream  (replication.listen_port)
+#
+# A replica needs BOTH the master's gRPC address (grpc_listen_port, for pull
+# backfill) and its replication stream address (replication.listen_port, for the
+# live tail). Make sure both ports are reachable from the replica host.
+
+root_directory: /data/mktsdb
+listen_port: 5993
+grpc_listen_port: 5995
+log_level: info
+stop_grace_period: 5
+wal_rotate_interval: 5
+timezone: "America/New_York"
+
+replication:
+  # Act as a master: accept replica connections and stream the WAL to them.
+  enabled: true
+  # Port replicas connect to for the live transaction-group stream.
+  listen_port: 5996
+  # TLS is optional and off by default (intended for a trusted LAN). To enable:
+  # tls_enabled: true
+  # cert_file: /etc/marketstore/replication.crt
+  # key_file:  /etc/marketstore/replication.key
