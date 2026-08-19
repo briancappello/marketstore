@@ -20,7 +20,6 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/gorilla/websocket v1.5.3
-	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.10.4
 	github.com/pkg/errors v0.9.1
 	github.com/preichenberger/go-gdax v0.0.0-20181027225743-eb74ba719d9a
@@ -43,6 +42,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
+	github.com/aws/smithy-go v1.24.2
 	github.com/jackc/pgx/v5 v5.8.0
 	google.golang.org/protobuf v1.36.11
 )
@@ -56,7 +56,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.21 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.21 // indirect
-	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -69,8 +68,6 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/mdlayher/raw v0.0.0-20181016155347-fa5ef3332ca9 // indirect
-	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
-	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_model v0.2.0 // indirect
 	github.com/prometheus/common v0.10.0 // indirect

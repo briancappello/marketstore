@@ -348,7 +348,6 @@ All follow the same `bgworkers` YAML pattern. Each plugin file and its `NewBgWor
 | BitmexFeeder | `/home/brian/dev/marketstore/contrib/bitmexfeeder/bitmexfeeder.go` | `bitmexfeeder.so` |
 | BinanceFeeder | `/home/brian/dev/marketstore/contrib/binancefeeder/binancefeeder.go` | `binancefeeder.so` |
 | BinanceFeederV2 | `/home/brian/dev/marketstore/contrib/binancefeeder_v2/binancefeeder_v2.go` | `binancefeeder_v2.so` |
-| XigniteFeeder | `/home/brian/dev/marketstore/contrib/xignitefeeder/xignitefeeder.go` | `xignitefeeder.so` |
 | PolyIEX | `/home/brian/dev/marketstore/contrib/polyiex/polyiex.go` | `polyiex.so` |
 
 ---
@@ -543,7 +542,6 @@ Plugins built by `make plugins`:
 - `contrib/ondiskagg`
 - `contrib/polygon`
 - `contrib/stream`
-- `contrib/xignitefeeder`
 - `contrib/alpacabkfeeder`
 
 ### `make debug`
@@ -849,7 +847,6 @@ debug:
 	$(MAKE) debug -C contrib/ondiskagg
 	$(MAKE) debug -C contrib/polygon
 	$(MAKE) debug -C contrib/stream
-	$(MAKE) debug -C contrib/xignitefeeder
 	GOFLAGS=$(GOFLAGS) go install -gcflags="all=-N -l" -ldflags "-X $(UTIL_PATH).Tag=$(DOCKER_TAG) -X $(UTIL_PATH).BuildStamp=$(shell date -u +%Y-%m-%d-%H-%M-%S) -X $(UTIL_PATH).GitHash=$(shell git rev-parse HEAD)" ./...
 
 generate:
@@ -871,7 +868,6 @@ plugins:
 	$(MAKE) -C contrib/ondiskagg
 	$(MAKE) -C contrib/polygon
 	$(MAKE) -C contrib/stream
-	$(MAKE) -C contrib/xignitefeeder
 	$(MAKE) -C contrib/alpacabkfeeder
 
 fmt:
