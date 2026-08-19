@@ -137,6 +137,10 @@ func (c *Container) GetReplicationClientWithRetry() ReplicationClient {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
+	// Match the server/backfill recv cap: a replayed WAL message can exceed
+	// gRPC's 4MB client default under heavy flush.
+	opts = append(opts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(c.mktsConfig.GRPCMaxRecvMsgSize)))
+
 	conn, err := grpc.Dial(c.mktsConfig.Replication.MasterHost, opts...)
 	if err != nil {
 		panic(errors.Wrap(err, "failed to initialize gRPC client connection for replication"))
@@ -166,7 +170,14 @@ func (c *Container) GetReplicationBackfillDriver() *backfill.Driver {
 	}
 
 	conn, err := grpc.Dial(c.mktsConfig.Replication.MasterQueryHost,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// The master serves a bucket's full history in a single Query response,
+		// and a fresh replica pulls the entire range at once (watermark=0). Raise
+		// the client recv cap to the configured server cap (default 1024MB) so
+		// large buckets (e.g. years of 1Sec/OHLCV) don't hit gRPC's 4MB default.
+		// ponytail: bounded by GRPCMaxRecvMsgSize; if one bucket ever exceeds it,
+		// raise grpc_max_recv_msg_size or add time-window paging to BackfillBucket.
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(c.mktsConfig.GRPCMaxRecvMsgSize)))
 	if err != nil {
 		panic(fmt.Sprintf("replication backfill: dial %s: %v", c.mktsConfig.Replication.MasterQueryHost, err))
 	}
