@@ -29,6 +29,36 @@ replication:
 	assert.Equal(t, time.Hour, cfg.Replication.BackfillLookback)
 }
 
+func TestParseConfig_TriggerSkipOnReplicaAndIsReplica(t *testing.T) {
+	t.Parallel()
+
+	yml := []byte(`
+root_directory: /tmp/x
+listen_port: 5993
+replication:
+  master_host: "10.0.0.5:5996"
+triggers:
+  - module: ondiskagg.so
+    on: "*/1Min/OHLCV"
+  - module: custom.so
+    on: "*/1Min/OHLCV"
+    skip_on_replica: true
+`)
+	cfg, err := ParseConfig(yml)
+	assert.Nil(t, err)
+	assert.True(t, cfg.Replication.IsReplica())
+	assert.Len(t, cfg.Triggers, 2)
+	assert.False(t, cfg.Triggers[0].SkipOnReplica)
+	assert.True(t, cfg.Triggers[1].SkipOnReplica)
+}
+
+func TestReplicationSetting_IsReplica(t *testing.T) {
+	t.Parallel()
+	assert.False(t, (ReplicationSetting{}).IsReplica())
+	assert.False(t, (ReplicationSetting{Enabled: true}).IsReplica())
+	assert.True(t, (ReplicationSetting{MasterHost: "host:5996"}).IsReplica())
+}
+
 func TestParseConfig_AttrGroupTypes(t *testing.T) {
 	t.Parallel()
 

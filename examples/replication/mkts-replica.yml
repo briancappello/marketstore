@@ -56,3 +56,19 @@ replication:
   # TLS is optional and off by default. If the master enables TLS, set:
   # tls_enabled: true
   # cert_file: /etc/marketstore/replication.crt
+
+# Triggers on a replica: a replica already receives the leader's trigger output
+# via replication, so write-generating triggers should run on the LEADER only.
+# The on-disk aggregation trigger (ondiskagg.so) is skipped automatically on a
+# replica. Read-only/side-effect triggers (e.g. stream.so for websocket fan-out)
+# are fine to keep. Mark any other trigger you don't want on this replica with
+# `skip_on_replica: true`.
+#
+# triggers:
+#   - module: stream.so            # kept: pushes updates to websocket clients
+#     on: "*/*/*"
+#   - module: ondiskagg.so         # skipped automatically on a replica
+#     on: "*/1Min/OHLCV"
+#   - module: some-other.so
+#     on: "*/1Min/OHLCV"
+#     skip_on_replica: true        # explicit opt-out for anything else

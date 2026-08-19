@@ -47,7 +47,18 @@ type TriggerSetting struct {
 	Module string
 	On     string
 	Config map[string]interface{}
+	// SkipOnReplica, when true, prevents this trigger from loading on a replica
+	// (an instance with master_host set). A replica already receives the
+	// leader's trigger output via replication, so re-running a write-generating
+	// trigger locally is redundant and can diverge. The on-disk aggregation
+	// trigger is skipped on replicas regardless of this flag.
+	SkipOnReplica bool
 }
+
+// IsReplica reports whether this instance is a read replica (i.e. a master_host
+// is configured, which also disables the write API). Master/standalone
+// instances return false.
+func (r ReplicationSetting) IsReplica() bool { return r.MasterHost != "" }
 
 type BgWorkerSetting struct {
 	Module string
@@ -178,9 +189,10 @@ type aux struct {
 		BackfillLookback    time.Duration `yaml:"backfill_lookback"`
 	} `yaml:"replication"`
 	Triggers []struct {
-		Module string                 `yaml:"module"`
-		On     string                 `yaml:"on"`
-		Config map[string]interface{} `yaml:"config"`
+		Module        string                 `yaml:"module"`
+		On            string                 `yaml:"on"`
+		Config        map[string]interface{} `yaml:"config"`
+		SkipOnReplica bool                   `yaml:"skip_on_replica"`
 	} `yaml:"triggers"`
 	BgWorkers []struct {
 		Module string                 `yaml:"module"`
@@ -332,9 +344,10 @@ func ParseConfig(data []byte) (*MktsConfig, error) {
 
 	for _, trig := range a.Triggers {
 		triggerSetting := &TriggerSetting{
-			Module: trig.Module,
-			On:     trig.On,
-			Config: trig.Config,
+			Module:        trig.Module,
+			On:            trig.On,
+			Config:        trig.Config,
+			SkipOnReplica: trig.SkipOnReplica,
 		}
 		m.Triggers = append(m.Triggers, triggerSetting)
 	}

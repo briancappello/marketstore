@@ -12,7 +12,7 @@ func (c *Container) GetWriter() frontend.Writer {
 		return c.writer
 	}
 
-	if c.mktsConfig.Replication.MasterHost != "" {
+	if c.mktsConfig.Replication.IsReplica() {
 		// WRITE is not allowed on a read replica
 		c.writer = &executor.ErrorWriter{}
 		return c.writer
