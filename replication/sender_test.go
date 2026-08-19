@@ -3,6 +3,7 @@ package replication_test
 import (
 	"bytes"
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,11 +11,22 @@ import (
 )
 
 type MockReplicationService struct {
-	LastSentMessage []byte
+	mu              sync.Mutex
+	lastSentMessage []byte
 }
 
 func (ms *MockReplicationService) SendReplicationMessage(transactionGroup []byte) {
-	ms.LastSentMessage = transactionGroup
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.lastSentMessage = transactionGroup
+}
+
+// LastSentMessage returns the most recently sent message. Guarded so tests can
+// read it while the Sender goroutine writes it without a data race.
+func (ms *MockReplicationService) LastSentMessage() []byte {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	return ms.lastSentMessage
 }
 
 func TestNewSender(t *testing.T) {
@@ -46,7 +58,7 @@ func TestSender_Run_Sender(t *testing.T) {
 
 	// --- then ---
 	// message should be sent to ReplicationService
-	if !bytes.Equal(mockService.LastSentMessage, message) {
+	if !bytes.Equal(mockService.LastSentMessage(), message) {
 		t.Errorf("message is not sent")
 	}
 }
@@ -97,7 +109,7 @@ func TestSender_Run_Context_Done(t *testing.T) {
 
 	// --- then ---
 	// message should not be sent because the goroutine is already finished
-	if bytes.Equal(mockService.LastSentMessage, message) {
+	if bytes.Equal(mockService.LastSentMessage(), message) {
 		t.Errorf("sender goroutine is not finished")
 	}
 }
