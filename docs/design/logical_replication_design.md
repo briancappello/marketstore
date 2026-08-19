@@ -58,8 +58,16 @@ not the stream. The reconciler runs in three situations:
 1. **Bootstrap** — at startup, backfill every bucket from the beginning.
 2. **Reconnect gap** — after any live-stream disconnect, backfill
    `[watermark, now]` for all buckets before/while resuming the stream.
-3. **Periodic reconcile** — on a slow timer, re-pull `[watermark, now]` for all
-   buckets to heal any messages dropped while connected.
+3. **Periodic reconcile** — on a slow timer, re-pull
+   `[watermark − backfill_lookback, now]` for all buckets to heal any messages
+   dropped while connected and any master-side corrections to recent epochs
+   missed while disconnected.
+
+Master-side **corrections** (writes to older epochs) propagate through the live
+stream like any other write — the WAL tap fires on every flush regardless of
+epoch. The lookback window exists only for corrections that coincide with a
+drop or disconnect: without it, an old-epoch write sits *behind* the watermark
+and would never be re-pulled.
 
 Because every write is idempotent by epoch, the live stream and the backfill may
 overlap freely; applying the same bar twice is harmless. The system therefore
@@ -79,7 +87,9 @@ fills its stream channel, which blocks the sender goroutine, which stops drainin
 the sender channel, which blocks `Send`, which blocks the **WAL flush** — i.e.
 the master's write path. A separate defect: `StreamChannels` is an unguarded map
 mutated from `GetWALStream` while `SendReplicationMessage` ranges over it, which
-can panic.
+can panic. Related: `GetWALStream` closes a replica's channel on disconnect
+while fan-out may still hold a reference to it — a send on a closed channel
+panics the master.
 
 Fixes (all in `replication/`):
 
@@ -92,8 +102,11 @@ Fixes (all in `replication/`):
   the sender or any peer. On overflow for a given replica, drop for that replica
   (its gap is healed by backfill). Optionally disconnect the overflowing replica
   to force an immediate reconnect+catch-up.
-- **F3 — guard the subscriber map.** Protect `StreamChannels` with a mutex (or
-  use `sync.Map`) so connect/disconnect and fan-out cannot race.
+- **F3 — guard the subscriber map.** Unexport `StreamChannels` behind
+  mutex-guarded `Register`/`Unregister` methods so connect/disconnect and
+  fan-out cannot race. On disconnect the channel is deliberately **not
+  closed** — fan-out may hold a reference and a send on a closed channel
+  panics; an untracked channel is simply garbage-collected.
 
 After F1–F3, no replica state — full buffer, slow socket, or crash — can affect
 the master. Drops are surfaced via metrics and healed by the reconciler.
@@ -154,6 +167,10 @@ New fields required on the replica for backfill:
 - `master_query_host` — the master's **main** gRPC address (e.g. `host:5995`)
   used by the backfill client. Distinct from `master_host` (the stream port).
 - `reconcile_interval` — periodic reconcile cadence (default e.g. 5m).
+- `backfill_lookback` — trailing window re-pulled on every reconcile (default
+  24h). Heals master-side corrections to epochs within the window that were
+  missed while disconnected or dropped. Re-pulling already-held data is
+  harmless (idempotent by epoch); the cost is only query volume.
 - Optional: `backfill_parallelism`, backfill start bound.
 
 TLS is optional and off by default (LAN, trusted).
@@ -191,6 +208,11 @@ TLS is optional and off by default (LAN, trusted).
 ## 9. Non-goals / deferred
 
 - **Deletes** — not propagated; accepted divergence for the dev-mirror use case.
+- **Old corrections** — a master-side write to an epoch older than
+  `backfill_lookback`, made while the replica was disconnected (or dropped from
+  the stream), is not healed automatically. Recovery ("deep resync"): delete
+  `replication_watermarks.json` on the replica — lost watermarks are safe (§4)
+  and force a full idempotent re-bootstrap.
 - **Point-in-time consistency** — only per-bucket eventual consistency.
 - **New WebSocket replication endpoint** — unnecessary for LAN server-to-server;
   the gRPC feed is reused.

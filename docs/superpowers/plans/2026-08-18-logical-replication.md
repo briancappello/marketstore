@@ -117,7 +117,7 @@ git commit -m "fix(replication): make Sender.Send non-blocking so a slow replica
 
 ### Task 2: Isolated, race-free fan-out (F2 + F3)
 
-Guard the `StreamChannels` map and make per-replica delivery non-blocking, so a slow replica neither panics the master (map race) nor blocks the sender goroutine or its peers.
+Encapsulate the `StreamChannels` map behind mutex-guarded `Register`/`Unregister` methods and make per-replica delivery non-blocking, so a slow replica neither panics the master (map race, send-on-closed-channel) nor blocks the sender goroutine or its peers. The map has no consumers outside `grpc_server.go`, so unexporting it is safe.
 
 **Files:**
 - Modify: `replication/grpc_server.go`
@@ -125,41 +125,32 @@ Guard the `StreamChannels` map and make per-replica delivery non-blocking, so a 
 
 **Interfaces:**
 - Consumes: `metrics.ReplicationDroppedMessages` (Task 1).
-- Produces: `GRPCReplicationServer` with a mutex-guarded `StreamChannels`; `SendReplicationMessage` non-blocking per replica.
+- Produces: `GRPCReplicationServer.Register(addr string) chan []byte` and `.Unregister(addr string)` (mutex-guarded); `SendReplicationMessage` non-blocking per replica; `streamChannels` unexported.
 
-- [ ] **Step 1: Add a mutex field**
+- [ ] **Step 1: Write the failing test**
 
-In `replication/grpc_server.go`, add a `sync.Mutex` to the struct and import `"sync"`:
-
-```go
-type GRPCReplicationServer struct {
-	pb.UnimplementedReplicationServer
-	CertFile    string
-	CertKeyFile string
-	mu          sync.Mutex // guards StreamChannels
-	// Key: IPAddr, Value: channel for messages sent to each gRPC stream
-	StreamChannels map[string]chan []byte
-}
-```
-
-- [ ] **Step 2: Write the failing test**
-
-In `replication/grpc_server_test.go` add:
+In `replication/grpc_server_test.go` add (the existing tests never touch the map directly, so unexporting it breaks nothing):
 
 ```go
 func TestSendReplicationMessageIsNonBlockingAndRaceFree(t *testing.T) {
 	rs := replication.NewGRPCReplicationServer()
 
-	// A registered-but-undrained replica channel (simulate a stalled replica).
-	slow := make(chan []byte, 1)
-	rs.StreamChannels["slow"] = slow
+	// A registered-but-undrained replica (simulates a stalled replica).
+	slow := rs.Register("slow")
+	for i := 0; i < cap(slow); i++ {
+		slow <- []byte("fill")
+	}
 
-	// Concurrent connect/disconnect churn to exercise the map guard under -race.
+	// Concurrent connect/disconnect churn through the real (guarded) code path
+	// to exercise the map guard under -race.
+	churned := make(chan struct{})
 	go func() {
 		for i := 0; i < 1000; i++ {
-			rs.StreamChannels["slow"] = slow // via exported map; guarded internally by SendReplicationMessage
-			_ = i
+			addr := fmt.Sprintf("churn-%d", i)
+			rs.Register(addr)
+			rs.Unregister(addr)
 		}
+		close(churned)
 	}()
 
 	done := make(chan struct{})
@@ -170,42 +161,75 @@ func TestSendReplicationMessageIsNonBlockingAndRaceFree(t *testing.T) {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("SendReplicationMessage blocked on a full replica channel")
+	for _, ch := range []chan struct{}{done, churned} {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("SendReplicationMessage blocked on a full replica channel")
+		}
 	}
 }
 ```
 
-Add imports `"time"` if missing. (Run this task's verification with `-race`.)
+Add imports `"fmt"` and `"time"` if missing. (Run this task's verification with `-race`, scoped to `./replication/` — the repo-wide race run is disabled because of an unrelated contrib test.)
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./replication/ -run TestSendReplicationMessageIsNonBlockingAndRaceFree -race -v`
-Expected: FAIL — either a hang (blocking send on the full `slow` channel) or a data race / panic on the map.
+Expected: FAIL — compile error (`Register`/`Unregister` undefined). After a naive unguarded implementation it would fail with a data race or a hang on the full `slow` channel; the guarded implementation in Step 3 is what makes it pass.
 
-- [ ] **Step 4: Implement non-blocking, guarded fan-out**
+- [ ] **Step 3: Implement guarded registration + non-blocking fan-out**
 
-In `replication/grpc_server.go`, wrap map mutations in `GetWALStream` and rewrite `SendReplicationMessage`.
-
-In `GetWALStream`, guard the add and the delete:
+In `replication/grpc_server.go`, unexport the map, add the mutex and the two methods, and rewrite `SendReplicationMessage`. Import `"sync"`:
 
 ```go
-	streamChannel := make(chan []byte, defaultReplicationStreamChannelSize)
+type GRPCReplicationServer struct {
+	pb.UnimplementedReplicationServer
+	CertFile    string
+	CertKeyFile string
+	mu          sync.Mutex // guards streamChannels
+	// Key: IPAddr (e.g. "192.125.18.1:25"), Value: channel for messages sent to each gRPC stream
+	streamChannels map[string]chan []byte
+}
+
+func NewGRPCReplicationServer() *GRPCReplicationServer {
+	return &GRPCReplicationServer{
+		streamChannels: map[string]chan []byte{},
+	}
+}
+
+// Register creates and tracks the outbound buffer for one replica stream.
+func (rs *GRPCReplicationServer) Register(addr string) chan []byte {
+	ch := make(chan []byte, defaultReplicationStreamChannelSize)
 	rs.mu.Lock()
-	rs.StreamChannels[clientAddr] = streamChannel
+	rs.streamChannels[addr] = ch
 	rs.mu.Unlock()
+	return ch
+}
+
+// Unregister stops tracking a replica stream. The channel is deliberately NOT
+// closed: SendReplicationMessage may hold a snapshot referencing it, and a
+// send on a closed channel panics. An untracked channel is simply GC'd.
+func (rs *GRPCReplicationServer) Unregister(addr string) {
+	rs.mu.Lock()
+	delete(rs.streamChannels, addr)
+	rs.mu.Unlock()
+}
 ```
 
-and near the end:
+In `GetWALStream`, replace the direct map writes with the methods:
 
 ```go
-	rs.mu.Lock()
-	delete(rs.StreamChannels, clientAddr)
-	rs.mu.Unlock()
-	close(streamChannel)
+	streamChannel := rs.Register(clientAddr)
 ```
+
+and near the end, replacing the `delete(...)` and `close(streamChannel)` lines:
+
+```go
+	rs.Unregister(clientAddr)
+```
+
+(The old `close(streamChannel)` is removed on purpose — see the `Unregister` comment. The existing `if transactionGroup == nil { break }` guard in the read loop only fired on close and is now harmless; leave it.)
 
 Replace `SendReplicationMessage`:
 
@@ -214,8 +238,8 @@ func (rs *GRPCReplicationServer) SendReplicationMessage(transactionGroup []byte)
 	// Snapshot under lock, deliver outside the lock so a slow replica never
 	// holds the map or blocks peers.
 	rs.mu.Lock()
-	targets := make(map[string]chan []byte, len(rs.StreamChannels))
-	for ip, ch := range rs.StreamChannels {
+	targets := make(map[string]chan []byte, len(rs.streamChannels))
+	for ip, ch := range rs.streamChannels {
 		targets[ip] = ch
 	}
 	rs.mu.Unlock()
@@ -235,21 +259,21 @@ func (rs *GRPCReplicationServer) SendReplicationMessage(transactionGroup []byte)
 
 Add import `"github.com/alpacahq/marketstore/v4/metrics"` (log is already imported).
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 4: Run test to verify it passes**
 
 Run: `go test ./replication/ -run TestSendReplicationMessageIsNonBlockingAndRaceFree -race -v`
 Expected: PASS
 
-- [ ] **Step 6: Run the whole replication package under race**
+- [ ] **Step 5: Run the whole replication package under race**
 
 Run: `go test ./replication/... -race`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add replication/grpc_server.go replication/grpc_server_test.go
-git commit -m "fix(replication): guard StreamChannels and make fan-out non-blocking per replica"
+git commit -m "fix(replication): encapsulate stream registry and make fan-out non-blocking per replica"
 ```
 
 ---
@@ -258,14 +282,14 @@ git commit -m "fix(replication): guard StreamChannels and make fan-out non-block
 
 ### Task 3: Config for the backfill client
 
-Add the replica-side settings the backfill needs: the master's MAIN gRPC address (distinct from the replication stream port), the reconcile cadence, and backfill parallelism.
+Add the replica-side settings the backfill needs: the master's MAIN gRPC address (distinct from the replication stream port), the reconcile cadence, backfill parallelism, and the correction-healing lookback window.
 
 **Files:**
 - Modify: `utils/config.go`
 - Test: `utils/config_test.go` (existing; add a case)
 
 **Interfaces:**
-- Produces: `ReplicationSetting.MasterQueryHost string`, `.ReconcileInterval time.Duration`, `.BackfillParallelism int`.
+- Produces: `ReplicationSetting.MasterQueryHost string`, `.ReconcileInterval time.Duration`, `.BackfillParallelism int`, `.BackfillLookback time.Duration`.
 
 - [ ] **Step 1: Extend the structs**
 
@@ -281,6 +305,10 @@ In `utils/config.go`, add to `ReplicationSetting`:
 	ReconcileInterval time.Duration
 	// BackfillParallelism bounds concurrent per-bucket backfill queries.
 	BackfillParallelism int
+	// BackfillLookback is the trailing window re-pulled on every reconcile,
+	// healing master-side corrections to recent epochs that were missed while
+	// disconnected. Re-pulling held data is harmless (idempotent by epoch).
+	BackfillLookback time.Duration
 ```
 
 Add the matching YAML fields to the `aux.Replication` struct:
@@ -289,6 +317,7 @@ Add the matching YAML fields to the `aux.Replication` struct:
 		MasterQueryHost     string        `yaml:"master_query_host"`
 		ReconcileInterval   time.Duration `yaml:"reconcile_interval"`
 		BackfillParallelism int           `yaml:"backfill_parallelism"`
+		BackfillLookback    time.Duration `yaml:"backfill_lookback"`
 ```
 
 In `NewDefaultConfig`, set defaults inside the `Replication:` literal:
@@ -296,6 +325,7 @@ In `NewDefaultConfig`, set defaults inside the `Replication:` literal:
 ```go
 			ReconcileInterval:   5 * time.Minute,
 			BackfillParallelism: 8,
+			BackfillLookback:    24 * time.Hour,
 ```
 
 In the config-merge section (near the existing `m.Replication.MasterHost = a.Replication.MasterHost`), add:
@@ -307,6 +337,9 @@ In the config-merge section (near the existing `m.Replication.MasterHost = a.Rep
 	}
 	if a.Replication.BackfillParallelism != 0 {
 		m.Replication.BackfillParallelism = a.Replication.BackfillParallelism
+	}
+	if a.Replication.BackfillLookback != 0 {
+		m.Replication.BackfillLookback = a.Replication.BackfillLookback
 	}
 ```
 
@@ -323,12 +356,14 @@ replication:
   master_query_host: "10.0.0.5:5995"
   reconcile_interval: 30s
   backfill_parallelism: 4
+  backfill_lookback: 1h
 `)
 	cfg, err := utils.ParseConfig(yml)
 	assert.Nil(t, err)
 	assert.Equal(t, "10.0.0.5:5995", cfg.Replication.MasterQueryHost)
 	assert.Equal(t, 30*time.Second, cfg.Replication.ReconcileInterval)
 	assert.Equal(t, 4, cfg.Replication.BackfillParallelism)
+	assert.Equal(t, time.Hour, cfg.Replication.BackfillLookback)
 }
 ```
 
@@ -621,7 +656,7 @@ git commit -m "feat(replication): add backfill client (ListTBKs + QueryRange ove
 
 ### Task 6: Backfill one bucket (worker unit)
 
-The pure per-bucket step: query `[watermark, now]`, write locally, return the newest epoch written. Unit-tested with a fake `MasterAPI` and a fake write function — no network, no disk.
+The pure per-bucket step: query `[watermark − lookback, now]`, write locally, return the newest epoch written. The lookback re-pulls a trailing window so master-side corrections to recent epochs missed while disconnected are healed (idempotent, so overlap is free). Unit-tested with a fake `MasterAPI` and a fake write function — no network, no disk.
 
 **Files:**
 - Create: `replication/backfill/worker.go`
@@ -631,7 +666,7 @@ The pure per-bucket step: query `[watermark, now]`, write locally, return the ne
 - Consumes: `MasterAPI` (Task 5), `Watermarks` (Task 4).
 - Produces:
   - `type WriteFunc func(csm io.ColumnSeriesMap, isVariableLength bool) error`
-  - `func BackfillBucket(ctx, api MasterAPI, write WriteFunc, wm *Watermarks, tbk string, now int64, isVariable bool) error`
+  - `func BackfillBucket(ctx, api MasterAPI, write WriteFunc, wm *Watermarks, tbk string, now int64, lookback time.Duration, isVariable bool) error`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -677,7 +712,7 @@ func TestBackfillBucketQueriesFromWatermarkAndAdvances(t *testing.T) {
 	var wrote io.ColumnSeriesMap
 	write := func(m io.ColumnSeriesMap, _ bool) error { wrote = m; return nil }
 
-	err = backfill.BackfillBucket(context.Background(), api, write, wm, "AAPL/1Min/OHLCV", 999, false)
+	err = backfill.BackfillBucket(context.Background(), api, write, wm, "AAPL/1Min/OHLCV", 999, 0, false)
 	require.Nil(t, err)
 
 	// Queried from just after the watermark to now.
@@ -688,6 +723,25 @@ func TestBackfillBucketQueriesFromWatermarkAndAdvances(t *testing.T) {
 	assert.Equal(t, int64(300), wm.Get("AAPL/1Min/OHLCV"))
 }
 
+func TestBackfillBucketLookbackWidensStart(t *testing.T) {
+	api := &fakeAPI{ret: io.NewColumnSeriesMap()} // empty; we only check the range
+	wm, _ := backfill.NewWatermarks(t.TempDir() + "/wm.json")
+	_ = wm.Set("AAPL/1Min/OHLCV", 100)
+
+	err := backfill.BackfillBucket(context.Background(), api, nil, wm, "AAPL/1Min/OHLCV", 999, 60*time.Second, false)
+	require.Nil(t, err)
+
+	// Start reaches back behind the watermark by the lookback: 100+1-60 = 41.
+	assert.Equal(t, int64(41), api.gotStart)
+	assert.Equal(t, int64(999), api.gotEnd)
+
+	// Lookback never produces a start below 1.
+	_ = wm.Set("X/1Min/OHLCV", 10)
+	err = backfill.BackfillBucket(context.Background(), api, nil, wm, "X/1Min/OHLCV", 999, time.Hour, false)
+	require.Nil(t, err)
+	assert.Equal(t, int64(1), api.gotStart)
+}
+
 func TestBackfillBucketNoDataLeavesWatermark(t *testing.T) {
 	api := &fakeAPI{ret: io.NewColumnSeriesMap()} // empty
 	wm, _ := backfill.NewWatermarks(t.TempDir() + "/wm.json")
@@ -695,12 +749,14 @@ func TestBackfillBucketNoDataLeavesWatermark(t *testing.T) {
 	called := false
 	write := func(io.ColumnSeriesMap, bool) error { called = true; return nil }
 
-	err := backfill.BackfillBucket(context.Background(), api, write, wm, "X/1Min/OHLCV", 999, false)
+	err := backfill.BackfillBucket(context.Background(), api, write, wm, "X/1Min/OHLCV", 999, 0, false)
 	require.Nil(t, err)
 	assert.False(t, called, "must not write when there is no data")
 	assert.Equal(t, int64(500), wm.Get("X/1Min/OHLCV"))
 }
 ```
+
+Add `"time"` to the test imports.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -717,6 +773,7 @@ package backfill
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/alpacahq/marketstore/v4/utils/io"
 )
@@ -725,15 +782,21 @@ import (
 // (executor.WriteCSM / GetDefaultWriter().WriteCSM).
 type WriteFunc func(csm io.ColumnSeriesMap, isVariableLength bool) error
 
-// BackfillBucket queries [watermark+1, now] for one bucket, writes what it gets,
-// and advances the watermark to the newest epoch written. A no-data result is a
-// no-op. Writes are idempotent (WriteCSM overwrites by epoch), so re-running is
-// always safe.
+// BackfillBucket queries [watermark+1−lookback, now] for one bucket, writes
+// what it gets, and advances the watermark to the newest epoch written. The
+// lookback re-pulls a trailing window to heal master-side corrections to
+// recent epochs that were missed while disconnected; corrections older than
+// the lookback require a deep resync (delete the watermark file). A no-data
+// result is a no-op. Writes are idempotent (WriteCSM overwrites by epoch), so
+// overlap and re-running are always safe.
 func BackfillBucket(
 	ctx context.Context, api MasterAPI, write WriteFunc, wm *Watermarks,
-	tbk string, now int64, isVariable bool,
+	tbk string, now int64, lookback time.Duration, isVariable bool,
 ) error {
-	start := wm.Get(tbk) + 1
+	start := wm.Get(tbk) + 1 - int64(lookback.Seconds())
+	if start < 1 {
+		start = 1
+	}
 	if start > now {
 		return nil
 	}
@@ -792,7 +855,7 @@ Enumerate every bucket and backfill each concurrently with a bounded worker pool
 - Consumes: `MasterAPI`, `Watermarks`, `WriteFunc`, `worker.BackfillBucket`.
 - Produces:
   - `type Driver struct { ... }`
-  - `func NewDriver(api MasterAPI, write WriteFunc, wm *Watermarks, parallelism int, isVariable func(tbk string) bool) *Driver`
+  - `func NewDriver(api MasterAPI, write WriteFunc, wm *Watermarks, parallelism int, lookback time.Duration, isVariable func(tbk string) bool) *Driver`
   - `func (d *Driver) Reconcile(ctx context.Context, now int64) error` — enumerate + backfill every bucket once.
 
 - [ ] **Step 1: Write the failing test**
@@ -840,7 +903,7 @@ func TestDriverReconcileBackfillsEveryBucket(t *testing.T) {
 	require.Nil(t, err)
 	write := func(io.ColumnSeriesMap, bool) error { return nil }
 
-	d := backfill.NewDriver(api, write, wm, 4, func(string) bool { return false })
+	d := backfill.NewDriver(api, write, wm, 4, 0, func(string) bool { return false })
 	require.Nil(t, d.Reconcile(context.Background(), 1000))
 
 	sort.Strings(api.queried)
@@ -865,6 +928,7 @@ package backfill
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/alpacahq/marketstore/v4/contrib/massive/worker"
 	"github.com/alpacahq/marketstore/v4/utils/log"
@@ -876,14 +940,15 @@ type Driver struct {
 	write       WriteFunc
 	wm          *Watermarks
 	parallelism int
+	lookback    time.Duration
 	isVariable  func(tbk string) bool
 }
 
-func NewDriver(api MasterAPI, write WriteFunc, wm *Watermarks, parallelism int, isVariable func(tbk string) bool) *Driver {
+func NewDriver(api MasterAPI, write WriteFunc, wm *Watermarks, parallelism int, lookback time.Duration, isVariable func(tbk string) bool) *Driver {
 	if parallelism <= 0 {
 		parallelism = 8
 	}
-	return &Driver{api: api, write: write, wm: wm, parallelism: parallelism, isVariable: isVariable}
+	return &Driver{api: api, write: write, wm: wm, parallelism: parallelism, lookback: lookback, isVariable: isVariable}
 }
 
 // Reconcile enumerates every bucket on the master and backfills each from its
@@ -898,7 +963,7 @@ func (d *Driver) Reconcile(ctx context.Context, now int64) error {
 	for _, tbk := range tbks {
 		tbk := tbk
 		wp.Do(func() {
-			if err := BackfillBucket(ctx, d.api, d.write, d.wm, tbk, now, d.isVariable(tbk)); err != nil {
+			if err := BackfillBucket(ctx, d.api, d.write, d.wm, tbk, now, d.lookback, d.isVariable(tbk)); err != nil {
 				log.Warn("[replication-backfill] %s: %v", tbk, err)
 			}
 		})
@@ -943,7 +1008,7 @@ Add to `replication/backfill/driver_test.go`:
 func TestDriverRunReconcilesImmediatelyThenStops(t *testing.T) {
 	api := &listAPI{tbks: []string{"AAPL/1Min/OHLCV"}}
 	wm, _ := backfill.NewWatermarks(t.TempDir() + "/wm.json")
-	d := backfill.NewDriver(api, func(io.ColumnSeriesMap, bool) error { return nil }, wm, 2, func(string) bool { return false })
+	d := backfill.NewDriver(api, func(io.ColumnSeriesMap, bool) error { return nil }, wm, 2, 0, func(string) bool { return false })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go d.Run(ctx, time.Hour, func() int64 { return 1000 }) // long interval: only the immediate pass runs
@@ -962,7 +1027,7 @@ Expected: FAIL (`Run` undefined).
 
 - [ ] **Step 3: Implement**
 
-Append to `replication/backfill/driver.go` (add `"time"` to imports):
+Append to `replication/backfill/driver.go` (`"time"` is already imported from Task 7):
 
 ```go
 // Run performs an immediate reconcile (bootstrap), then reconciles once per
@@ -1136,7 +1201,8 @@ func (c *Container) GetReplicationBackfillDriver() *backfill.Driver {
 	isVar := func(tbk string) bool { return backfill.IsVariableTBK(catDir, tbk) }
 
 	c.replicationBackfill = backfill.NewDriver(api, write, wm,
-		c.mktsConfig.Replication.BackfillParallelism, isVar)
+		c.mktsConfig.Replication.BackfillParallelism,
+		c.mktsConfig.Replication.BackfillLookback, isVar)
 	return c.replicationBackfill
 }
 ```
@@ -1297,11 +1363,12 @@ git commit -m "test(replication): master writes survive a frozen replica (isolat
 
 ## Self-review notes (traceability to spec)
 
-- Spec §3 (isolation F1/F2/F3) → Tasks 1, 2; verified by Tasks 12 and the `-race` run in Task 2.
+- Spec §3 (isolation F1/F2/F3) → Tasks 1, 2; verified by Tasks 12 and the `-race` run in Task 2. F3 also removes the send-on-closed-channel panic: `Unregister` deletes without closing, since fan-out may hold a snapshot reference.
 - Spec §2 / §4 (pull backfill, no new read endpoints) → Tasks 4–7 (watermark, client, worker, driver).
 - Spec §2.1 correctness model (bootstrap / periodic reconcile / reconnect gap) → Task 8. Reconnect-gap is covered by periodic reconcile (a disconnect's gap is healed at the next tick); a dedicated reconnect-triggered reconcile is the noted future optimization, not required for correctness.
 - Spec tick-fidelity risk → Task 9 (record-type resolution + lossless round-trip test).
 - Spec §6 (config) → Task 3.
+- Spec §2.1/§6 correction healing (`backfill_lookback`) → Tasks 3, 6 (start = watermark+1−lookback, clamped to 1); corrections older than the window are the documented §9 divergence, healed only by deep resync (delete the watermark file).
 - Spec §7 (testing: bootstrap, isolation, catch-up) → Tasks 11, 12 (catch-up is exercised by the reconcile loop in Task 8's unit test and the bootstrap timing in Task 11).
 - Spec §9 non-goals (deletes, WS endpoint) → not implemented, by design.
 ```
