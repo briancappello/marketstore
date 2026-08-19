@@ -331,15 +331,21 @@ func (f *TimeBucketInfo) readHeader(path string) (err error) {
 			return err
 		}
 	}
-	f.load(header, path)
+	f.load(header)
 	return nil
 }
 
-func (f *TimeBucketInfo) load(hp *Header, path string) {
+func (f *TimeBucketInfo) load(hp *Header) {
+	// NOTE: Year and Path are deliberately NOT set here. They are set once at
+	// construction (the catalog scan for lazy files, or NewTimeBucketInfoFromHeader
+	// for eager ones) and are read concurrently WITHOUT synchronization (e.g.
+	// catalog.GetLatestYearFile reads f.Year). This method runs lazily under
+	// f.once on first field access, so rewriting Year/Path here races with those
+	// unsynchronized reads — a torn read that Go 1.26's runtime turns into a fatal
+	// fault. The header's Year always equals the filename-derived Year, so this
+	// write was redundant anyway.
 	f.version = hp.Version
 	f.description = string(bytes.Trim(hp.Description[:], "\x00"))
-	f.Year = int16(hp.Year)
-	f.Path = filepath.Clean(path)
 	f.IsRead = true
 	f.timeframe = time.Duration(hp.Timeframe)
 	f.nElements = int32(hp.NElements)
@@ -357,7 +363,11 @@ func (f *TimeBucketInfo) load(hp *Header, path string) {
 // NewTimeBucketInfoFromHeader creates a TimeBucketInfo from a given Header.
 func NewTimeBucketInfoFromHeader(hp *Header, path string) *TimeBucketInfo {
 	tbi := new(TimeBucketInfo)
-	tbi.load(hp, path)
+	// Year and Path are set at construction (load() no longer sets them; see the
+	// note in load).
+	tbi.Year = int16(hp.Year)
+	tbi.Path = filepath.Clean(path)
+	tbi.load(hp)
 	return tbi
 }
 
