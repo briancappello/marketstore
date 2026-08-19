@@ -1,6 +1,7 @@
 package replication_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,6 +11,44 @@ import (
 	"github.com/alpacahq/marketstore/v4/replication"
 	"github.com/alpacahq/marketstore/v4/replication/mock"
 )
+
+func TestSendReplicationMessageIsNonBlockingAndRaceFree(t *testing.T) {
+	rs := replication.NewGRPCReplicationServer()
+
+	// A registered-but-undrained replica (simulates a stalled replica).
+	slow := rs.Register("slow")
+	for i := 0; i < cap(slow); i++ {
+		slow <- []byte("fill")
+	}
+
+	// Concurrent connect/disconnect churn through the real (guarded) code path
+	// to exercise the map guard under -race.
+	churned := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			addr := fmt.Sprintf("churn-%d", i)
+			rs.Register(addr)
+			rs.Unregister(addr)
+		}
+		close(churned)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			rs.SendReplicationMessage([]byte("x")) // must not block even though `slow` is full
+		}
+		close(done)
+	}()
+
+	for _, ch := range []chan struct{}{done, churned} {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("SendReplicationMessage blocked on a full replica channel")
+		}
+	}
+}
 
 // listen messages -> wait 500ms -> put a test message to a channel -> wait 100ms -> the message should be sent.
 func TestGRPCReplicationServer_GetWALStream_success(t *testing.T) {

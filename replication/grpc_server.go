@@ -2,11 +2,13 @@ package replication
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
 
+	"github.com/alpacahq/marketstore/v4/metrics"
 	pb "github.com/alpacahq/marketstore/v4/proto"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
@@ -19,14 +21,33 @@ type GRPCReplicationServer struct {
 	pb.UnimplementedReplicationServer
 	CertFile    string
 	CertKeyFile string
+	mu          sync.Mutex // guards streamChannels
 	// Key: IPAddr (e.g. "192.125.18.1:25"), Value: channel for messages sent to each gRPC stream
-	StreamChannels map[string]chan []byte
+	streamChannels map[string]chan []byte
 }
 
 func NewGRPCReplicationServer() *GRPCReplicationServer {
 	return &GRPCReplicationServer{
-		StreamChannels: map[string]chan []byte{},
+		streamChannels: map[string]chan []byte{},
 	}
+}
+
+// Register creates and tracks the outbound buffer for one replica stream.
+func (rs *GRPCReplicationServer) Register(addr string) chan []byte {
+	ch := make(chan []byte, defaultReplicationStreamChannelSize)
+	rs.mu.Lock()
+	rs.streamChannels[addr] = ch
+	rs.mu.Unlock()
+	return ch
+}
+
+// Unregister stops tracking a replica stream. The channel is deliberately NOT
+// closed: SendReplicationMessage may hold a snapshot referencing it, and a
+// send on a closed channel panics. An untracked channel is simply GC'd.
+func (rs *GRPCReplicationServer) Unregister(addr string) {
+	rs.mu.Lock()
+	delete(rs.streamChannels, addr)
+	rs.mu.Unlock()
 }
 
 func getClientAddr(stream grpc.ServerStream) (string, error) {
@@ -48,8 +69,7 @@ func (rs *GRPCReplicationServer) GetWALStream(_ *pb.GetWALStreamRequest, stream 
 	}
 	log.Info(fmt.Sprintf("new replica connection from:%s", clientAddr))
 
-	streamChannel := make(chan []byte, defaultReplicationStreamChannelSize)
-	rs.StreamChannels[clientAddr] = streamChannel
+	streamChannel := rs.Register(clientAddr)
 
 	// infinite loop
 	for {
@@ -68,18 +88,34 @@ func (rs *GRPCReplicationServer) GetWALStream(_ *pb.GetWALStreamRequest, stream 
 		log.Debug("successfully sent a replication message")
 	}
 
-	// when an error occurred / client connection is closed, close the channel
-	delete(rs.StreamChannels, clientAddr)
-	close(streamChannel)
+	// when an error occurred / client connection is closed, stop tracking the
+	// channel. It is deliberately NOT closed here: SendReplicationMessage may
+	// hold a snapshot referencing it, and a send on a closed channel panics.
+	rs.Unregister(clientAddr)
 	log.Info(fmt.Sprintf("[master] closed replication connection: %v", clientAddr))
 
 	return nil
 }
 
 func (rs *GRPCReplicationServer) SendReplicationMessage(transactionGroup []byte) {
-	// send a replication message to each replica
-	for ip, channel := range rs.StreamChannels {
-		log.Debug("sending a replication message to %s", ip)
-		channel <- transactionGroup
+	// Snapshot under lock, deliver outside the lock so a slow replica never
+	// holds the map or blocks peers.
+	rs.mu.Lock()
+	targets := make(map[string]chan []byte, len(rs.streamChannels))
+	for ip, ch := range rs.streamChannels {
+		targets[ip] = ch
+	}
+	rs.mu.Unlock()
+
+	for ip, channel := range targets {
+		select {
+		case channel <- transactionGroup:
+			log.Debug("sending a replication message to %s", ip)
+		default:
+			// Replica too slow: drop for this replica only. Its gap is healed
+			// by its backfill reconciler. Never block the master or peers.
+			metrics.ReplicationDroppedMessages.Inc()
+			log.Debug("replication stream buffer full for %s; dropped a transaction group", ip)
+		}
 	}
 }
