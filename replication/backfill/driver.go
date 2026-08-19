@@ -37,8 +37,17 @@ func (d *Driver) Reconcile(ctx context.Context, now int64) error {
 	wp := worker.NewWorkerPool(ctx, d.parallelism)
 	for _, tbk := range tbks {
 		tbk := tbk
+		// Variable-length (tick) buckets are excluded from backfill: their
+		// writes append rather than overwrite by epoch (executor/writer.go),
+		// so re-pulling an overlapping range would duplicate rows unbounded.
+		// Ticks rely on the best-effort live stream only. See the design doc
+		// §9 (Non-goals) for the bootstrap-detection caveat.
+		if d.isVariable(tbk) {
+			log.Debug("[replication-backfill] skipping variable-length bucket %s (live-stream only)", tbk)
+			continue
+		}
 		wp.Do(func() {
-			if err := BackfillBucket(ctx, d.api, d.write, d.wm, tbk, now, d.lookback, d.isVariable(tbk)); err != nil {
+			if err := BackfillBucket(ctx, d.api, d.write, d.wm, tbk, now, d.lookback, false); err != nil {
 				log.Warn("[replication-backfill] %s: %v", tbk, err)
 			}
 		})

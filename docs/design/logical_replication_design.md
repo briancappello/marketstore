@@ -208,6 +208,20 @@ TLS is optional and off by default (LAN, trusted).
 ## 9. Non-goals / deferred
 
 - **Deletes** — not propagated; accepted divergence for the dev-mirror use case.
+- **Variable-length (tick) backfill** — TRADE/QUOTE and other variable-length
+  buckets are **excluded from the pull backfill**. Their writes append rather
+  than overwrite by epoch (`executor/writer.go`: a continuation write reads the
+  old block, prepends it, and rewrites the whole block with no dedup), so the
+  idempotency premise in §2.1 holds only for **fixed** (OHLCV) records. Re-pulling
+  an overlapping tick range would duplicate rows unbounded, so the backfill
+  driver skips any bucket whose local record type is variable; ticks rely on the
+  best-effort live stream only (no bootstrap, no gap-heal). **Bootstrap caveat:**
+  the skip is decided from the *replica's local* catalog, so a variable bucket
+  the replica has never seen (empty local catalog on a cold start) is not yet
+  known to be variable. In practice the live receiver creates the local
+  variable bucket from incoming tick writes (with the correct record type), after
+  which every reconcile skips it. A cold-start tick bucket with no live writes is
+  the documented gap; recovery is the same deep resync as old corrections.
 - **Old corrections** — a master-side write to an epoch older than
   `backfill_lookback`, made while the replica was disconnected (or dropped from
   the stream), is not healed automatically. Recovery ("deep resync"): delete

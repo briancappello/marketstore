@@ -48,6 +48,22 @@ func TestDriverReconcileBackfillsEveryBucket(t *testing.T) {
 	assert.Equal(t, int64(10), wm.Get("MSFT/1D/OHLCV"))
 }
 
+func TestDriverReconcileSkipsVariableBuckets(t *testing.T) {
+	api := &listAPI{tbks: []string{"AAPL/1Min/OHLCV", "AAPL/1Sec/TRADE"}}
+	wm, err := backfill.NewWatermarks(t.TempDir() + "/wm.json")
+	require.Nil(t, err)
+	write := func(io.ColumnSeriesMap, bool) error { return nil }
+
+	// Report the TRADE bucket as variable-length; it must be skipped so its
+	// append-only writes are never duplicated by re-pull.
+	isVar := func(tbk string) bool { return tbk == "AAPL/1Sec/TRADE" }
+	d := backfill.NewDriver(api, write, wm, 4, 0, isVar)
+	require.Nil(t, d.Reconcile(context.Background(), 1000))
+
+	assert.Equal(t, []string{"AAPL/1Min/OHLCV"}, api.queried, "variable bucket must not be queried")
+	assert.Equal(t, int64(0), wm.Get("AAPL/1Sec/TRADE"), "variable bucket watermark must stay unset")
+}
+
 func TestDriverRunReconcilesImmediatelyThenStops(t *testing.T) {
 	api := &listAPI{tbks: []string{"AAPL/1Min/OHLCV"}}
 	wm, _ := backfill.NewWatermarks(t.TempDir() + "/wm.json")
