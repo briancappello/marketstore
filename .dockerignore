@@ -1,0 +1,31 @@
+# Keep local runtime data and build artifacts out of the build context.
+# data/ can be hundreds of GB of market data on a dev machine; a clean CI
+# checkout does not have it. Without this, `docker build .` streams it all.
+data/
+build/
+pkg/
+bin/
+.git/
+tmp/
+mktsdb/
+**/mktsdb/
+coverage.txt
+
+# Prebuilt local binaries (rebuilt inside the image)
+/marketstore
+/marketstore_test
+/backfiller
+/flatfiles
+/probe
+*.exe
+*.test
+
+# Editor / IDE / OS cruft
+.idea/
+.vscode/
+.ruff_cache/
+**/*.swp
+.DS_Store
+
+# Large local docs
+*.pdf
