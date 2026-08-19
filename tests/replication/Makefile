@@ -68,8 +68,12 @@ run-replica:
 
 run-pyclient:
 	docker create --name $(PYMARKETSTORE_CONTAINER_NAME) --net=host $(PYMARKETSTORE_IMAGE_NAME) tail -f /dev/null
-	docker cp $(CURDIR)/tests $(PYMARKETSTORE_CONTAINER_NAME):/project/tests
 	docker start $(PYMARKETSTORE_CONTAINER_NAME)
+	# Copy after start (the container just runs `tail`), so /project — the
+	# image WORKDIR — is materialized. podman cp cannot write into a
+	# not-yet-started container's WORKDIR-only dir, and copying into the
+	# existing /project lands the tree at /project/tests on docker and podman.
+	docker cp $(CURDIR)/tests $(PYMARKETSTORE_CONTAINER_NAME):/project/
 
 	@sleep 2
 	@if [ `../integ/bin/check_running ${PYMARKETSTORE_CONTAINER_NAME}` -eq 0 ]; then \
