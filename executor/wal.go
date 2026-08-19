@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -38,7 +39,7 @@ type WALFileType struct {
 	ReplicationSender ReplicationSender // send messages to replica servers
 	WALBypass         bool              // TODO: refactor: unexport this param
 	BackgroundSync    bool              // TODO: refactor: unexport this param
-	shutdownPending   *bool
+	shutdownPending   atomic.Bool
 	walWaitGroup      *sync.WaitGroup
 	tpd               *TriggerPluginDispatcher
 	txnPipe           *TransactionPipe
@@ -67,14 +68,12 @@ func NewWALFile(rootDir string, owningInstanceID int64, rs ReplicationSender,
 	walBypass bool, walWaitGroup *sync.WaitGroup, tpd *TriggerPluginDispatcher,
 	txnPipe *TransactionPipe,
 ) (wf *WALFileType, err error) {
-	shutdownPending := false
 	wf = &WALFileType{
 		lastCommittedTGID: 0,
 		OwningInstanceID:  owningInstanceID,
 		rootDir:           rootDir,
 		ReplicationSender: rs,
 		WALBypass:         walBypass,
-		shutdownPending:   &shutdownPending,
 		walWaitGroup:      walWaitGroup,
 		tpd:               tpd,
 		txnPipe:           txnPipe,
@@ -731,7 +730,7 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 
 	chanCap := cap(wf.txnPipe.writeChannel)
 	for {
-		if !*wf.shutdownPending {
+		if !wf.shutdownPending.Load() {
 			select {
 			case <-tickerWAL.C:
 				if err := wf.FlushToWAL(); err != nil {
@@ -805,7 +804,7 @@ func (wf *WALFileType) RequestFlush() {
 }
 
 func (wf *WALFileType) Shutdown() {
-	*wf.shutdownPending = true
+	wf.shutdownPending.Store(true)
 	wf.walWaitGroup.Wait()
 	wf.finishAndWait()
 }
