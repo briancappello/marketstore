@@ -40,9 +40,16 @@ type WALFileType struct {
 	WALBypass         bool              // TODO: refactor: unexport this param
 	BackgroundSync    bool              // TODO: refactor: unexport this param
 	shutdownPending   atomic.Bool
-	walWaitGroup      *sync.WaitGroup
-	tpd               *TriggerPluginDispatcher
-	txnPipe           *TransactionPipe
+	// hasWriter reports whether this instance's SyncWAL loop is running and
+	// draining txnPipe.flushChannel. RequestFlush reads it to decide between
+	// the channel path and an inline flush. It MUST be per-instance: the
+	// channel it guards belongs to this WALFileType, so a global flag would
+	// let one instance's writer make another instance's RequestFlush block
+	// forever on a channel nothing reads.
+	hasWriter    atomic.Bool
+	walWaitGroup *sync.WaitGroup
+	tpd          *TriggerPluginDispatcher
+	txnPipe      *TransactionPipe
 }
 
 type ReplicationSender interface {
@@ -712,8 +719,6 @@ func sanityCheckValue(fp *os.File, value int64) (isSane bool) {
 	return value < sanityLen
 }
 
-var haveWALWriter atomic.Bool
-
 func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRotateInterval int) {
 	/*
 	   Example: syncWAL(500 * time.Millisecond, 15 * time.Minute)
@@ -722,7 +727,7 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 		numTickerCheckPerWALRefresh = 100
 		writeChannelCapThreshold    = 0.8
 	)
-	haveWALWriter.Store(true)
+	wf.hasWriter.Store(true)
 	tickerWAL := time.NewTicker(walRefresh)
 	tickerPrimary := time.NewTicker(primaryRefresh)
 	tickerCheck := time.NewTicker(walRefresh / numTickerCheckPerWALRefresh)
@@ -765,7 +770,7 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 				}
 			}
 		} else {
-			haveWALWriter.Store(false)
+			wf.hasWriter.Store(false)
 			log.Info("Flushing to WAL...")
 			err := wf.FlushToWAL()
 			if err != nil {
@@ -788,7 +793,7 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 // returns if there is already one queued which will handle the data
 // present in the write channel, as it will flush as soon as possible.
 func (wf *WALFileType) RequestFlush() {
-	if !haveWALWriter.Load() {
+	if !wf.hasWriter.Load() {
 		if err := wf.FlushToWAL(); err != nil {
 			log.Error("failed to flush WAL", zap.Error(err))
 		}

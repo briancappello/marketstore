@@ -16,7 +16,7 @@ import (
 // TestConcurrentSameBucketCreationRace reproduces the remaining Go-1.26 crash:
 // two subsystems (streaming + REST backfill) concurrently WriteCSM to the SAME
 // current-day bucket. Uses BackgroundSync=true to match production (taichi), so
-// the background WAL writer runs (haveWALWriter=true) and RequestFlush takes the
+// the background WAL writer runs (wf.hasWriter=true) and RequestFlush takes the
 // channel path — exercising the real write path. Run with -race.
 func TestConcurrentSameBucketCreationRace(t *testing.T) {
 	rootDir := t.TempDir()
@@ -24,13 +24,12 @@ func TestConcurrentSameBucketCreationRace(t *testing.T) {
 	cfg.BackgroundSync = true // production default; starts the background WAL writer
 	c := di.NewContainer(cfg)
 	catalogDir := c.GetCatalogDir()
-	walFile := c.GetInitWALFile() // starts SyncWAL goroutine -> haveWALWriter=true
+	walFile := c.GetInitWALFile() // starts SyncWAL goroutine -> wf.hasWriter=true
 	require.NotNil(t, walFile)
-	// Tear the background writer down at the end. haveWALWriter is a
-	// package-global flag; leaving this goroutine running keeps it true, so a
-	// later test with BackgroundSync=false (its own WALFile has no writer loop)
-	// would take the channel path in RequestFlush and block forever on a
-	// channel nothing reads. Shutdown resets the flag and stops the goroutine.
+	// Tear the background writer down at the end so its SyncWAL goroutine and
+	// tickers don't leak into the rest of the test binary. (hasWriter is now
+	// per-instance, so a leak can no longer wedge another test's flush, but
+	// leaving a live writer goroutine around is still untidy.)
 	t.Cleanup(walFile.Shutdown)
 
 	base := time.Date(2026, 8, 19, 9, 30, 0, 0, time.UTC)
