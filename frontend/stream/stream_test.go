@@ -2,6 +2,7 @@ package stream_test
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -457,4 +458,100 @@ func TestStreamMsgpackUnchangedByNegotiation(t *testing.T) {
 	assert.Nil(t, msgpack.Unmarshal(buf, &ack))
 	assert.Equal(t, "subscribed", ack.Action)
 	assert.Equal(t, streamKeys, ack.TBKs)
+}
+
+func TestStreamPushDeliversPerConnectionEncoding(t *testing.T) {
+	// One msgpack subscriber and one JSON subscriber on the same TBK must
+	// each receive the same payload in their own negotiated encoding.
+	setupShared(t)
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+
+	const tbkStr = "TSLA/5Min/OHLCV"
+
+	mpConn, mpProto := dialWith(t, srv, []string{"msgpack"})
+	defer mpConn.Close()
+	assert.Equal(t, "msgpack", mpProto)
+
+	jsConn, jsProto := dialWith(t, srv, []string{"json"})
+	defer jsConn.Close()
+	assert.Equal(t, "json", jsProto)
+
+	// Subscribe both, each in its own encoding, and drain the acks.
+	mpSub, err := msgpack.Marshal(stream.SubscribeMessage{Action: "subscribe", TBKs: []string{tbkStr}})
+	assert.Nil(t, err)
+	assert.Nil(t, mpConn.WriteMessage(websocket.BinaryMessage, mpSub))
+	_, _, err = mpConn.ReadMessage()
+	assert.Nil(t, err)
+
+	jsSub, err := json.Marshal(stream.SubscribeMessage{Action: "subscribe", TBKs: []string{tbkStr}})
+	assert.Nil(t, err)
+	assert.Nil(t, jsConn.WriteMessage(websocket.TextMessage, jsSub))
+	_, _, err = jsConn.ReadMessage()
+	assert.Nil(t, err)
+
+	// Push one payload to both.
+	tbk := io.NewTimeBucketKey(tbkStr)
+	assert.Nil(t, stream.Push(*tbk, genColumns()))
+
+	// msgpack subscriber: binary frame, msgpack-decodable.
+	assert.Nil(t, mpConn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	msgType, buf, err := mpConn.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.BinaryMessage, msgType)
+	var mpPayload stream.Payload
+	assert.Nil(t, msgpack.Unmarshal(buf, &mpPayload))
+	assert.Equal(t, tbkStr, mpPayload.Key)
+
+	// JSON subscriber: text frame, json-decodable, lowercase tags.
+	assert.Nil(t, jsConn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	msgType, buf, err = jsConn.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.TextMessage, msgType)
+
+	var raw map[string]any
+	assert.Nil(t, json.Unmarshal(buf, &raw))
+	assert.Equal(t, tbkStr, raw["key"])
+	assert.Contains(t, raw, "data")
+	// Direct is an internal routing flag and must never reach the wire.
+	assert.NotContains(t, raw, "Direct")
+	assert.NotContains(t, raw, "direct")
+}
+
+func TestStreamPushToJSONSubscriberWithNaN(t *testing.T) {
+	// End-to-end proof that the sanitizer from Task 2 is reachable from a
+	// real push: a NaN in the column data must arrive as JSON null rather
+	// than silently dropping the frame.
+	setupShared(t)
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+
+	const tbkStr = "AMZN/5Min/OHLCV"
+
+	conn, proto := dialWith(t, srv, []string{"json"})
+	defer conn.Close()
+	assert.Equal(t, "json", proto)
+
+	sub, err := json.Marshal(stream.SubscribeMessage{Action: "subscribe", TBKs: []string{tbkStr}})
+	assert.Nil(t, err)
+	assert.Nil(t, conn.WriteMessage(websocket.TextMessage, sub))
+	_, _, err = conn.ReadMessage()
+	assert.Nil(t, err)
+
+	tbk := io.NewTimeBucketKey(tbkStr)
+	assert.Nil(t, stream.Push(*tbk, map[string]interface{}{
+		"Open":  []float64{math.NaN()},
+		"Close": []float64{2.5},
+	}))
+
+	assert.Nil(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	msgType, buf, err := conn.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.TextMessage, msgType)
+
+	var raw map[string]any
+	assert.Nil(t, json.Unmarshal(buf, &raw))
+	data := raw["data"].(map[string]any)
+	assert.Nil(t, data["Open"].([]any)[0])
+	assert.Equal(t, 2.5, data["Close"].([]any)[0])
 }

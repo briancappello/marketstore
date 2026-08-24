@@ -25,7 +25,6 @@ import (
 	"github.com/eapache/channels"
 	"github.com/gobwas/glob"
 	"github.com/gorilla/websocket"
-	msgpack "github.com/vmihailenco/msgpack"
 
 	"github.com/alpacahq/marketstore/v4/metrics"
 	"github.com/alpacahq/marketstore/v4/utils/io"
@@ -274,10 +273,24 @@ func stream() {
 			continue
 		}
 
-		buf, err := msgpack.Marshal(payload)
-		if err != nil {
-			log.Error("failed to marshal outbound stream payload (%v)", err)
-			continue
+		// Encode lazily, once per format per payload. Subscribers sharing
+		// an encoding share a buffer, so cost scales with the number of
+		// distinct formats in use, not with the number of subscribers.
+		// A format that fails to marshal is cached as a nil buffer so the
+		// failure is not retried for every remaining subscriber.
+		encoded := make(map[string][]byte, len(wscodec.Subprotocols))
+		encode := func(c wscodec.Codec) ([]byte, bool) {
+			if buf, seen := encoded[c.Name()]; seen {
+				return buf, buf != nil
+			}
+			buf, err := c.Marshal(payload)
+			if err != nil {
+				log.Error("failed to marshal outbound stream payload as %s (%v)", c.Name(), err)
+				encoded[c.Name()] = nil
+				return nil, false
+			}
+			encoded[c.Name()] = buf
+			return buf, true
 		}
 
 		catalog.RLock()
@@ -289,10 +302,18 @@ func stream() {
 			} else {
 				matched = s.Subscribed(payload.Key)
 			}
-			if matched {
-				if err := s.handleOutbound(buf); err != nil {
-					log.Error("failed to stream outbound (%s)", err)
-				}
+			if !matched {
+				continue
+			}
+
+			// s.codec is fixed at connection time and never mutated, so
+			// reading it here without the subscriber lock is safe.
+			buf, ok := encode(s.codec)
+			if !ok {
+				continue
+			}
+			if err := s.handleOutbound(buf); err != nil {
+				log.Error("failed to stream outbound (%s)", err)
 			}
 		}
 
