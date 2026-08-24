@@ -177,9 +177,3 @@ The logger is a global singleton -- do not pass it through function parameters.
 Plugins are built as Go shared objects: `go build -buildmode=plugin -o name.so .`
 Each plugin has a `main` package with a stub `main(){}` and a factory function
 (`NewBgWorker` or `NewTrigger`). See `plugins/README.md` for interface details.
-
-## CI/CD
-
-CircleCI 2.1 with `cimg/go:1.18.2`. Workflow: build + plugins in parallel,
-unit tests independently, integration tests independently. Deploy on tags only.
-Coverage via Codecov (target: 70% on patches, threshold: 2% on project).
