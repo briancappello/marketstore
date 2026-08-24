@@ -89,6 +89,11 @@ type Subscriber struct {
 	// safe to read without holding the lock. The fan-out loop in stream()
 	// depends on that.
 	codec wscodec.Codec
+	// catalog is the Catalog this subscriber was registered in, captured
+	// at accept time. consume() removes itself from this Catalog rather
+	// than the package global, so a subsequent Initialize() that swaps the
+	// global does not race a still-running subscriber goroutine.
+	catalog *Catalog
 }
 
 // Subscribed matches the subscriber's subscribed streams
@@ -191,7 +196,7 @@ func (s *Subscriber) consume() {
 	defer func() {
 		s.c.Close()
 		metrics.WSConnections.Dec()
-		catalog.Remove(s)
+		s.catalog.Remove(s)
 		s.done <- struct{}{}
 	}()
 
@@ -262,8 +267,12 @@ func (s *Subscriber) produce() {
 	}
 }
 
-func stream() {
-	for v := range send.Out() {
+// stream fans out payloads from sendCh to the subscribers in cat. Both are
+// passed in rather than read from the package globals so that a subsequent
+// Initialize(), which swaps those globals and starts a fresh stream()
+// goroutine, cannot race this one.
+func stream(sendCh *channels.InfiniteChannel, cat *Catalog) {
+	for v := range sendCh.Out() {
 		if v == nil {
 			continue
 		}
@@ -293,9 +302,9 @@ func stream() {
 			return buf, true
 		}
 
-		catalog.RLock()
+		cat.RLock()
 
-		for s := range catalog.subs {
+		for s := range cat.subs {
 			var matched bool
 			if payload.Direct {
 				matched = s.SubscribedDirect(payload.Key)
@@ -317,7 +326,7 @@ func stream() {
 			}
 		}
 
-		catalog.RUnlock()
+		cat.RUnlock()
 	}
 }
 
@@ -355,7 +364,7 @@ func Initialize() {
 	send = channels.NewInfiniteChannel()
 	catalog = NewCatalog()
 
-	go stream()
+	go stream(send, catalog)
 }
 
 // Shutdown sends a WebSocket close frame to every connected subscriber
@@ -395,18 +404,20 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// build the subscriber
+	// build the subscriber, capturing the current catalog so consume()
+	// removes itself from the same one it was added to.
 	s := &Subscriber{
-		c:     ws,
-		done:  make(chan struct{}),
-		codec: wscodec.For(ws.Subprotocol()),
+		c:       ws,
+		done:    make(chan struct{}),
+		codec:   wscodec.For(ws.Subprotocol()),
+		catalog: catalog,
 	}
 
 	if s.c != nil {
 		log.Info("new stream listener: %v", ws.RemoteAddr().String())
 	}
 
-	catalog.Add(s)
+	s.catalog.Add(s)
 
 	// begin streaming
 	go s.consume()
