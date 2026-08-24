@@ -4,7 +4,7 @@ coverage.txt
 /pkg/
 **/*.swp
 .idea/
-/data/
+/data
 /tmp/
 *.pyc
 mktsdb/
