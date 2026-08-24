@@ -7,7 +7,9 @@ placed on a 'shelf' and will be given a shelf-life that indicates when they will
 be delivered. These entries will be updated with the latest aggregated candle up
 until the expiration time.
 
-Note that all data is transmitted with [MessagePack][msgp] encoding.
+Note that data is transmitted with [MessagePack][msgp] encoding by default; a
+client may request JSON instead via the `json` WebSocket subprotocol (see the
+Protocol section below).
 
 ## Configuration
 stream.so comes with the server by default, so you can simply configure it
@@ -59,8 +61,21 @@ if err != nil {
 <-done
 ```
 
-All the messages are encoded in MessagePack. The message flow at low level looks
-as follows.
+Messages are MessagePack-encoded by default. A client may request JSON instead
+by offering the `json` WebSocket subprotocol during the handshake:
+
+```js
+new WebSocket('ws://localhost:5993/ws', 'json')
+```
+
+The negotiated encoding applies to every frame in both directions. JSON uses
+WebSocket text frames, MessagePack uses binary frames, and field names are the
+same in both. Offering no subprotocol, or an unrecognised one, yields
+MessagePack — existing clients are unaffected. Non-finite floats (`NaN`,
+`±Inf`) are sent as `null` on the JSON encoding, since JSON cannot represent
+them.
+
+The message flow at low level looks as follows.
 
 ```
 <Connection Made on "/ws">

@@ -27,8 +27,27 @@ make -C contrib/streamreplay
 
 ## Protocol
 
-All messages are encoded as [MessagePack](https://msgpack.org/) over WebSocket
-binary frames.
+Messages are encoded as [MessagePack](https://msgpack.org/) over WebSocket by
+default. A client may instead request JSON by offering the `json` WebSocket
+subprotocol during the handshake:
+
+```js
+new WebSocket('ws://localhost:5993/ws/replay', 'json')
+```
+
+```python
+websockets.connect('ws://localhost:5993/ws/replay', subprotocols=['json'])
+```
+
+The negotiated encoding applies to every frame in both directions for the life
+of the connection. JSON frames are sent as WebSocket text frames; MessagePack
+frames are sent as binary frames. Field names are identical in both encodings.
+A client that offers no subprotocol, or an unrecognised one, receives
+MessagePack, so existing clients need no changes.
+
+Because JSON cannot represent `NaN` or infinity, non-finite float values are
+sent as `null` on the JSON encoding. The MessagePack encoding transmits them
+unchanged.
 
 ### Subscribe (client → server)
 
