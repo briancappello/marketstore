@@ -30,6 +30,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/metrics"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
+	"github.com/alpacahq/marketstore/v4/utils/wscodec"
 )
 
 const (
@@ -44,6 +45,7 @@ var (
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
+		Subprotocols: wscodec.Subprotocols,
 	}
 )
 
@@ -83,6 +85,11 @@ type Subscriber struct {
 	c       *websocket.Conn
 	done    chan struct{}
 	streams map[string]struct{}
+	// codec is resolved from the negotiated subprotocol when the
+	// connection is accepted and is never mutated afterwards, so it is
+	// safe to read without holding the lock. The fan-out loop in stream()
+	// depends on that.
+	codec wscodec.Codec
 }
 
 // Subscribed matches the subscriber's subscribed streams
@@ -127,28 +134,28 @@ func (s *Subscriber) SubscribedDirect(itemKey string) bool {
 // SubscribeMessage is an inbound message for the client
 // to subscribe to streams.
 type SubscribeMessage struct {
-	Action string   `msgpack:"action"`
-	TBKs   []string `msgpack:"tbks"`
+	Action string   `msgpack:"action" json:"action"`
+	TBKs   []string `msgpack:"tbks" json:"tbks"`
 }
 
 // SubscribedMessage is the ack sent back to the client after a
 // successful subscribe. The Action field is always "subscribed".
 type SubscribedMessage struct {
-	Action string   `msgpack:"action"`
-	TBKs   []string `msgpack:"tbks"`
+	Action string   `msgpack:"action" json:"action"`
+	TBKs   []string `msgpack:"tbks" json:"tbks"`
 }
 
 // ErrorMessage is used to report errors when a client
 // subscribes to invalid streams.
 type ErrorMessage struct {
-	Error string `msgpack:"error"`
+	Error string `msgpack:"error" json:"error"`
 }
 
 func (s *Subscriber) handleOutbound(buf []byte) error {
 	// prevents concurrent write to the websocket connection
 	s.Lock()
 	defer s.Unlock()
-	return s.c.WriteMessage(websocket.BinaryMessage, buf)
+	return s.c.WriteMessage(s.codec.MessageType(), buf)
 }
 
 func (s *Subscriber) handleInbound(msg SubscribeMessage) ([]string, error) {
@@ -212,18 +219,18 @@ func (s *Subscriber) consume() {
 		case websocket.TextMessage, websocket.BinaryMessage:
 			m := SubscribeMessage{}
 
-			if err = msgpack.Unmarshal(buf, &m); err != nil {
+			if err = s.codec.Unmarshal(buf, &m); err != nil {
 				log.Error("failed to unmarshal inbound stream message (%v)", err)
 				continue
 			}
 			tbks, inboundErr := s.handleInbound(m)
 			if inboundErr != nil {
-				errBuf, _ := msgpack.Marshal(ErrorMessage{Error: inboundErr.Error()})
+				errBuf, _ := s.codec.Marshal(ErrorMessage{Error: inboundErr.Error()})
 				if err := s.handleOutbound(errBuf); err != nil {
 					log.Error("failed to send stream error message (%v)", err)
 				}
 			} else {
-				ack, _ := msgpack.Marshal(SubscribedMessage{Action: "subscribed", TBKs: tbks})
+				ack, _ := s.codec.Marshal(SubscribedMessage{Action: "subscribed", TBKs: tbks})
 				if err := s.handleOutbound(ack); err != nil {
 					log.Error("failed to send stream subscribed ack (%v)", err)
 				}
@@ -295,14 +302,14 @@ func stream() {
 
 // Payload is used to send data over the websocket.
 type Payload struct {
-	Key  string      `msgpack:"key"`
-	Data interface{} `msgpack:"data"`
+	Key  string      `msgpack:"key" json:"key"`
+	Data interface{} `msgpack:"data" json:"data"`
 	// Direct is an internal routing flag (not serialized over the wire).
 	// When true, the payload is only delivered to subscribers whose
 	// subscription pattern specifies a concrete symbol in the first
 	// path segment (e.g. "AAPL/1Min/OHLCV"), skipping wildcard-symbol
 	// subscribers (e.g. "*/1Min/OHLCV").
-	Direct bool `msgpack:"-"`
+	Direct bool `msgpack:"-" json:"-"`
 }
 
 // Push sends data over the stream interface to all matching subscribers.
@@ -369,8 +376,9 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	// build the subscriber
 	s := &Subscriber{
-		c:    ws,
-		done: make(chan struct{}),
+		c:     ws,
+		done:  make(chan struct{}),
+		codec: wscodec.For(ws.Subprotocol()),
 	}
 
 	if s.c != nil {

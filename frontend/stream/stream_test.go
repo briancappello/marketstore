@@ -1,10 +1,12 @@
 package stream_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -321,4 +323,138 @@ func handlePayload(t *testing.T, bufs [][]byte, expectedStreamKeyCount map[strin
 		assert.True(t, ok)
 		assert.Equal(t, expectedStreamKeyCount[streamKey], count)
 	}
+}
+
+var setupOnce sync.Once
+
+// setupShared initialises the executor and stream globals once for all tests
+// that use it. stream.Initialize reassigns the package-level send channel and
+// catalog; the new push-delivery tests keep a connection open across a Push,
+// so they share a single stable setup instead of each resetting the globals.
+func setupShared(t *testing.T) {
+	t.Helper()
+	setupOnce.Do(func() { setup(t) })
+}
+
+// dialWith opens a client connection to the given stream server, offering
+// the supplied subprotocols, and returns the connection plus the
+// subprotocol the server selected.
+func dialWith(t *testing.T, srv *httptest.Server, subprotocols []string) (*websocket.Conn, string) {
+	t.Helper()
+
+	u, _ := url.Parse(srv.URL + "/ws")
+	u.Scheme = "ws"
+
+	dialer := websocket.Dialer{Subprotocols: subprotocols}
+	conn, resp, err := dialer.Dial(u.String(), nil)
+	assert.Nil(t, err)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	return conn, conn.Subprotocol()
+}
+
+func TestStreamSubprotocolNegotiation(t *testing.T) {
+	setupShared(t)
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+
+	cases := []struct {
+		name   string
+		offer  []string
+		expect string
+	}{
+		{"no offer falls back to msgpack", nil, ""},
+		{"msgpack offer", []string{"msgpack"}, "msgpack"},
+		{"json offer", []string{"json"}, "json"},
+		// Server preference order decides: msgpack is listed first.
+		{"both offered prefers msgpack", []string{"json", "msgpack"}, "msgpack"},
+		{"unknown offer negotiates nothing", []string{"cbor"}, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, got := dialWith(t, srv, tc.offer)
+			defer conn.Close()
+			assert.Equal(t, tc.expect, got)
+		})
+	}
+}
+
+func TestStreamJSONSubscribeAck(t *testing.T) {
+	setupShared(t)
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+
+	conn, negotiated := dialWith(t, srv, []string{"json"})
+	defer conn.Close()
+	assert.Equal(t, "json", negotiated)
+
+	streamKeys := []string{"AAPL/5Min/OHLCV"}
+	buf, err := json.Marshal(stream.SubscribeMessage{Action: "subscribe", TBKs: streamKeys})
+	assert.Nil(t, err)
+	// A JSON client sends a text frame.
+	assert.Nil(t, conn.WriteMessage(websocket.TextMessage, buf))
+
+	msgType, buf, err := conn.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.TextMessage, msgType)
+
+	// Field names on the wire must be the json tags, not Go field names.
+	var raw map[string]any
+	assert.Nil(t, json.Unmarshal(buf, &raw))
+	assert.Equal(t, "subscribed", raw["action"])
+	assert.NotContains(t, string(buf), `"Action"`)
+
+	var ack stream.SubscribedMessage
+	assert.Nil(t, json.Unmarshal(buf, &ack))
+	assert.Equal(t, streamKeys, ack.TBKs)
+}
+
+func TestStreamJSONErrorMessage(t *testing.T) {
+	setupShared(t)
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+
+	conn, _ := dialWith(t, srv, []string{"json"})
+	defer conn.Close()
+
+	// handleInbound rejects any action other than "subscribe".
+	buf, err := json.Marshal(stream.SubscribeMessage{Action: "unsubscribe", TBKs: []string{"AAPL/5Min/OHLCV"}})
+	assert.Nil(t, err)
+	assert.Nil(t, conn.WriteMessage(websocket.TextMessage, buf))
+
+	msgType, buf, err := conn.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.TextMessage, msgType)
+
+	var errMsg stream.ErrorMessage
+	assert.Nil(t, json.Unmarshal(buf, &errMsg))
+	assert.Contains(t, errMsg.Error, "unknown action")
+}
+
+func TestStreamMsgpackUnchangedByNegotiation(t *testing.T) {
+	// Regression guard: a client that negotiates nothing must still get
+	// binary msgpack frames, exactly as before this work.
+	setupShared(t)
+	srv := httptest.NewServer(http.HandlerFunc(stream.Handler))
+	defer srv.Close()
+
+	conn, negotiated := dialWith(t, srv, nil)
+	defer conn.Close()
+	assert.Equal(t, "", negotiated)
+
+	streamKeys := []string{"AAPL/5Min/OHLCV"}
+	buf, err := msgpack.Marshal(stream.SubscribeMessage{Action: "subscribe", TBKs: streamKeys})
+	assert.Nil(t, err)
+	assert.Nil(t, conn.WriteMessage(websocket.BinaryMessage, buf))
+
+	msgType, buf, err := conn.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.BinaryMessage, msgType)
+
+	var ack stream.SubscribedMessage
+	assert.Nil(t, msgpack.Unmarshal(buf, &ack))
+	assert.Equal(t, "subscribed", ack.Action)
+	assert.Equal(t, streamKeys, ack.TBKs)
 }
