@@ -35,6 +35,7 @@ type Container struct {
 	grpcServer            *grpc.Server
 	httpService           *frontend.QueryService
 	httpServer            *frontend.RPCServer
+	dataService           *frontend.DataService
 	replicationServer     *replication.GRPCReplicationServer
 	grpcReplicationServer *grpc.Server
 	replicationBackfill   *backfill.Driver

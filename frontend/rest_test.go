@@ -1,0 +1,133 @@
+package frontend_test
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/alpacahq/marketstore/v4/frontend"
+)
+
+// newRESTServer builds an httptest server with the REST routes registered
+// against the supplied DataService and CORS allow-list.
+func newRESTServer(t *testing.T, svc *frontend.DataService, origins []string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	svc.RegisterRESTRoutes(mux, origins)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRESTSymbols(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/symbols")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	var body map[string]any
+	assert.Nil(t, json.NewDecoder(resp.Body).Decode(&body))
+	// Lowercase json tag, not the Go field name.
+	assert.Contains(t, body, "results")
+	assert.NotContains(t, body, "Results")
+}
+
+func TestRESTNotQueryableReturns503(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 0)
+	t.Cleanup(func() { atomic.StoreUint32(&frontend.Queryable, 1) })
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/symbols")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+	var body map[string]string
+	assert.Nil(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.NotEmpty(t, body["error"])
+}
+
+func TestRESTUnknownRouteReturnsJSON404(t *testing.T) {
+	// A 404 must be a JSON envelope, not net/http's default HTML.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/nope")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	var body map[string]string
+	assert.Nil(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.NotEmpty(t, body["error"])
+}
+
+func TestRESTCORSDisabledByDefault(t *testing.T) {
+	// Empty allow-list means no CORS headers, so browser exposure stays
+	// a deliberate configuration act.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/symbols", nil)
+	req.Header.Set("Origin", "https://example.com")
+	resp, err := http.DefaultClient.Do(req)
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+}
+
+func TestRESTCORSAllowedOrigin(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, []string{"https://example.com"})
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/symbols", nil)
+	req.Header.Set("Origin", "https://example.com")
+	resp, err := http.DefaultClient.Do(req)
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, "https://example.com", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "Origin", resp.Header.Get("Vary"))
+
+	// A non-allowed origin gets nothing.
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/symbols", nil)
+	req2.Header.Set("Origin", "https://evil.com")
+	resp2, err := http.DefaultClient.Do(req2)
+	assert.Nil(t, err)
+	defer resp2.Body.Close()
+	assert.Empty(t, resp2.Header.Get("Access-Control-Allow-Origin"))
+}
+
+func TestRESTCORSPreflight(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, []string{"https://example.com"})
+
+	req, _ := http.NewRequest(http.MethodOptions, srv.URL+"/v1/symbols", nil)
+	req.Header.Set("Origin", "https://example.com")
+	resp, err := http.DefaultClient.Do(req)
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Equal(t, "https://example.com", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Contains(t, resp.Header.Get("Access-Control-Allow-Methods"), "GET")
+}

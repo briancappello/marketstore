@@ -272,7 +272,7 @@ func (s *DataService) executeQuery(req *QueryRequest) (*QueryResponse, error) {
 }
 
 type ListSymbolsResponse struct {
-	Results []string
+	Results []string `json:"results"`
 }
 
 type ListSymbolsRequest struct {

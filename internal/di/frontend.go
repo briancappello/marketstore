@@ -17,11 +17,19 @@ func (c *Container) GetHTTPServer() *frontend.RPCServer {
 	if c.httpServer != nil {
 		return c.httpServer
 	}
-	server, _ := frontend.NewServer(c.GetAbsRootDir(), c.GetCatalogDir(), c.GetAggRunner(),
+	server, ds := frontend.NewServer(c.GetAbsRootDir(), c.GetCatalogDir(), c.GetAggRunner(),
 		c.GetWriter(), c.GetHTTPService(),
 	)
 	c.httpServer = server
+	c.dataService = ds
 	return server
+}
+
+// GetDataService returns the DataService paired with the RPC server, so the
+// REST surface queries the same catalog. GetHTTPServer builds and caches it.
+func (c *Container) GetDataService() *frontend.DataService {
+	c.GetHTTPServer()
+	return c.dataService
 }
 
 func (c *Container) GetGRPCService() *frontend.GRPCService {

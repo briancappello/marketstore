@@ -87,12 +87,16 @@ func (c *AttrGroupConfig) GetRecordType() string {
 
 type MktsConfig struct {
 	// RootDirectory is the absolute path to the data directory
-	RootDirectory              string
-	ListenURL                  string
-	GRPCListenURL              string
-	GRPCMaxSendMsgSize         int // in bytes
-	GRPCMaxRecvMsgSize         int // in bytes
-	UtilitiesURL               string
+	RootDirectory      string
+	ListenURL          string
+	GRPCListenURL      string
+	GRPCMaxSendMsgSize int // in bytes
+	GRPCMaxRecvMsgSize int // in bytes
+	UtilitiesURL       string
+	// RESTAllowedOrigins is the CORS allow-list for the REST API. Empty
+	// means no CORS headers are emitted and the API is same-origin only.
+	// The literal "*" allows any origin.
+	RESTAllowedOrigins         []string
 	Timezone                   *time.Location
 	StopGracePeriod            time.Duration
 	WALRotateInterval          int
@@ -157,22 +161,23 @@ func NewDefaultConfig(rootDir string) *MktsConfig {
 
 type aux struct {
 	// RootDirectory can be either a relative or absolute path
-	RootDirectory              string `yaml:"root_directory"`
-	ListenHost                 string `yaml:"listen_host"`
-	ListenPort                 string `yaml:"listen_port"`
-	GRPCListenPort             string `yaml:"grpc_listen_port"`
-	GRPCMaxSendMsgSize         int    `yaml:"grpc_max_send_msg_size"` // in MB
-	GRPCMaxRecvMsgSize         int    `yaml:"grpc_max_recv_msg_size"` // in MB
-	UtilitiesURL               string `yaml:"utilities_url"`
-	Timezone                   string `yaml:"timezone"`
-	LogLevel                   string `yaml:"log_level"`
-	StopGracePeriod            int    `yaml:"stop_grace_period"`
-	WALRotateInterval          int    `yaml:"wal_rotate_interval"`
-	DisableVariableCompression string `yaml:"disable_variable_compression"`
-	InitCatalog                string `yaml:"init_catalog"`
-	InitWALCache               string `yaml:"init_wal_cache"`
-	BackgroundSync             string `yaml:"background_sync"`
-	WALBypass                  string `yaml:"wal_bypass"`
+	RootDirectory              string   `yaml:"root_directory"`
+	ListenHost                 string   `yaml:"listen_host"`
+	ListenPort                 string   `yaml:"listen_port"`
+	GRPCListenPort             string   `yaml:"grpc_listen_port"`
+	GRPCMaxSendMsgSize         int      `yaml:"grpc_max_send_msg_size"` // in MB
+	GRPCMaxRecvMsgSize         int      `yaml:"grpc_max_recv_msg_size"` // in MB
+	UtilitiesURL               string   `yaml:"utilities_url"`
+	RESTAllowedOrigins         []string `yaml:"rest_allowed_origins"`
+	Timezone                   string   `yaml:"timezone"`
+	LogLevel                   string   `yaml:"log_level"`
+	StopGracePeriod            int      `yaml:"stop_grace_period"`
+	WALRotateInterval          int      `yaml:"wal_rotate_interval"`
+	DisableVariableCompression string   `yaml:"disable_variable_compression"`
+	InitCatalog                string   `yaml:"init_catalog"`
+	InitWALCache               string   `yaml:"init_wal_cache"`
+	BackgroundSync             string   `yaml:"background_sync"`
+	WALBypass                  string   `yaml:"wal_bypass"`
 	Replication                struct {
 		Enabled    bool   `yaml:"enabled"`
 		TLSEnabled bool   `yaml:"tls_enabled"`
@@ -341,6 +346,7 @@ func ParseConfig(data []byte) (*MktsConfig, error) {
 		m.GRPCListenURL = fmt.Sprintf("%v:%v", a.ListenHost, a.GRPCListenPort)
 	}
 	m.UtilitiesURL = a.UtilitiesURL
+	m.RESTAllowedOrigins = a.RESTAllowedOrigins
 
 	for _, trig := range a.Triggers {
 		triggerSetting := &TriggerSetting{

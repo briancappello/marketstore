@@ -168,6 +168,10 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	log.Info("launching rpc data server...")
 	http.Handle("/rpc", c.GetHTTPServer())
 
+	// Set REST handlers.
+	log.Info("launching REST data server...")
+	c.GetDataService().RegisterRESTRoutes(http.DefaultServeMux, config.RESTAllowedOrigins)
+
 	// Set websocket handler.
 	log.Info("initializing websocket...")
 	stream.Initialize()
