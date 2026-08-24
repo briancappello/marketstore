@@ -26,6 +26,12 @@ func TestConcurrentSameBucketCreationRace(t *testing.T) {
 	catalogDir := c.GetCatalogDir()
 	walFile := c.GetInitWALFile() // starts SyncWAL goroutine -> haveWALWriter=true
 	require.NotNil(t, walFile)
+	// Tear the background writer down at the end. haveWALWriter is a
+	// package-global flag; leaving this goroutine running keeps it true, so a
+	// later test with BackgroundSync=false (its own WALFile has no writer loop)
+	// would take the channel path in RequestFlush and block forever on a
+	// channel nothing reads. Shutdown resets the flag and stops the goroutine.
+	t.Cleanup(walFile.Shutdown)
 
 	base := time.Date(2026, 8, 19, 9, 30, 0, 0, time.UTC)
 	const workers = 48
