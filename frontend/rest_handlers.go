@@ -239,3 +239,67 @@ func (s *DataService) handleRESTQuotes(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, quotesResponse{Quotes: quotes})
 }
+
+// handleRESTWatchlists serves GET /v1/watchlists.
+//
+// The watchlist plugin is optional; with no provider registered this returns
+// an empty list rather than an error, matching DataService.ListWatchlists.
+func (s *DataService) handleRESTWatchlists(w http.ResponseWriter, r *http.Request) {
+	if !requireQueryable(w) {
+		return
+	}
+
+	provider := GetWatchlistProvider()
+	if provider == nil {
+		writeJSON(w, http.StatusOK, ListWatchlistsResponse{
+			Watchlists: []WatchlistRankingResponse{},
+		})
+		return
+	}
+
+	all := provider.AllRankings()
+	names := make([]string, 0, len(all))
+	for name := range all {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]WatchlistRankingResponse, len(names))
+	for i, name := range names {
+		out[i] = convertRanking(name, all[name])
+	}
+	writeJSON(w, http.StatusOK, ListWatchlistsResponse{Watchlists: out})
+}
+
+// handleRESTWatchlist serves GET /v1/watchlists/{name}.
+//
+// Unlike the collection endpoint, an unknown name is a 404: the caller named
+// a specific resource that does not exist.
+func (s *DataService) handleRESTWatchlist(w http.ResponseWriter, r *http.Request) {
+	if !requireQueryable(w) {
+		return
+	}
+
+	name := r.PathValue("name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "watchlist name is required")
+		return
+	}
+
+	provider := GetWatchlistProvider()
+	if provider == nil {
+		writeError(w, http.StatusNotFound, "no such watchlist: "+name)
+		return
+	}
+
+	// GetRanking returns a []WatchlistRankingEntry; treat both nil and an
+	// empty slice as "not found" so an implementation that returns an empty
+	// non-nil slice for an unknown name still yields a 404.
+	ranking := provider.GetRanking(name)
+	if len(ranking) == 0 {
+		writeError(w, http.StatusNotFound, "no such watchlist: "+name)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, convertRanking(name, ranking))
+}

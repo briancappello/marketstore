@@ -15,13 +15,13 @@ type ListWatchlistsRequest struct {
 
 // ListWatchlistsResponse is the HTTP RPC response for listing watchlists.
 type ListWatchlistsResponse struct {
-	Watchlists []WatchlistRankingResponse `msgpack:"watchlists"`
+	Watchlists []WatchlistRankingResponse `msgpack:"watchlists" json:"watchlists"`
 }
 
 // WatchlistRankingResponse is a single watchlist with its ranked entries.
 type WatchlistRankingResponse struct {
-	Name    string                          `msgpack:"name"`
-	Entries []WatchlistRankingEntryResponse `msgpack:"entries"`
+	Name    string                          `msgpack:"name" json:"name"`
+	Entries []WatchlistRankingEntryResponse `msgpack:"entries" json:"entries"`
 }
 
 // WatchlistRankingEntryResponse is a single ranked symbol in a watchlist.
@@ -30,11 +30,11 @@ type WatchlistRankingResponse struct {
 // JSON/msgpack compatibility with existing clients. It is built per-response
 // from the typed framework.Field slice.
 type WatchlistRankingEntryResponse struct {
-	Symbol string             `msgpack:"symbol"`
-	Rank   int                `msgpack:"rank"`
-	Fields map[string]float64 `msgpack:"fields"`
+	Symbol string             `msgpack:"symbol" json:"symbol"`
+	Rank   int                `msgpack:"rank" json:"rank"`
+	Fields map[string]float64 `msgpack:"fields" json:"fields"`
 	// Sector is included only when non-empty (aggregate strategies).
-	Sector string `msgpack:"sector,omitempty"`
+	Sector string `msgpack:"sector,omitempty" json:"sector,omitempty"`
 }
 
 // ListWatchlists returns the current rankings for one or all watchlists.

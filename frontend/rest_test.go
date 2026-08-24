@@ -229,3 +229,61 @@ func TestRESTQuotesNotQueryable(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
+
+func TestRESTWatchlistsNoProviderReturnsEmptyList(t *testing.T) {
+	// The watchlist plugin is optional. With no provider registered the
+	// endpoint must return an empty list, matching the RPC behaviour,
+	// rather than erroring.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	frontend.RegisterWatchlistProvider(nil)
+	t.Cleanup(func() { frontend.RegisterWatchlistProvider(nil) })
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/watchlists")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Watchlists []map[string]any `json:"watchlists"`
+	}
+	assert.Nil(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.NotNil(t, body.Watchlists)
+	assert.Empty(t, body.Watchlists)
+}
+
+func TestRESTWatchlistsJSONFieldNames(t *testing.T) {
+	// The response types carry only msgpack tags today, so without json
+	// tags they would serialize as Watchlists/Name/Entries/Symbol/Rank.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	frontend.RegisterWatchlistProvider(nil)
+	t.Cleanup(func() { frontend.RegisterWatchlistProvider(nil) })
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/watchlists")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	buf := make([]byte, 512)
+	n, _ := resp.Body.Read(buf)
+	assert.Contains(t, string(buf[:n]), `"watchlists"`)
+	assert.NotContains(t, string(buf[:n]), `"Watchlists"`)
+}
+
+func TestRESTWatchlistByNameNotFound(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	frontend.RegisterWatchlistProvider(nil)
+	t.Cleanup(func() { frontend.RegisterWatchlistProvider(nil) })
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/watchlists/NOSUCHLIST")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+}
