@@ -10,11 +10,11 @@
 package frontend
 
 import (
-	"encoding/json"
 	"net/http"
 	"sync/atomic"
 
 	"github.com/alpacahq/marketstore/v4/utils/log"
+	"github.com/alpacahq/marketstore/v4/utils/wscodec"
 )
 
 type errorResponse struct {
@@ -22,12 +22,23 @@ type errorResponse struct {
 }
 
 // writeJSON renders v as JSON with the given status code.
+//
+// Marshalling goes through wscodec.JSONCodec rather than encoding/json
+// directly because encoding/json rejects NaN and ±Inf, which OHLCV columns
+// carry where a bar has no value. The codec renders them as null.
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	buf, err := wscodec.JSONCodec.Marshal(v)
+	if err != nil {
+		log.Error("rest: failed to encode response: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"failed to encode response"}`))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		// The status line is already written, so this can only be logged.
-		log.Error("rest: failed to encode response: %v", err)
+	if _, err := w.Write(buf); err != nil {
+		log.Error("rest: failed to write response: %v", err)
 	}
 }
 
@@ -90,6 +101,7 @@ func (s *DataService) RegisterRESTRoutes(mux *http.ServeMux, allowedOrigins []st
 	api := http.NewServeMux()
 
 	api.HandleFunc("GET /v1/symbols", s.handleRESTSymbols)
+	api.HandleFunc("GET /v1/bars/{symbol}", s.handleRESTBars)
 
 	// Catch-all so an unknown path returns a JSON envelope rather than
 	// net/http's default HTML 404.

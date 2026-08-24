@@ -131,3 +131,55 @@ func TestRESTCORSPreflight(t *testing.T) {
 	assert.Equal(t, "https://example.com", resp.Header.Get("Access-Control-Allow-Origin"))
 	assert.Contains(t, resp.Header.Get("Access-Control-Allow-Methods"), "GET")
 }
+
+func TestRESTBarsRejectsMultiSymbolAndWildcard(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	for _, path := range []string{"/v1/bars/AAPL,MSFT", "/v1/bars/*"} {
+		resp, err := http.Get(srv.URL + path)
+		assert.Nil(t, err)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, path)
+		resp.Body.Close()
+	}
+}
+
+func TestRESTBarsRejectsOversizeLimit(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	// 10000 is allowed; 10001 is a 400, not a clamp.
+	resp, err := http.Get(srv.URL + "/v1/bars/AAPL?limit=10001")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	var body map[string]string
+	assert.Nil(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Contains(t, body["error"], "10000")
+}
+
+func TestRESTBarsRejectsBadTimeBound(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/bars/AAPL?start=nonsense")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestRESTBarsUnknownSymbolReturns404(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/bars/NOSUCHSYMBOL")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+}
