@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -149,4 +150,92 @@ func (s *DataService) handleRESTBars(w http.ResponseWriter, r *http.Request) {
 
 	writeError(w, http.StatusNotFound,
 		"no data for "+symbol+"/"+timeframe+"/"+attributeGroup)
+}
+
+// quotesResponse is the payload for GET /v1/quotes.
+type quotesResponse struct {
+	Quotes []map[string]any `json:"quotes"`
+}
+
+// quoteBarCount is how many bars a quote needs: the latest, plus the one
+// before it to supply prev_close.
+const quoteBarCount = 2
+
+// handleRESTQuotes serves GET /v1/quotes.
+//
+// With no symbols parameter the request covers every symbol in the catalog.
+// That is bounded because the per-symbol record count is fixed at two and
+// cannot be raised by the caller.
+func (s *DataService) handleRESTQuotes(w http.ResponseWriter, r *http.Request) {
+	if !requireQueryable(w) {
+		return
+	}
+
+	q := r.URL.Query()
+	timeframe := resolveTimeframe(q.Get("timeframe"))
+
+	symbolSpec := "*"
+	if raw := q.Get("symbols"); raw != "" {
+		parts := strings.Split(raw, ",")
+		cleaned := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.ToUpper(strings.TrimSpace(p))
+			if p == "" {
+				continue
+			}
+			// "*" is expressed by omitting the parameter; accepting it here
+			// too would give two spellings for one behaviour.
+			if strings.ContainsAny(p, "*/") {
+				writeError(w, http.StatusBadRequest,
+					"symbols must not contain '*' or '/'; omit the parameter for all symbols")
+				return
+			}
+			cleaned = append(cleaned, p)
+		}
+		if len(cleaned) == 0 {
+			writeError(w, http.StatusBadRequest, "symbols parameter is empty")
+			return
+		}
+		symbolSpec = strings.Join(cleaned, ",")
+	}
+
+	limit := quoteBarCount
+	req := &QueryRequest{
+		Destination:      symbolSpec + "/" + timeframe + "/" + attributeGroup,
+		LimitRecordCount: &limit,
+	}
+
+	csm, err := s.queryColumnSeries(req)
+	if err != nil {
+		// No data for the requested symbols is a normal empty result, not a
+		// client error: return an empty list. Everything else is a 400.
+		if isNoDataErr(err) {
+			writeJSON(w, http.StatusOK, quotesResponse{Quotes: []map[string]any{}})
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Always a list, never null, so clients need no empty-case branch.
+	quotes := make([]map[string]any, 0, len(csm))
+	for tbk, cs := range csm {
+		rows, rErr := columnSeriesToRows(cs)
+		if rErr != nil {
+			writeError(w, http.StatusInternalServerError, rErr.Error())
+			return
+		}
+		symbol := tbk.GetItemInCategory("Symbol")
+		if quote := quoteFromRows(symbol, rows); quote != nil {
+			quotes = append(quotes, quote)
+		}
+	}
+
+	sort.Slice(quotes, func(i, j int) bool {
+		si, _ := quotes[i]["symbol"].(string)
+		sj, _ := quotes[j]["symbol"].(string)
+		return si < sj
+	})
+
+	writeJSON(w, http.StatusOK, quotesResponse{Quotes: quotes})
 }

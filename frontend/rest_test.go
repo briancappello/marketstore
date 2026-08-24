@@ -183,3 +183,49 @@ func TestRESTBarsUnknownSymbolReturns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 }
+
+func TestRESTQuotesRejectsWildcardInSymbols(t *testing.T) {
+	// The catalog-wide case is expressed by omitting ?symbols= entirely.
+	// A literal "*" must not reach queryColumnSeries, which would expand
+	// it a second time.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/quotes?symbols=*")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestRESTQuotesEmptyCatalogReturnsEmptyList(t *testing.T) {
+	// No data must yield an empty list, never a 404 and never a null.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/quotes?symbols=NOSUCHSYMBOL")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Quotes []map[string]any `json:"quotes"`
+	}
+	assert.Nil(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.NotNil(t, body.Quotes)
+	assert.Empty(t, body.Quotes)
+}
+
+func TestRESTQuotesNotQueryable(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 0)
+	t.Cleanup(func() { atomic.StoreUint32(&frontend.Queryable, 1) })
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/quotes")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}

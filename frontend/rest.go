@@ -102,6 +102,7 @@ func (s *DataService) RegisterRESTRoutes(mux *http.ServeMux, allowedOrigins []st
 
 	api.HandleFunc("GET /v1/symbols", s.handleRESTSymbols)
 	api.HandleFunc("GET /v1/bars/{symbol}", s.handleRESTBars)
+	api.HandleFunc("GET /v1/quotes", s.handleRESTQuotes)
 
 	// Catch-all so an unknown path returns a JSON envelope rather than
 	// net/http's default HTML 404.

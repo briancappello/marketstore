@@ -99,3 +99,27 @@ func TestValidateSymbol(t *testing.T) {
 	assert.NotNil(t, validateSymbol("AAPL/1Min/OHLCV"))
 	assert.NotNil(t, validateSymbol(""))
 }
+
+func TestQuoteFromRows(t *testing.T) {
+	rows := []map[string]any{
+		{"time": "1970-01-01T00:00:00Z", "close": 1.0, "open": 0.9},
+		{"time": "1970-01-01T00:01:00Z", "close": 2.0, "open": 1.9},
+	}
+
+	// Two bars: the latest is the quote, prev_close is the older close.
+	q := quoteFromRows("AAPL", rows)
+	assert.NotNil(t, q)
+	assert.Equal(t, "AAPL", q["symbol"])
+	assert.Equal(t, "1970-01-01T00:01:00Z", q["time"])
+	assert.Equal(t, 2.0, q["close"])
+	assert.Equal(t, 1.0, q["prev_close"])
+
+	// One bar: prev_close is present but null.
+	q = quoteFromRows("AAPL", rows[1:])
+	assert.NotNil(t, q)
+	assert.Contains(t, q, "prev_close")
+	assert.Nil(t, q["prev_close"])
+
+	// No bars: the symbol is omitted entirely.
+	assert.Nil(t, quoteFromRows("AAPL", nil))
+}

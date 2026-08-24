@@ -49,3 +49,40 @@ func columnSeriesToRows(cs *io.ColumnSeries) ([]map[string]any, error) {
 
 	return rows, nil
 }
+
+// quoteFromRows reduces a symbol's bars to a flat quote object: the latest
+// bar's fields, plus the symbol and the previous close.
+//
+// Returns nil when there are no bars, so the caller can omit the symbol
+// rather than failing the whole batch. A symbol with no data is a normal
+// condition across a catalog-wide request, not an error.
+//
+// A plain map is returned rather than a struct with a custom MarshalJSON.
+// The OHLCV column set is dynamic so a fixed struct will not do, and a
+// json.Marshaler implementation would be passed through the wscodec
+// sanitizer untouched, silently reintroducing the NaN failure that
+// sanitizer exists to prevent.
+func quoteFromRows(symbol string, rows []map[string]any) map[string]any {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	last := rows[len(rows)-1]
+
+	quote := make(map[string]any, len(last)+2)
+	for k, v := range last {
+		quote[k] = v
+	}
+	quote["symbol"] = symbol
+
+	// Always present, so clients need no key-existence check. Stays nil
+	// (encoding as null) when only one bar is available.
+	quote["prev_close"] = nil
+	if len(rows) >= 2 {
+		if c, ok := rows[len(rows)-2]["close"]; ok {
+			quote["prev_close"] = c
+		}
+	}
+
+	return quote
+}
