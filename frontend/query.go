@@ -145,7 +145,12 @@ func (s *DataService) executeSQL(sqlStatement string) (*QueryResponse, error) {
 	return &QueryResponse{nmds}, nil
 }
 
-func (s *DataService) executeQuery(req *QueryRequest) (*QueryResponse, error) {
+// queryColumnSeries normalizes a QueryRequest, executes it, and applies the
+// aggregate function pipeline if one was requested. It returns the result
+// before any wire-format packing, so both the RPC path (which packs a
+// NumpyMultiDataset) and the REST path (which renders JSON rows) share a
+// single query implementation.
+func (s *DataService) queryColumnSeries(req *QueryRequest) (io.ColumnSeriesMap, error) {
 	/*
 		Assumption: Within each TimeBucketKey, we have one or more of each category, with the exception of
 		the AttributeGroup (aka Record Format) and Timeframe
@@ -230,13 +235,22 @@ func (s *DataService) executeQuery(req *QueryRequest) (*QueryResponse, error) {
 		}
 	}
 
+	return csm, nil
+}
+
+func (s *DataService) executeQuery(req *QueryRequest) (*QueryResponse, error) {
+	csm, err := s.queryColumnSeries(req)
+	if err != nil {
+		return nil, err
+	}
+
 	/*
 		Separate each TimeBucket from the result and compose a NumpyMultiDataset
 	*/
 	var nmds *io.NumpyMultiDataset
 	for tbk, cs := range csm {
 		nds, err2 := io.NewNumpyDataset(cs)
-		if err != nil {
+		if err2 != nil {
 			return nil, err2
 		}
 		if nmds == nil {
