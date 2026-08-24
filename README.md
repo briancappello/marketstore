@@ -210,6 +210,10 @@ and run commands through the sql session.
 ## Plugins
 Go plugin architecture works best with Go1.10+ on linux. For more on plugins, see the [plugins package](./plugins/) Some featured plugins are covered here -
 
+### REST API
+A read-only REST API returning plain JSON is available at `/v1`. See
+[docs/rest-api.md](./docs/rest-api.md).
+
 ### Streaming
 You can receive realtime bars updates through the WebSocket streaming feature. The
 db server accepts a WebSocket connection on `/ws`, and we have built a plugin that

@@ -6,6 +6,13 @@ stop_grace_period: 5
 wal_rotate_interval: 5
 timezone: "America/New_York"
 
+# CORS allow-list for the REST API. Empty (the default) emits no CORS
+# headers, making the API same-origin only. The literal "*" allows any
+# origin. MarketStore has no authentication, so enabling this exposes all
+# stored data to pages on the listed origins.
+# rest_allowed_origins:
+#   - https://app.example.com
+
 # attrgroup_types defines schema templates for attribute groups.
 # When a bucket is created with a matching attrgroup name (e.g., AAPL/1Min/OHLCV),
 # the configured schema is used as the default. This ensures consistent data types
