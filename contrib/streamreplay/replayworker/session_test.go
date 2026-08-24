@@ -1,6 +1,7 @@
 package replayworker_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/alpacahq/marketstore/v4/contrib/streamreplay/replayworker"
 	"github.com/alpacahq/marketstore/v4/utils/io"
+	"github.com/alpacahq/marketstore/v4/utils/wscodec"
 )
 
 // mockQueryRange returns a QueryFunc that yields predetermined ColumnSeries
@@ -768,4 +770,169 @@ func TestParseTimeFormats(t *testing.T) {
 
 		cleanup()
 	}
+}
+
+// newTestSessionWithProto is newTestSession with subprotocol negotiation
+// enabled, so a client can select the JSON codec. It returns the client
+// connection, the subprotocol the server selected, and a cleanup function.
+func newTestSessionWithProto(
+	t *testing.T, qf replayworker.QueryFunc, offer []string,
+) (*websocket.Conn, string, func()) {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{
+			CheckOrigin:  func(r *http.Request) bool { return true },
+			Subprotocols: wscodec.Subprotocols,
+		}
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		sess := replayworker.NewSessionWithQuery(ws, qf)
+		go sess.Run()
+	}))
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	dialer := websocket.Dialer{Subprotocols: offer}
+	ws, resp, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+
+	cleanup := func() {
+		ws.Close()
+		srv.Close()
+	}
+	return ws, ws.Subprotocol(), cleanup
+}
+
+func TestReplaySubprotocolNegotiation(t *testing.T) {
+	cases := []struct {
+		name   string
+		offer  []string
+		expect string
+	}{
+		{"no offer falls back to msgpack", nil, ""},
+		{"msgpack offer", []string{"msgpack"}, "msgpack"},
+		{"json offer", []string{"json"}, "json"},
+		{"both offered prefers msgpack", []string{"json", "msgpack"}, "msgpack"},
+		{"unknown offer negotiates nothing", []string{"cbor"}, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got, cleanup := newTestSessionWithProto(t, mockQueryRange(nil), tc.offer)
+			defer cleanup()
+			assert.Equal(t, tc.expect, got)
+		})
+	}
+}
+
+func TestReplayJSONRoundTrip(t *testing.T) {
+	// A JSON client must get the ack, the payloads, and the end message
+	// all as text frames with lowercase field names.
+	epochs := []int64{1000, 2000, 3000}
+	opens := []float32{100.0, 101.0, 102.0}
+	csm := map[string]*io.ColumnSeries{
+		"AAPL/1Min/OHLCV": makeOHLCVSeries(epochs, opens),
+	}
+	ws, proto, cleanup := newTestSessionWithProto(t, mockQueryRange(csm), []string{"json"})
+	defer cleanup()
+	assert.Equal(t, "json", proto)
+
+	sub, err := json.Marshal(replayworker.SubscribeMessage{
+		Action: "subscribe",
+		TBKs:   []string{"AAPL/1Min/OHLCV"},
+		Start:  "1970-01-01 00:00:00+00:00",
+		End:    "1970-01-02 00:00:00+00:00",
+		Step:   0,
+	})
+	assert.Nil(t, err)
+	assert.Nil(t, ws.WriteMessage(websocket.TextMessage, sub))
+
+	// Ack.
+	msgType, buf, err := ws.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.TextMessage, msgType)
+
+	var raw map[string]any
+	assert.Nil(t, json.Unmarshal(buf, &raw))
+	assert.Equal(t, "subscribed", raw["action"])
+	assert.NotContains(t, string(buf), `"Action"`)
+	assert.NotContains(t, string(buf), `"TBKs"`)
+
+	// Read frames until the end message arrives; every one must be text.
+	sawPayload := false
+	for {
+		assert.Nil(t, ws.SetReadDeadline(time.Now().Add(5*time.Second)))
+		msgType, buf, err = ws.ReadMessage()
+		assert.Nil(t, err)
+		assert.Equal(t, websocket.TextMessage, msgType)
+
+		var m map[string]any
+		assert.Nil(t, json.Unmarshal(buf, &m))
+		if m["action"] == "end" {
+			break
+		}
+		assert.Equal(t, "AAPL/1Min/OHLCV", m["key"])
+		assert.Contains(t, m, "data")
+		sawPayload = true
+	}
+	assert.True(t, sawPayload)
+}
+
+func TestReplayJSONError(t *testing.T) {
+	ws, _, cleanup := newTestSessionWithProto(t, mockQueryRange(nil), []string{"json"})
+	defer cleanup()
+
+	// Empty TBKs is rejected by validateSubscribe.
+	sub, err := json.Marshal(replayworker.SubscribeMessage{
+		Action: "subscribe",
+		TBKs:   []string{},
+		Start:  "1970-01-01 00:00:00+00:00",
+		End:    "1970-01-02 00:00:00+00:00",
+	})
+	assert.Nil(t, err)
+	assert.Nil(t, ws.WriteMessage(websocket.TextMessage, sub))
+
+	msgType, buf, err := ws.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.TextMessage, msgType)
+
+	var errMsg replayworker.ErrorMessage
+	assert.Nil(t, json.Unmarshal(buf, &errMsg))
+	assert.NotEmpty(t, errMsg.Error)
+}
+
+func TestReplayMsgpackUnchangedByNegotiation(t *testing.T) {
+	// Regression guard: negotiating nothing must still yield binary
+	// msgpack frames, exactly as before this work.
+	csm := map[string]*io.ColumnSeries{
+		"AAPL/1Min/OHLCV": makeOHLCVSeries([]int64{1000, 2000}, []float32{100.0, 101.0}),
+	}
+	ws, proto, cleanup := newTestSessionWithProto(t, mockQueryRange(csm), nil)
+	defer cleanup()
+	assert.Equal(t, "", proto)
+
+	sub, err := msgpack.Marshal(replayworker.SubscribeMessage{
+		Action: "subscribe",
+		TBKs:   []string{"AAPL/1Min/OHLCV"},
+		Start:  "1970-01-01 00:00:00+00:00",
+		End:    "1970-01-02 00:00:00+00:00",
+	})
+	assert.Nil(t, err)
+	assert.Nil(t, ws.WriteMessage(websocket.BinaryMessage, sub))
+
+	msgType, buf, err := ws.ReadMessage()
+	assert.Nil(t, err)
+	assert.Equal(t, websocket.BinaryMessage, msgType)
+
+	var ack replayworker.SubscribedMessage
+	assert.Nil(t, msgpack.Unmarshal(buf, &ack))
+	assert.Equal(t, "subscribed", ack.Action)
 }

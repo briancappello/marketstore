@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	msgpack "github.com/vmihailenco/msgpack"
 
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/planner"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
+	"github.com/alpacahq/marketstore/v4/utils/wscodec"
 )
 
 const (
@@ -37,40 +37,40 @@ var timeLayouts = []string{
 // SubscribeMessage is the inbound message from the client to request
 // a historical data replay.
 type SubscribeMessage struct {
-	Action string   `msgpack:"action"`
-	TBKs   []string `msgpack:"tbks"`
-	Start  string   `msgpack:"start"`
-	End    string   `msgpack:"end"`
-	Step   int      `msgpack:"step"`
+	Action string   `msgpack:"action" json:"action"`
+	TBKs   []string `msgpack:"tbks" json:"tbks"`
+	Start  string   `msgpack:"start" json:"start"`
+	End    string   `msgpack:"end" json:"end"`
+	Step   int      `msgpack:"step" json:"step"`
 }
 
 // ControlMessage is a mid-replay control message sent by the client to
 // pause, resume, or change playback speed.
 type ControlMessage struct {
-	Action string `msgpack:"action"` // "pause", "resume", or "set_step"
-	Step   int    `msgpack:"step"`   // only used for "set_step"
+	Action string `msgpack:"action" json:"action"` // "pause", "resume", or "set_step"
+	Step   int    `msgpack:"step" json:"step"`     // only used for "set_step"
 }
 
 // Payload is the outbound data message, matching the live stream format.
 type Payload struct {
-	Key  string      `msgpack:"key"`
-	Data interface{} `msgpack:"data"`
+	Key  string      `msgpack:"key" json:"key"`
+	Data interface{} `msgpack:"data" json:"data"`
 }
 
 // SubscribedMessage is the ack sent back after a successful subscribe.
 type SubscribedMessage struct {
-	Action string   `msgpack:"action"`
-	TBKs   []string `msgpack:"tbks"`
+	Action string   `msgpack:"action" json:"action"`
+	TBKs   []string `msgpack:"tbks" json:"tbks"`
 }
 
 // EndMessage signals the completion of a replay session.
 type EndMessage struct {
-	Action string `msgpack:"action"`
+	Action string `msgpack:"action" json:"action"`
 }
 
 // ErrorMessage reports an error to the client.
 type ErrorMessage struct {
-	Error string `msgpack:"error"`
+	Error string `msgpack:"error" json:"error"`
 }
 
 // QueryFunc is a function that queries historical data for a single TBK
@@ -84,6 +84,9 @@ type Session struct {
 	done    chan struct{}
 	control chan ControlMessage
 	queryFn QueryFunc
+	// codec is resolved from the negotiated subprotocol when the session
+	// is created and is never mutated afterwards.
+	codec wscodec.Codec
 }
 
 // NewSession creates a new replay session for the given WebSocket connection.
@@ -93,6 +96,7 @@ func NewSession(conn *websocket.Conn) *Session {
 		done:    make(chan struct{}),
 		control: make(chan ControlMessage, 16),
 		queryFn: defaultQueryRange,
+		codec:   wscodec.For(conn.Subprotocol()),
 	}
 }
 
@@ -104,6 +108,7 @@ func NewSessionWithQuery(conn *websocket.Conn, qf QueryFunc) *Session {
 		done:    make(chan struct{}),
 		control: make(chan ControlMessage, 16),
 		queryFn: qf,
+		codec:   wscodec.For(conn.Subprotocol()),
 	}
 }
 
@@ -124,7 +129,7 @@ func (s *Session) Run() {
 		}
 
 		var msg SubscribeMessage
-		if err = msgpack.Unmarshal(buf, &msg); err != nil {
+		if err = s.codec.Unmarshal(buf, &msg); err != nil {
 			s.sendError(fmt.Sprintf("invalid message format: %v", err))
 			continue
 		}
@@ -420,26 +425,26 @@ func extractRows(cs *io.ColumnSeries) []map[string]interface{} {
 
 // sendPayload marshals and writes a Payload to the WebSocket.
 func (s *Session) sendPayload(p Payload) error {
-	buf, err := msgpack.Marshal(p)
+	buf, err := s.codec.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.conn.WriteMessage(websocket.BinaryMessage, buf)
+	return s.conn.WriteMessage(s.codec.MessageType(), buf)
 }
 
 // sendSubscribed sends a SubscribedMessage ack to the client.
 func (s *Session) sendSubscribed(tbks []string) {
 	msg := SubscribedMessage{Action: "subscribed", TBKs: tbks}
-	buf, err := msgpack.Marshal(msg)
+	buf, err := s.codec.Marshal(msg)
 	if err != nil {
 		log.Error("[streamreplay] marshal subscribed message: %v", err)
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err = s.conn.WriteMessage(websocket.BinaryMessage, buf); err != nil {
+	if err = s.conn.WriteMessage(s.codec.MessageType(), buf); err != nil {
 		log.Error("[streamreplay] send subscribed message: %v", err)
 	}
 }
@@ -447,14 +452,14 @@ func (s *Session) sendSubscribed(tbks []string) {
 // sendEnd sends an EndMessage and logs.
 func (s *Session) sendEnd() {
 	msg := EndMessage{Action: "end"}
-	buf, err := msgpack.Marshal(msg)
+	buf, err := s.codec.Marshal(msg)
 	if err != nil {
 		log.Error("[streamreplay] marshal end message: %v", err)
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err = s.conn.WriteMessage(websocket.BinaryMessage, buf); err != nil {
+	if err = s.conn.WriteMessage(s.codec.MessageType(), buf); err != nil {
 		log.Error("[streamreplay] send end message: %v", err)
 	}
 }
@@ -462,14 +467,14 @@ func (s *Session) sendEnd() {
 // sendError sends an ErrorMessage to the client.
 func (s *Session) sendError(errMsg string) {
 	msg := ErrorMessage{Error: errMsg}
-	buf, err := msgpack.Marshal(msg)
+	buf, err := s.codec.Marshal(msg)
 	if err != nil {
 		log.Error("[streamreplay] marshal error message: %v", err)
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err = s.conn.WriteMessage(websocket.BinaryMessage, buf); err != nil {
+	if err = s.conn.WriteMessage(s.codec.MessageType(), buf); err != nil {
 		log.Error("[streamreplay] send error message: %v", err)
 	}
 }
@@ -491,7 +496,7 @@ func (s *Session) watchMessages() {
 			return
 		}
 		var ctrl ControlMessage
-		if err := msgpack.Unmarshal(buf, &ctrl); err != nil {
+		if err := s.codec.Unmarshal(buf, &ctrl); err != nil {
 			continue // ignore unparseable messages
 		}
 		// Only forward recognised control actions.

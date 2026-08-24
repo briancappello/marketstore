@@ -13,6 +13,7 @@ import (
 
 	"github.com/alpacahq/marketstore/v4/plugins/bgworker"
 	"github.com/alpacahq/marketstore/v4/utils/log"
+	"github.com/alpacahq/marketstore/v4/utils/wscodec"
 )
 
 // Config holds the plugin configuration parsed from marketstore.yml.
@@ -26,6 +27,7 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+	Subprotocols: wscodec.Subprotocols,
 }
 
 // ReplayWorker implements bgworker.BgWorker.
