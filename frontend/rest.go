@@ -10,8 +10,12 @@
 package frontend
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/alpacahq/marketstore/v4/utils/log"
 	"github.com/alpacahq/marketstore/v4/utils/wscodec"
@@ -113,4 +117,60 @@ func (s *DataService) RegisterRESTRoutes(mux *http.ServeMux, allowedOrigins []st
 	})
 
 	mux.Handle("/v1/", corsMiddleware(allowedOrigins, api))
+}
+
+const (
+	// immutableCacheSeconds applies to bar ranges that ended in the past.
+	// Those bars can never change, so the ceiling is arbitrary; a day is
+	// long enough to be useful and short enough to bound a bad deploy.
+	immutableCacheSeconds = 86400
+	// quotesCacheSeconds is deliberately tiny. It exists so a fronting
+	// proxy can collapse concurrent catalog-wide requests, not to serve
+	// meaningfully stale prices.
+	quotesCacheSeconds = 2
+)
+
+// setBarCacheHeaders applies Cache-Control for a bar request.
+//
+// A bar is immutable only once its period has closed. When the request is
+// bounded by an end that is already in the past, the answer can never
+// change and is cacheable. Otherwise the newest bar is still being written
+// and caching it would report a stale price.
+func setBarCacheHeaders(w http.ResponseWriter, end, now time.Time) {
+	if !end.IsZero() && end.Before(now) {
+		w.Header().Set("Cache-Control",
+			fmt.Sprintf("public, max-age=%d", immutableCacheSeconds))
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+}
+
+// writeJSONCached renders v as JSON with an ETag, answering 304 when the
+// client's If-None-Match matches.
+//
+// The ETag is derived from the response body, so it is only meaningful when
+// the body is deterministic for a given request. That is why the quotes
+// handler sorts its output.
+func writeJSONCached(w http.ResponseWriter, r *http.Request, status int, v any) {
+	buf, err := wscodec.JSONCodec.Marshal(v)
+	if err != nil {
+		log.Error("rest: failed to encode response: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to encode response")
+		return
+	}
+
+	sum := sha256.Sum256(buf)
+	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
+	w.Header().Set("ETag", etag)
+
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if _, err := w.Write(buf); err != nil {
+		log.Error("rest: failed to write response: %v", err)
+	}
 }

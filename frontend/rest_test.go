@@ -287,3 +287,63 @@ func TestRESTWatchlistByNameNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 }
+
+func TestRESTBarsOpenRangeIsNotCached(t *testing.T) {
+	// With no end bound the newest bar still mutates, so the response
+	// must not be cacheable.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/bars/NOSUCHSYMBOL")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"))
+}
+
+func TestRESTBarsPastRangeIsCacheable(t *testing.T) {
+	// A range that ended in the past can never change.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/bars/NOSUCHSYMBOL?end=2020-01-01T00:00:00Z")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.Contains(t, resp.Header.Get("Cache-Control"), "max-age=")
+	assert.NotEqual(t, "no-cache", resp.Header.Get("Cache-Control"))
+}
+
+func TestRESTQuotesShortCache(t *testing.T) {
+	// Quotes are always "now", so the past-end rule would make them
+	// permanently uncacheable. They get a short TTL instead, which is what
+	// lets a fronting proxy collapse a catalog-wide stampede.
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/quotes?symbols=NOSUCHSYMBOL")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.Contains(t, resp.Header.Get("Cache-Control"), "max-age=2")
+}
+
+func TestRESTETagReturns304(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	url := srv.URL + "/v1/quotes?symbols=NOSUCHSYMBOL"
+	resp, err := http.Get(url)
+	assert.Nil(t, err)
+	etag := resp.Header.Get("ETag")
+	resp.Body.Close()
+	assert.NotEmpty(t, etag)
+
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("If-None-Match", etag)
+	resp2, err := http.DefaultClient.Do(req)
+	assert.Nil(t, err)
+	defer resp2.Body.Close()
+	assert.Equal(t, http.StatusNotModified, resp2.StatusCode)
+}

@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -104,6 +105,11 @@ func (s *DataService) handleRESTBars(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set before the query so every exit path (200, no-data 404) is cached
+	// under the same rule: an absent symbol must not be cacheable when a
+	// present one is not.
+	setBarCacheHeaders(w, end, time.Now())
+
 	req := &QueryRequest{
 		Destination:      symbol + "/" + timeframe + "/" + attributeGroup,
 		LimitRecordCount: &limit,
@@ -140,7 +146,7 @@ func (s *DataService) handleRESTBars(w http.ResponseWriter, r *http.Request) {
 		if len(rows) == 0 {
 			break
 		}
-		writeJSON(w, http.StatusOK, barsResponse{
+		writeJSONCached(w, r, http.StatusOK, barsResponse{
 			Symbol:    symbol,
 			Timeframe: timeframe,
 			Bars:      rows,
@@ -210,7 +216,9 @@ func (s *DataService) handleRESTQuotes(w http.ResponseWriter, r *http.Request) {
 		// No data for the requested symbols is a normal empty result, not a
 		// client error: return an empty list. Everything else is a 400.
 		if isNoDataErr(err) {
-			writeJSON(w, http.StatusOK, quotesResponse{Quotes: []map[string]any{}})
+			w.Header().Set("Cache-Control",
+				fmt.Sprintf("public, max-age=%d", quotesCacheSeconds))
+			writeJSONCached(w, r, http.StatusOK, quotesResponse{Quotes: []map[string]any{}})
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -237,7 +245,9 @@ func (s *DataService) handleRESTQuotes(w http.ResponseWriter, r *http.Request) {
 		return si < sj
 	})
 
-	writeJSON(w, http.StatusOK, quotesResponse{Quotes: quotes})
+	w.Header().Set("Cache-Control",
+		fmt.Sprintf("public, max-age=%d", quotesCacheSeconds))
+	writeJSONCached(w, r, http.StatusOK, quotesResponse{Quotes: quotes})
 }
 
 // handleRESTWatchlists serves GET /v1/watchlists.
