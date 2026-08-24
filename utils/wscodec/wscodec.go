@@ -8,6 +8,10 @@ package wscodec
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
+	"reflect"
+	"strings"
 
 	"github.com/gorilla/websocket"
 	msgpack "github.com/vmihailenco/msgpack"
@@ -42,7 +46,7 @@ func (msgpackCodec) Name() string                    { return "msgpack" }
 
 type jsonCodec struct{}
 
-func (jsonCodec) Marshal(v any) ([]byte, error)   { return json.Marshal(v) }
+func (jsonCodec) Marshal(v any) ([]byte, error)   { return json.Marshal(sanitize(v)) }
 func (jsonCodec) Unmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 func (jsonCodec) MessageType() int                { return websocket.TextMessage }
 func (jsonCodec) Name() string                    { return "json" }
@@ -63,4 +67,107 @@ func For(subprotocol string) Codec {
 		return JSONCodec
 	}
 	return MsgpackCodec
+}
+
+// sanitize returns a copy of v with every non-finite float replaced by nil.
+//
+// encoding/json rejects NaN and ±Inf outright, while msgpack encodes them.
+// OHLCV columns carry NaN where a bar has no value, so without this a single
+// gapped bar would drop the entire frame for JSON subscribers while msgpack
+// subscribers on the same payload received it. nil encodes as JSON null,
+// which is the correct representation of a missing measurement.
+//
+// Structs are rebuilt as maps keyed by their json tag because the payload
+// data this needs to reach sits behind an interface-typed struct field.
+// The rebuild honours json:"-" and splits the tag on its first comma, which
+// covers every wire struct in this repo. It does NOT implement omitempty:
+// if you add omitempty to a streamed struct, the field is still emitted.
+func sanitize(v any) any {
+	return sanitizeValue(reflect.ValueOf(v))
+}
+
+func sanitizeValue(rv reflect.Value) any {
+	if !rv.IsValid() {
+		return nil
+	}
+
+	switch rv.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if rv.IsNil() {
+			return nil
+		}
+		return sanitizeValue(rv.Elem())
+
+	case reflect.Float32, reflect.Float64:
+		f := rv.Float()
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil
+		}
+		return rv.Interface()
+
+	case reflect.Slice, reflect.Array:
+		// []byte is base64-encoded by encoding/json and holds no floats.
+		if rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() == reflect.Uint8 {
+			return rv.Interface()
+		}
+		if rv.Kind() == reflect.Slice && rv.IsNil() {
+			return nil
+		}
+		out := make([]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out[i] = sanitizeValue(rv.Index(i))
+		}
+		return out
+
+	case reflect.Map:
+		if rv.IsNil() {
+			return nil
+		}
+		out := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			out[fmt.Sprint(iter.Key().Interface())] = sanitizeValue(iter.Value())
+		}
+		return out
+
+	case reflect.Struct:
+		// time.Time and anything else with custom marshalling must not be
+		// torn apart into fields; hand it to encoding/json intact.
+		if _, ok := rv.Interface().(json.Marshaler); ok {
+			return rv.Interface()
+		}
+		rt := rv.Type()
+		out := make(map[string]any, rt.NumField())
+		for i := 0; i < rt.NumField(); i++ {
+			field := rt.Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			name, ok := jsonFieldName(field)
+			if !ok {
+				continue
+			}
+			out[name] = sanitizeValue(rv.Field(i))
+		}
+		return out
+	}
+
+	return rv.Interface()
+}
+
+// jsonFieldName resolves the wire name for a struct field, reporting false
+// when the field is tagged json:"-" and must be omitted.
+func jsonFieldName(f reflect.StructField) (string, bool) {
+	tag, ok := f.Tag.Lookup("json")
+	if !ok {
+		return f.Name, true
+	}
+	name, _, _ := strings.Cut(tag, ",")
+	if name == "-" {
+		return "", false
+	}
+	if name == "" {
+		return f.Name, true
+	}
+	return name, true
 }
