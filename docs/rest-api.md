@@ -10,6 +10,18 @@ proxy in front of MarketStore if you need them.
 
 ## Endpoints
 
+### `GET /v1/health`
+
+A cheap liveness/readiness probe that touches no catalog data. Returns
+`200 {"status":"ok"}` once the server is queryable and `503` while it is still
+starting, matching the startup behaviour of every other endpoint. Intended for
+status indicators and uptime checks.
+
+```console
+$ curl 'http://localhost:5993/v1/health'
+{"status":"ok"}
+```
+
 ### `GET /v1/bars/{symbol}`
 
 Exactly one symbol. A comma or `*` is rejected with `400`.

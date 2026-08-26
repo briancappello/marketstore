@@ -42,6 +42,36 @@ func TestRESTSymbols(t *testing.T) {
 	assert.NotContains(t, body, "Results")
 }
 
+func TestRESTHealthOKWhenQueryable(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 1)
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/health")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	var body map[string]string
+	assert.Nil(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, "ok", body["status"])
+}
+
+func TestRESTHealth503WhileStarting(t *testing.T) {
+	svc := setupListSymbols(t)
+	atomic.StoreUint32(&frontend.Queryable, 0)
+	t.Cleanup(func() { atomic.StoreUint32(&frontend.Queryable, 1) })
+	srv := newRESTServer(t, svc, nil)
+
+	resp, err := http.Get(srv.URL + "/v1/health")
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
 func TestRESTNotQueryableReturns503(t *testing.T) {
 	svc := setupListSymbols(t)
 	atomic.StoreUint32(&frontend.Queryable, 0)

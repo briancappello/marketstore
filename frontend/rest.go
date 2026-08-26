@@ -104,6 +104,7 @@ func corsMiddleware(allowed []string, next http.Handler) http.Handler {
 func (s *DataService) RegisterRESTRoutes(mux *http.ServeMux, allowedOrigins []string) {
 	api := http.NewServeMux()
 
+	api.HandleFunc("GET /v1/health", s.handleRESTHealth)
 	api.HandleFunc("GET /v1/symbols", s.handleRESTSymbols)
 	api.HandleFunc("GET /v1/bars/{symbol}", s.handleRESTBars)
 	api.HandleFunc("GET /v1/quotes", s.handleRESTQuotes)

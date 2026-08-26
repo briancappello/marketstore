@@ -10,6 +10,18 @@ import (
 	"github.com/alpacahq/marketstore/v4/catalog"
 )
 
+// handleRESTHealth serves GET /v1/health.
+//
+// A cheap liveness/readiness probe for clients (e.g. a status indicator). It
+// touches no catalog data: 200 {"status":"ok"} once the server is queryable,
+// 503 while it is still starting — consistent with every other REST route.
+func (s *DataService) handleRESTHealth(w http.ResponseWriter, r *http.Request) {
+	if !requireQueryable(w) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // handleRESTSymbols serves GET /v1/symbols.
 //
 // Query parameters mirror ListSymbolsRequest: format ("symbol" or "tbk"),
