@@ -17,6 +17,17 @@ func RunRankings(mgr *SymbolStateManager) map[string][]RankedSymbol {
 		// Ensure rank numbers are set.
 		for i := range ranking {
 			ranking[i].Rank = i + 1
+			// Attach latest price + prior close as fields so both the
+			// WebSocket push (flattened) and the REST response (nested under
+			// "fields") carry them. Aggregate strategies emit non-symbol rows
+			// (e.g. "Industrials") absent from the curated snapshot, so those
+			// get no price.
+			if st, ok := curated[ranking[i].Symbol]; ok && st != nil {
+				ranking[i].Fields = append(ranking[i].Fields,
+					Field{Key: "price", Value: st.LastPrice},
+					Field{Key: "prior_close", Value: st.PriorClose},
+				)
+			}
 		}
 		mgr.SetWatchlistRanking(strategy.Name(), ranking)
 		results[strategy.Name()] = ranking

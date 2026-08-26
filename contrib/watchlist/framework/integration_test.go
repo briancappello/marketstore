@@ -697,3 +697,52 @@ func TestWatchlistKeyNaming(t *testing.T) {
 	}
 	assert.True(t, found, "should receive watchlist update with correct key naming")
 }
+
+func TestWatchlistRankingIncludesPrice(t *testing.T) {
+	h := newTestHarness(t)
+	framework.Manager.SetCurator(&mockCurator{allowed: nil})
+	framework.Manager.AddStrategy(&mockWatchlist{
+		name: "TEST_GAINERS",
+		rankFn: func(curated map[string]*framework.SymbolState) []framework.RankedSymbol {
+			out := make([]framework.RankedSymbol, 0, len(curated))
+			for sym, state := range curated {
+				out = append(out, framework.RankedSymbol{
+					Symbol: sym,
+					Fields: []framework.Field{{Key: "pct_change", Value: state.PctChange}},
+				})
+			}
+			return out
+		},
+	})
+
+	conn, ch := h.connectAndSubscribe("WATCHLISTS/1Min/*")
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	baseTime := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
+	aapl := framework.Manager.GetOrCreate("AAPL")
+	aapl.PriorClose = 100
+	// close=104 -> LastPrice becomes 104 after the bar fires.
+	h.writeOHLCVAndFire("AAPL", baseTime, 101, 105, 100, 104, 50000)
+
+	h.worker.TriggerRanking()
+	msgs := collectMessages(ch, 500*time.Millisecond)
+
+	found := false
+	for _, msg := range msgs {
+		if msg["msg_type"] != "watchlist_update" {
+			continue
+		}
+		payload, _ := msg["payload"].(map[string]interface{})
+		symbols, _ := payload["symbols"].([]interface{})
+		for _, s := range symbols {
+			m, _ := s.(map[string]interface{})
+			if m["symbol"] == "AAPL" {
+				found = true
+				assert.EqualValues(t, 104, m["price"])
+				assert.EqualValues(t, 100, m["prior_close"])
+			}
+		}
+	}
+	assert.True(t, found, "AAPL watchlist_update should carry price/prior_close")
+}
