@@ -17,15 +17,17 @@ func RunRankings(mgr *SymbolStateManager) map[string][]RankedSymbol {
 		// Ensure rank numbers are set.
 		for i := range ranking {
 			ranking[i].Rank = i + 1
-			// Attach latest price + prior close as fields so both the
-			// WebSocket push (flattened) and the REST response (nested under
-			// "fields") carry them. Aggregate strategies emit non-symbol rows
-			// (e.g. "Industrials") absent from the curated snapshot, so those
-			// get no price.
+			// Attach latest price, prior close, and today's open as fields so
+			// both the WebSocket push (flattened) and the REST response (nested
+			// under "fields") carry them. price colors against prior_close
+			// (day move); the intraday change colors against open. Aggregate
+			// strategies emit non-symbol rows (e.g. "Industrials") absent from
+			// the curated snapshot, so those get none of these.
 			if st, ok := curated[ranking[i].Symbol]; ok && st != nil {
 				ranking[i].Fields = append(ranking[i].Fields,
 					Field{Key: "price", Value: st.LastPrice},
 					Field{Key: "prior_close", Value: st.PriorClose},
+					Field{Key: "open", Value: st.DayOpen},
 				)
 			}
 		}

@@ -741,8 +741,9 @@ func TestWatchlistRankingIncludesPrice(t *testing.T) {
 				found = true
 				assert.EqualValues(t, 104, m["price"])
 				assert.EqualValues(t, 100, m["prior_close"])
+				assert.EqualValues(t, 101, m["open"])
 			}
 		}
 	}
-	assert.True(t, found, "AAPL watchlist_update should carry price/prior_close")
+	assert.True(t, found, "AAPL watchlist_update should carry price/prior_close/open")
 }
