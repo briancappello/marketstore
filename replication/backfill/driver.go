@@ -17,6 +17,7 @@ import (
 // Driver reconciles the whole bucket set against the master.
 type Driver struct {
 	api          MasterAPI
+	readLocal    ReadFunc
 	write        WriteFunc
 	wm           *Watermarks
 	parallelism  int
@@ -34,7 +35,9 @@ type Driver struct {
 // the write-amplification bug this cadence exists to prevent.
 const defaultHealInterval = 24 * time.Hour
 
-func NewDriver(api MasterAPI, write WriteFunc, wm *Watermarks, parallelism int,
+// NewDriver builds the reconciler. readLocal may be nil, which disables the
+// deep-pass unchanged-data check and makes every deep pass write.
+func NewDriver(api MasterAPI, readLocal ReadFunc, write WriteFunc, wm *Watermarks, parallelism int,
 	lookback, healInterval time.Duration, isVariable func(tbk string) bool,
 ) *Driver {
 	if parallelism <= 0 {
@@ -44,7 +47,7 @@ func NewDriver(api MasterAPI, write WriteFunc, wm *Watermarks, parallelism int,
 		healInterval = defaultHealInterval
 	}
 	return &Driver{
-		api: api, write: write, wm: wm, parallelism: parallelism,
+		api: api, readLocal: readLocal, write: write, wm: wm, parallelism: parallelism,
 		lookback: lookback, healInterval: healInterval, isVariable: isVariable,
 	}
 }
@@ -142,9 +145,9 @@ func (d *Driver) Reconcile(ctx context.Context, now int64) error {
 		const mib = 1 << 20
 		log.Info("[replication-backfill] %s pass finished in %s: %d rows written, "+
 			"%d rows in %d buckets rewritten without advancing the watermark, "+
-			"%d MiB written to disk (process-wide)",
+			"%d MiB written to disk (process-wide), compare=%v",
 			pass, time.Since(started), wroteRows, stuckRows, stuckBuckets,
-			(selfWriteBytes()-startBytes)/mib)
+			(selfWriteBytes()-startBytes)/mib, DrainSkipReasons())
 	}()
 
 	wp := worker.NewWorkerPool(ctx, d.parallelism)
@@ -160,7 +163,7 @@ func (d *Driver) Reconcile(ctx context.Context, now int64) error {
 			continue
 		}
 		wp.Do(func() {
-			rows, advanced, err := BackfillBucket(ctx, d.api, d.write, d.wm, tbk, now, lookback, false)
+			rows, advanced, err := BackfillBucket(ctx, d.api, d.readLocal, d.write, d.wm, tbk, now, lookback, false)
 			if err != nil {
 				log.Warn("[replication-backfill] %s: %v", tbk, err)
 				return

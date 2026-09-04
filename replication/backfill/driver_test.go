@@ -41,7 +41,7 @@ func TestDriverReconcileBackfillsEveryBucket(t *testing.T) {
 	require.Nil(t, err)
 	write := func(io.ColumnSeriesMap, bool) error { return nil }
 
-	d := backfill.NewDriver(api, write, wm, 4, 0, 0, func(string) bool { return false })
+	d := backfill.NewDriver(api, nil, write, wm, 4, 0, 0, func(string) bool { return false })
 	require.Nil(t, d.Reconcile(context.Background(), 1000))
 
 	sort.Strings(api.queried)
@@ -59,7 +59,7 @@ func TestDriverReconcileSkipsVariableBuckets(t *testing.T) {
 	// Report the TRADE bucket as variable-length; it must be skipped so its
 	// append-only writes are never duplicated by re-pull.
 	isVar := func(tbk string) bool { return tbk == "AAPL/1Sec/TRADE" }
-	d := backfill.NewDriver(api, write, wm, 4, 0, 0, isVar)
+	d := backfill.NewDriver(api, nil, write, wm, 4, 0, 0, isVar)
 	require.Nil(t, d.Reconcile(context.Background(), 1000))
 
 	assert.Equal(t, []string{"AAPL/1Min/OHLCV"}, api.queried, "variable bucket must not be queried")
@@ -81,7 +81,7 @@ func TestDriverAppliesLookbackOnlyOnDeepPass(t *testing.T) {
 	// listAPI returns epoch 10, which never regresses this watermark.
 	require.Nil(t, wm.Set("AAPL/1Min/OHLCV", 5000))
 
-	d := backfill.NewDriver(api, func(io.ColumnSeriesMap, bool) error { return nil },
+	d := backfill.NewDriver(api, nil, func(io.ColumnSeriesMap, bool) error { return nil },
 		wm, 4, time.Hour, 24*time.Hour, func(string) bool { return false })
 
 	// First pass after construction is a deep heal: reach back a full lookback.
@@ -98,7 +98,7 @@ func TestDriverRepeatsDeepPassAfterHealInterval(t *testing.T) {
 	wm, _ := backfill.NewWatermarks(t.TempDir() + "/wm.json")
 	_ = wm.Set("AAPL/1Min/OHLCV", 5000)
 
-	d := backfill.NewDriver(api, func(io.ColumnSeriesMap, bool) error { return nil },
+	d := backfill.NewDriver(api, nil, func(io.ColumnSeriesMap, bool) error { return nil },
 		wm, 4, time.Hour, 24*time.Hour, func(string) bool { return false })
 
 	require.Nil(t, d.Reconcile(context.Background(), 10_000)) // deep
@@ -114,7 +114,7 @@ func TestDriverRequestDeepHealForcesNextPass(t *testing.T) {
 	wm, _ := backfill.NewWatermarks(t.TempDir() + "/wm.json")
 	_ = wm.Set("AAPL/1Min/OHLCV", 5000)
 
-	d := backfill.NewDriver(api, func(io.ColumnSeriesMap, bool) error { return nil },
+	d := backfill.NewDriver(api, nil, func(io.ColumnSeriesMap, bool) error { return nil },
 		wm, 4, time.Hour, 24*time.Hour, func(string) bool { return false })
 
 	require.Nil(t, d.Reconcile(context.Background(), 10_000)) // deep (first pass)
@@ -137,7 +137,7 @@ func TestDriverDefaultsHealIntervalWhenUnset(t *testing.T) {
 	wm, _ := backfill.NewWatermarks(t.TempDir() + "/wm.json")
 	_ = wm.Set("AAPL/1Min/OHLCV", 5000)
 
-	d := backfill.NewDriver(api, func(io.ColumnSeriesMap, bool) error { return nil },
+	d := backfill.NewDriver(api, nil, func(io.ColumnSeriesMap, bool) error { return nil },
 		wm, 4, time.Hour, 0, func(string) bool { return false })
 
 	require.Nil(t, d.Reconcile(context.Background(), 10_000)) // deep (first pass)
@@ -151,7 +151,7 @@ func TestDriverDefaultsHealIntervalWhenUnset(t *testing.T) {
 func TestDriverRunReconcilesImmediatelyThenStops(t *testing.T) {
 	api := &listAPI{tbks: []string{"AAPL/1Min/OHLCV"}}
 	wm, _ := backfill.NewWatermarks(t.TempDir() + "/wm.json")
-	d := backfill.NewDriver(api, func(io.ColumnSeriesMap, bool) error { return nil }, wm, 2, 0, 0, func(string) bool { return false })
+	d := backfill.NewDriver(api, nil, func(io.ColumnSeriesMap, bool) error { return nil }, wm, 2, 0, 0, func(string) bool { return false })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go d.Run(ctx, time.Hour, func() int64 { return 1000 }) // long interval: only the immediate pass runs

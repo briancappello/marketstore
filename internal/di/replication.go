@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"time"
 
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -210,7 +211,16 @@ func (c *Container) GetReplicationBackfillDriver() *backfill.Driver {
 	catDir := c.GetCatalogDir()
 	isVar := func(tbk string) bool { return backfill.IsVariableTBK(catDir, tbk) }
 
-	c.replicationBackfill = backfill.NewDriver(api, write, wm,
+	// readLocal lets a deep pass compare the master's lookback window against
+	// what is already on disk and skip the write when nothing changed. It uses
+	// the same query path the RPC/gRPC servers use, against the same catalog.
+	qs := c.GetHTTPService()
+	readLocal := func(_ context.Context, tbk string, start, end int64) (io.ColumnSeriesMap, error) {
+		return qs.ExecuteQuery(io.NewTimeBucketKey(tbk),
+			time.Unix(start, 0).UTC(), time.Unix(end, 0).UTC(), 0, false, nil)
+	}
+
+	c.replicationBackfill = backfill.NewDriver(api, readLocal, write, wm,
 		c.mktsConfig.Replication.BackfillParallelism,
 		c.mktsConfig.Replication.BackfillLookback,
 		c.mktsConfig.Replication.DeepHealInterval, isVar)
