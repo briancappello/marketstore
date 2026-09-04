@@ -145,6 +145,12 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	metrics.StartupTime.Set(startupTime.Seconds())
 	log.Info("startup time: %s", startupTime)
 
+	// Resolve the backfill driver BEFORE launching the replication client
+	// goroutine. GetReplicationClientWithRetry also resolves it (to hook deep
+	// heals onto stream reconnects) and the container memoises it without a
+	// lock, so doing it here keeps that write on a single goroutine.
+	backfillDriver := c.GetReplicationBackfillDriver()
+
 	// init replication client
 	go func() {
 		log.Info("initializing replication client")
@@ -156,9 +162,9 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	}()
 
 	// Start the replication backfill reconciler (bootstrap + periodic catch-up).
-	if driver := c.GetReplicationBackfillDriver(); driver != nil {
+	if backfillDriver != nil {
 		log.Info("initializing replication backfill reconciler")
-		go driver.Run(globalCtx, config.Replication.ReconcileInterval, func() int64 { return time.Now().Unix() })
+		go backfillDriver.Run(globalCtx, config.Replication.ReconcileInterval, func() int64 { return time.Now().Unix() })
 	}
 
 	// register grpc server

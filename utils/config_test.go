@@ -20,6 +20,7 @@ replication:
   reconcile_interval: 30s
   backfill_parallelism: 4
   backfill_lookback: 1h
+  deep_heal_interval: 2h
 `)
 	cfg, err := ParseConfig(yml)
 	assert.Nil(t, err)
@@ -27,6 +28,25 @@ replication:
 	assert.Equal(t, 30*time.Second, cfg.Replication.ReconcileInterval)
 	assert.Equal(t, 4, cfg.Replication.BackfillParallelism)
 	assert.Equal(t, time.Hour, cfg.Replication.BackfillLookback)
+	assert.Equal(t, 2*time.Hour, cfg.Replication.DeepHealInterval)
+}
+
+// An omitted deep_heal_interval must fall back to 24h, never to 0. A zero value
+// reaching the Driver would make every reconcile a deep pass -- the 288x
+// write-amplification bug.
+func TestParseConfig_DeepHealIntervalDefaultsWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	yml := []byte(`
+root_directory: /tmp/x
+listen_port: 5993
+replication:
+  master_host: "10.0.0.5:5996"
+  master_query_host: "10.0.0.5:5995"
+`)
+	cfg, err := ParseConfig(yml)
+	assert.Nil(t, err)
+	assert.Equal(t, 24*time.Hour, cfg.Replication.DeepHealInterval)
 }
 
 func TestParseConfig_TriggerSkipOnReplicaAndIsReplica(t *testing.T) {

@@ -151,8 +151,24 @@ func (c *Container) GetReplicationClientWithRetry() ReplicationClient {
 	replayer := replication.NewReplayer(executor.ParseTGData, c.GetDefaultWriter().WriteCSM, c.GetAbsRootDir())
 	replicationReceiver := replication.NewReceiver(cli, replayer)
 
+	// On every reconnect, ask the backfill driver for a deep heal pass. While
+	// the stream was down the master may have revised epochs at or below our
+	// watermark; the ordinary [watermark+1, now] reconcile cannot see those, so
+	// only a lookback pass will pick them up.
+	//
+	// The driver is resolved here, eagerly, rather than inside the closure:
+	// GetReplicationBackfillDriver memoises into c.replicationBackfill without a
+	// lock, and the closure runs on the replication goroutine. Resolving now
+	// keeps that field single-threaded. onDisconnect is nil for a live-only
+	// replica (no master_query_host), which Retryer tolerates.
+	var onDisconnect func()
+	if driver := c.GetReplicationBackfillDriver(); driver != nil {
+		onDisconnect = driver.RequestDeepHeal
+	}
+
 	c.replicationClient = replication.NewRetryer(replicationReceiver.Run, c.mktsConfig.Replication.RetryInterval,
 		c.mktsConfig.Replication.RetryBackoffCoeff,
+		onDisconnect,
 	)
 
 	return c.replicationClient
@@ -196,6 +212,7 @@ func (c *Container) GetReplicationBackfillDriver() *backfill.Driver {
 
 	c.replicationBackfill = backfill.NewDriver(api, write, wm,
 		c.mktsConfig.Replication.BackfillParallelism,
-		c.mktsConfig.Replication.BackfillLookback, isVar)
+		c.mktsConfig.Replication.BackfillLookback,
+		c.mktsConfig.Replication.DeepHealInterval, isVar)
 	return c.replicationBackfill
 }

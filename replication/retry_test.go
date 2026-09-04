@@ -23,6 +23,41 @@ func (r *retryer) try(_ context.Context) error {
 	return replication.ErrRetryable
 }
 
+// Each retryable error means the replication stream dropped and we are about to
+// redial. The replica needs that signal: while it was disconnected the master
+// may have revised epochs at or below the backfill watermark, which only a
+// lookback pass will pick up.
+func TestRetryerCallsOnRetryBeforeEachReconnect(t *testing.T) {
+	t.Parallel()
+
+	// Fails twice, succeeds on the 3rd try => 2 reconnects.
+	inner := retryer{SucceedAt: 3}
+	reconnects := 0
+
+	// backoffCoeff 1 keeps the retry interval flat so the test stays fast.
+	r := replication.NewRetryer(inner.try, time.Millisecond, 1, func() { reconnects++ })
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if reconnects != 2 {
+		t.Errorf("onRetry called %d times, want 2 (one per retryable failure)", reconnects)
+	}
+}
+
+// A nil onRetry must be safe: masters and live-only replicas have no backfill
+// driver to notify.
+func TestRetryerNilOnRetryDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	inner := retryer{SucceedAt: 2}
+	r := replication.NewRetryer(inner.try, time.Millisecond, 1, nil)
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+}
+
 func TestRetryer_Run(t *testing.T) {
 	t.Parallel()
 
@@ -85,7 +120,7 @@ func TestRetryer_Run(t *testing.T) {
 			t.Parallel()
 
 			// --- given ---
-			r := replication.NewRetryer(tt.retryFunc, 10*time.Millisecond, 2)
+			r := replication.NewRetryer(tt.retryFunc, 10*time.Millisecond, 2, nil)
 
 			// --- when ---
 			err := r.Run(tt.context)

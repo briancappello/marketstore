@@ -12,10 +12,22 @@ import (
 )
 
 // Watermarks stores the last-synced epoch per TimeBucketKey, persisted as JSON.
+//
+// Set only mutates memory; call Flush to persist. Persisting per Set is what it
+// used to do, and it dominated the replica's entire write load: the file holds
+// every bucket, so each advance re-marshalled and rewrote the whole map. At 35k
+// buckets that is ~1 MB per advanced bucket, ~9.7 GB for a single reconcile
+// pass -- 99.5% of all bytes written, against ~14 MB of actual market data, and
+// quadratic in bucket count.
+//
+// Batching costs nothing in correctness: a watermark is a resume hint, not a
+// record of truth. A crash between Flushes just re-pulls a little more, and
+// backfill writes are idempotent by epoch.
 type Watermarks struct {
-	mu   sync.Mutex
-	path string
-	m    map[string]int64
+	mu    sync.Mutex
+	path  string
+	m     map[string]int64
+	dirty bool
 }
 
 // NewWatermarks loads watermarks from path, or starts empty if it does not exist.
@@ -41,7 +53,8 @@ func (w *Watermarks) Get(tbk string) int64 {
 	return w.m[tbk]
 }
 
-// Set advances the watermark for tbk to epoch (never regresses) and persists.
+// Set advances the watermark for tbk to epoch (never regresses). It does not
+// touch the disk; the caller persists a whole pass at once via Flush.
 func (w *Watermarks) Set(tbk string, epoch int64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -49,7 +62,22 @@ func (w *Watermarks) Set(tbk string, epoch int64) error {
 		return nil
 	}
 	w.m[tbk] = epoch
-	return w.persistLocked()
+	w.dirty = true
+	return nil
+}
+
+// Flush persists pending advances, and is a no-op when nothing changed.
+func (w *Watermarks) Flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.dirty {
+		return nil
+	}
+	if err := w.persistLocked(); err != nil {
+		return err
+	}
+	w.dirty = false
+	return nil
 }
 
 func (w *Watermarks) persistLocked() error {

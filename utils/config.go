@@ -37,10 +37,25 @@ type ReplicationSetting struct {
 	ReconcileInterval time.Duration
 	// BackfillParallelism bounds concurrent per-bucket backfill queries.
 	BackfillParallelism int
-	// BackfillLookback is the trailing window re-pulled on every reconcile,
-	// healing master-side corrections to recent epochs that were missed while
-	// disconnected. Re-pulling held data is harmless (idempotent by epoch).
+	// BackfillLookback is the trailing window re-pulled on a DEEP reconcile,
+	// healing master-side corrections to epochs at or below the watermark.
+	// Re-pulling held data is harmless (idempotent by epoch) but is not free:
+	// see DeepHealInterval.
+	//
+	// Note this window is NOT needed to heal gaps. The watermark is advanced
+	// only by a successful backfill, never by the live stream, so the ordinary
+	// [watermark+1, now] range already spans any stream outage.
 	BackfillLookback time.Duration
+	// DeepHealInterval is how often the lookback window is re-pulled. Ordinary
+	// reconciles query [watermark+1, now]; only a deep pass subtracts the
+	// lookback.
+	//
+	// This is the write-amplification knob: the replica rewrites its trailing
+	// BackfillLookback of every fixed bucket once per DeepHealInterval, so the
+	// amplification factor is BackfillLookback/DeepHealInterval. Setting it to
+	// ReconcileInterval reproduces the pre-fix behaviour (24h/5m = 288x, which
+	// cost ~7TB of writes per day on a ~11k-symbol replica).
+	DeepHealInterval time.Duration
 }
 
 type TriggerSetting struct {
@@ -152,6 +167,7 @@ func NewDefaultConfig(rootDir string) *MktsConfig {
 			ReconcileInterval:   5 * time.Minute,
 			BackfillParallelism: 8,
 			BackfillLookback:    24 * time.Hour,
+			DeepHealInterval:    24 * time.Hour,
 		},
 		Triggers:       nil,
 		BgWorkers:      nil,
@@ -192,6 +208,7 @@ type aux struct {
 		ReconcileInterval   time.Duration `yaml:"reconcile_interval"`
 		BackfillParallelism int           `yaml:"backfill_parallelism"`
 		BackfillLookback    time.Duration `yaml:"backfill_lookback"`
+		DeepHealInterval    time.Duration `yaml:"deep_heal_interval"`
 	} `yaml:"replication"`
 	Triggers []struct {
 		Module        string                 `yaml:"module"`
@@ -339,6 +356,9 @@ func ParseConfig(data []byte) (*MktsConfig, error) {
 	}
 	if a.Replication.BackfillLookback != 0 {
 		m.Replication.BackfillLookback = a.Replication.BackfillLookback
+	}
+	if a.Replication.DeepHealInterval != 0 {
+		m.Replication.DeepHealInterval = a.Replication.DeepHealInterval
 	}
 
 	m.ListenURL = fmt.Sprintf("%v:%v", a.ListenHost, a.ListenPort)

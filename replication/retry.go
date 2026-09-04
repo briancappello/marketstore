@@ -22,13 +22,19 @@ type Retryer struct {
 	retryFunc    func(ctx context.Context) error
 	interval     time.Duration
 	backoffCoeff int
+	// onRetry, when non-nil, is called once per retryable failure, just before
+	// backing off to redial. May be nil (master, or live-only replica).
+	onRetry func()
 }
 
-func NewRetryer(retryFunc func(ctx context.Context) error, interval time.Duration, backoffCoeff int) *Retryer {
+func NewRetryer(retryFunc func(ctx context.Context) error, interval time.Duration, backoffCoeff int,
+	onRetry func(),
+) *Retryer {
 	return &Retryer{
 		retryFunc:    retryFunc,
 		interval:     interval,
 		backoffCoeff: backoffCoeff,
+		onRetry:      onRetry,
 	}
 }
 
@@ -50,6 +56,9 @@ func (r *Retryer) Run(ctx context.Context) error {
 
 			if errors.Is(err, ErrRetryable) {
 				// retryable error. continue
+				if r.onRetry != nil {
+					r.onRetry()
+				}
 				interval := retryInterval(r.interval, r.backoffCoeff, cnt)
 				log.Warn("caught a retryable error. It will be retried after an interval:" +
 					strconv.FormatInt(interval.Milliseconds(), decimal) + "[ms], err=" + err.Error())
