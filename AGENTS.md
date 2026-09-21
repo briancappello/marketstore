@@ -1,7 +1,17 @@
 # AGENTS.md - MarketStore Development Guide
 
-MarketStore is a database server optimized for financial time-series data, written in Go 1.18.
+MarketStore is a database server optimized for financial time-series data, written in Go.
 Module path: `github.com/alpacahq/marketstore/v4`
+
+The Go language and toolchain versions are declared in `go.mod`. Read them from there:
+
+```bash
+grep -E '^(go|toolchain) ' go.mod
+```
+
+This line used to hardcode "Go 1.18" and still said so once the module had moved to
+1.24, which silently rules out language features that are in fact available. Anything
+`go.mod` already declares does not get a second copy in this file.
 
 ## Build Commands
 
