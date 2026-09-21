@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	goio "io"
+	"io/fs"
 	"path/filepath"
 	"sort"
 
@@ -188,6 +189,20 @@ func (wf *WALFileType) replayTGData(tgID int64, wtSets []wal.WTSet) (err error) 
 	for _, wtSet := range wtSets {
 		fp, err2 := cfp.GetFP(wtSet.FilePath)
 		if err2 != nil {
+			// A bucket file that no longer exists is not a corrupt WAL: an
+			// operator may have deleted the bucket deliberately (for example to
+			// repair one whose header disagreed with the master), and the
+			// queued writes for it are simply moot. Skip just this set.
+			//
+			// Aborting here instead would return ReplayError{Cont: true}, which
+			// abandons the WHOLE WAL file and every transaction group still in
+			// it -- for every other bucket too. One removed bucket must not
+			// discard unrelated durable writes.
+			if errors.Is(err2, fs.ErrNotExist) {
+				log.Warn("WAL replay: bucket file %s no longer exists, skipping its queued writes",
+					wtSet.FilePath)
+				continue
+			}
 			return wal.ReplayError{
 				Msg: fmt.Sprintf("failed to open a filepath %s in write transaction set:%v",
 					wtSet.FilePath, err2.Error(),
