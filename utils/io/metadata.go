@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -17,6 +18,10 @@ import (
 
 const (
 	epochColumnName = "Epoch"
+	// nanosecondsColumnName is the sub-second offset column. It is a real,
+	// storable column for FIXED records, but must never appear in a VARIABLE
+	// bucket header -- see stripNanosecondsForVariable.
+	nanosecondsColumnName = "Nanoseconds"
 	// see docs/design/file_format_design.txt for the details.
 	versionHeaderBytes     = 8
 	descriptionHeaderBytes = 256
@@ -92,9 +97,58 @@ func AlignedSize(unalignedSize int) (alignedSize int) {
 	return unalignedSize + machineWordSize - remainder
 }
 
+// stripNanosecondsForVariable removes a "Nanoseconds" column from dsv when the
+// bucket is variable-length, and reports whether it removed one.
+//
+// A VARIABLE record stores its sub-second offset inside the variable record
+// index (as intervalTicks, see GetVariableRecordLength) rather than as a
+// standalone column, so writers strip "Nanoseconds" from every incoming
+// ColumnSeries. A header that lists it therefore describes a bucket no writer
+// can ever satisfy: every write fails the column-count check in
+// executor.Writer.WriteCSM, and on a replica that failure is non-retryable and
+// permanently kills the replication stream.
+//
+// This is enforced here rather than at each call site because bucket creation
+// has several entry points (implicit create-on-write, the JSON-RPC Create API,
+// the gRPC Create API) which independently resolve a schema from request
+// columns, configured attrgroup types, or a merge of the two. Enforcing per
+// path is what allowed them to drift apart in the first place. Every path
+// funnels through this constructor, so a corrupt header cannot be built here
+// regardless of where the schema came from.
+//
+// Note this is conditional on recordType: FIXED buckets may legitimately carry
+// a Nanoseconds column, and stripping it from those would break tick data.
+func stripNanosecondsForVariable(dsv []DataShape, recordType EnumRecordType) (out []DataShape, stripped bool) {
+	if recordType != VARIABLE {
+		return dsv, false
+	}
+	for _, ds := range dsv {
+		// Case-insensitive: writers strip the canonically-spelled column, so a
+		// differently-cased header element is equally unsatisfiable, and no
+		// legitimate column differs from this one only by case.
+		if strings.EqualFold(ds.Name, nanosecondsColumnName) {
+			stripped = true
+			continue
+		}
+		out = append(out, ds)
+	}
+	if !stripped {
+		return dsv, false
+	}
+	return out, true
+}
+
 func NewTimeBucketInfo(tf utils.Timeframe, path, description string, year int16,
 	dsv []DataShape, recordType EnumRecordType,
 ) (f *TimeBucketInfo) {
+	dsv, stripped := stripNanosecondsForVariable(dsv, recordType)
+	if stripped {
+		log.Warn("dropped %q column from the schema of variable-length bucket %s: "+
+			"variable records store the sub-second offset in the record index, not as a column. "+
+			"Remove it from the attrgroup config or the create request to silence this warning",
+			nanosecondsColumnName, filepath.Join(path, strconv.Itoa(int(year))+".bin"))
+	}
+
 	elementTypes, elementNames := CreateShapesForTimeBucketInfo(dsv)
 	f = &TimeBucketInfo{
 		version:      FileinfoVersion,
