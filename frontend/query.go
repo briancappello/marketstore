@@ -405,9 +405,15 @@ func (qs *QueryService) ExecuteQuery(tbk *io.TimeBucketKey, start, end time.Time
 			}
 			// Otherwise, return the error with context
 			err = fmt.Errorf(
-				"no results returned from query: Target: %v, start, end: %v,%v limitRecordCount: %v",
-				tbk.String(), start, end, limitRecordCount)
-			log.Info("%s", err)
+				"%w: Target: %v, start, end: %v,%v limitRecordCount: %v",
+				ErrNoResults, tbk.String(), start, end, limitRecordCount)
+			// Debug, not Info: an empty result is an ordinary answer to an
+			// ordinary question, and callers that scan many symbols emit one of
+			// these per miss. At Info it is high-volume chatter that buries
+			// genuine warnings -- a dead replication stream was lost in exactly
+			// this noise. The error is still returned to the caller, so nothing
+			// is hidden.
+			log.Debug("%s", err)
 		} else {
 			log.Error("Parsing query: %s\n", parseErr)
 			err = parseErr

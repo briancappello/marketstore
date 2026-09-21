@@ -20,6 +20,17 @@ import (
 
 var errNotQueryable = errors.New("server is not queryable")
 
+// ErrNoResults reports that a query found no records: the symbol, timeframe or
+// range simply holds nothing. It is not a malformed request and not an I/O
+// failure, and callers routinely need to tell those apart -- REST maps it to a
+// 404 or an empty list, and the replication backfill treats it as an empty
+// bucket rather than a failed read.
+//
+// It exists as a sentinel because callers previously had to string-match the
+// message to recognise it, which silently misclassified an empty bucket as a
+// read failure on the replica and made it rewrite whole windows blind.
+var ErrNoResults = errors.New("no results returned from query")
+
 type Writer interface {
 	WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) error
 }

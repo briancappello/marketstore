@@ -105,10 +105,8 @@ func resolveTimeframe(raw string) string {
 }
 
 // isNoDataErr reports whether err is the query layer's "this bucket has no
-// records" signal rather than a malformed request. QueryService.ExecuteQuery
-// returns a plain formatted error with this prefix when a symbol/timeframe is
-// absent, so REST maps it to 404 (bars) or an empty list (quotes) instead of
-// a 400. There is no sentinel error to match on, hence the string check.
+// records" signal rather than a malformed request, so REST can map it to 404
+// (bars) or an empty list (quotes) instead of a 400.
 func isNoDataErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "no results returned from query")
+	return errors.Is(err, ErrNoResults)
 }
