@@ -13,6 +13,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/pkg/errors"
 
+	"github.com/alpacahq/marketstore/v4/frontend"
 	pb "github.com/alpacahq/marketstore/v4/proto"
 	"github.com/alpacahq/marketstore/v4/replication"
 	"github.com/alpacahq/marketstore/v4/replication/backfill"
@@ -227,8 +228,21 @@ func (c *Container) GetReplicationBackfillDriver() *backfill.Driver {
 	// the same query path the RPC/gRPC servers use, against the same catalog.
 	qs := c.GetHTTPService()
 	readLocal := func(_ context.Context, tbk string, start, end int64) (io.ColumnSeriesMap, error) {
-		return qs.ExecuteQuery(io.NewTimeBucketKey(tbk),
+		csm, err := qs.ExecuteQuery(io.NewTimeBucketKey(tbk),
 			time.Unix(start, 0).UTC(), time.Unix(end, 0).UTC(), 0, false, nil)
+		if err != nil {
+			// An empty bucket is an empty answer, not a failed read. The query
+			// layer reports "no records" as an error, and treating that as a
+			// read failure made the reconciler give up on comparing and rewrite
+			// the whole window blind -- for exactly the buckets where it had
+			// the most to gain, since every row really is missing. Returning an
+			// empty series instead lets the row diff classify them correctly.
+			if errors.Is(err, frontend.ErrNoResults) {
+				return io.NewColumnSeriesMap(), nil
+			}
+			return nil, err
+		}
+		return csm, nil
 	}
 
 	c.replicationBackfill = backfill.NewDriver(api, readLocal, write, wm,
