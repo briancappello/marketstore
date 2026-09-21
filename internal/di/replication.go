@@ -209,7 +209,18 @@ func (c *Container) GetReplicationBackfillDriver() *backfill.Driver {
 	writer := c.GetDefaultWriter()
 	write := func(csm io.ColumnSeriesMap, isVar bool) error { return writer.WriteCSM(csm, isVar) }
 	catDir := c.GetCatalogDir()
-	isVar := func(tbk string) bool { return backfill.IsVariableTBK(catDir, tbk) }
+	// When a bucket does not exist locally the configured attrgroup schema
+	// decides, since that is what it will be created as on first write.
+	// Defaulting an absent tick bucket to fixed would let backfill pull it and
+	// write it down the fixed path before the live stream could create it
+	// correctly -- which would silently undo a bucket repair.
+	recordTypeOf := func(attrGroup string) string {
+		if cfg, ok := c.mktsConfig.AttrGroupTypes[attrGroup]; ok && cfg != nil {
+			return cfg.RecordType
+		}
+		return ""
+	}
+	isVar := func(tbk string) bool { return backfill.IsVariableTBK(catDir, tbk, recordTypeOf) }
 
 	// readLocal lets a deep pass compare the master's lookback window against
 	// what is already on disk and skip the write when nothing changed. It uses
