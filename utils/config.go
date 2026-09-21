@@ -410,6 +410,25 @@ func ParseConfig(data []byte) (*MktsConfig, error) {
 			return nil, fmt.Errorf("attrgroup_types[%s].record_type: must be 'fixed' or 'variable', got %q", name, agCfg.RecordType)
 		}
 
+		// A variable-length record stores its sub-second offset inside the
+		// variable record index, not as a column, so writers strip
+		// "Nanoseconds" from every incoming ColumnSeries. A bucket header that
+		// lists it can therefore never be satisfied by any write, and on a
+		// replica the resulting error is non-retryable and permanently kills
+		// the replication stream. Reject it here so the mistake surfaces at
+		// startup, naming the attrgroup, rather than as a column-count
+		// mismatch during replay much later.
+		if recordType == "variable" {
+			for colName := range agCfg.Columns {
+				if strings.EqualFold(colName, "Nanoseconds") {
+					return nil, fmt.Errorf(
+						"attrgroup_types[%s].columns[%s]: a variable-length record must not define a "+
+							"%q column; the sub-second offset is stored in the record index. Remove the column",
+						name, colName, colName)
+				}
+			}
+		}
+
 		m.AttrGroupTypes[name] = &AttrGroupConfig{
 			Columns:    agCfg.Columns,
 			RecordType: recordType,

@@ -135,6 +135,63 @@ attrgroup_types:
 			},
 		},
 		{
+			// Regression: a variable-length record stores its sub-second offset
+			// in the record index, so writers strip a "Nanoseconds" column from
+			// every write. A bucket created from a config that lists it can
+			// never be written to, and on a replica the resulting error is
+			// non-retryable and permanently kills the replication stream. The
+			// mistake must surface at startup, naming the attrgroup.
+			name: "variable record type rejects a Nanoseconds column",
+			configYAML: `
+root_directory: /tmp/data
+listen_port: "5993"
+attrgroup_types:
+  QUOTE:
+    columns:
+      AskPrice: float64
+      BidPrice: float64
+      Nanoseconds: int32
+    record_type: variable
+`,
+			expectError: true,
+			errorMsg:    "must not define a",
+		},
+		{
+			name: "variable record type rejects a differently cased Nanoseconds column",
+			configYAML: `
+root_directory: /tmp/data
+listen_port: "5993"
+attrgroup_types:
+  QUOTE:
+    columns:
+      AskPrice: float64
+      nanoseconds: int32
+    record_type: variable
+`,
+			expectError: true,
+			errorMsg:    "must not define a",
+		},
+		{
+			// The invariant is conditional on record type: a FIXED bucket may
+			// legitimately store the sub-second offset as a real column.
+			name: "fixed record type allows a Nanoseconds column",
+			configYAML: `
+root_directory: /tmp/data
+listen_port: "5993"
+attrgroup_types:
+  TICK:
+    columns:
+      Price: float64
+      Nanoseconds: int32
+    record_type: fixed
+`,
+			expectError: false,
+			validate: func(t *testing.T, cfg *MktsConfig) {
+				require.Contains(t, cfg.AttrGroupTypes, "TICK")
+				assert.Equal(t, "int32", cfg.AttrGroupTypes["TICK"].Columns["Nanoseconds"])
+			},
+		},
+		{
 			name: "record_type defaults to fixed",
 			configYAML: `
 root_directory: /tmp/data
