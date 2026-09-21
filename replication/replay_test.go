@@ -77,6 +77,123 @@ func makeMockOHLCColumnSeries(epoch time.Time, open, high, low, clos int64) *io.
 	return cs
 }
 
+// ohlcShapes is the shared column layout for the mixed-record-type fixtures.
+func ohlcShapes() []io.DataShape {
+	return []io.DataShape{
+		{Name: "Epoch", Type: io.INT64},
+		{Name: "Open", Type: io.INT64},
+		{Name: "High", Type: io.INT64},
+		{Name: "Low", Type: io.INT64},
+		{Name: "Close", Type: io.INT64},
+	}
+}
+
+func fixedWTSet(filePath string) wal.WTSet {
+	return wal.WTSet{
+		RecordType: io.FIXED,
+		FilePath:   filePath,
+		DataLen:    32,
+		Buffer:     makeMockOffsetIndexBuffer(offset, index, buffer32),
+		DataShapes: ohlcShapes(),
+	}
+}
+
+func variableWTSet(filePath string) wal.WTSet {
+	return wal.WTSet{
+		RecordType: io.VARIABLE,
+		FilePath:   filePath,
+		DataLen:    24,
+		VarRecLen:  32 + 4, // Open,High,Low,Close + IntervalTicks(4bytes)
+		Buffer: makeMockOffsetIndexBufferVariable(
+			variableRecordDate, utils.TimeframeFromDuration(1*time.Second), buffer32,
+		),
+		DataShapes: ohlcShapes(),
+	}
+}
+
+// TestReplayerImpl_Replay_MixedRecordTypes is the regression test for a replay
+// that labelled every write transaction set with wtsets[0]'s record type.
+//
+// A transaction group is a flush of the write channel, so it can carry sets for
+// several buckets at once and freely mix FIXED and VARIABLE records.
+// ParseTGData decodes a record type per set, and local WAL replay switches on
+// it per set. Reading index 0 for all of them mislabels every set after the
+// first whenever a group is mixed, so WriteCSM strips (or fails to strip) the
+// Nanoseconds column against the wrong schema. The resulting column mismatch is
+// non-retryable and permanently kills the replication stream.
+func TestReplayerImpl_Replay_MixedRecordTypes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		variableBucket = "AMZN/1Sec/OHLC"
+		fixedBucket    = "MSFT/1Min/OHLC"
+	)
+
+	tests := []struct {
+		name   string
+		wtSets []wal.WTSet
+	}{
+		{
+			// VARIABLE first: the bug marked the trailing FIXED set as variable.
+			name: "variable first then fixed",
+			wtSets: []wal.WTSet{
+				variableWTSet("/data/AMZN/1Sec/OHLC/2020.bin"),
+				fixedWTSet("/data/MSFT/1Min/OHLC/2020.bin"),
+			},
+		},
+		{
+			// FIXED first: the bug marked the trailing VARIABLE set as fixed.
+			name: "fixed first then variable",
+			wtSets: []wal.WTSet{
+				fixedWTSet("/data/MSFT/1Min/OHLC/2020.bin"),
+				variableWTSet("/data/AMZN/1Sec/OHLC/2020.bin"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// --- given ---
+			// Record the isVariableLength flag the replayer chose per bucket.
+			got := map[string]bool{}
+			writeFunc := func(csm io.ColumnSeriesMap, isVariableLength bool) error {
+				for tbk := range csm {
+					got[tbk.GetItemKey()] = isVariableLength
+				}
+				return nil
+			}
+			parseTGFunc := func(_ []byte, _ string) (int64, []wal.WTSet) {
+				return 1, tt.wtSets
+			}
+
+			r := replication.NewReplayer(parseTGFunc, writeFunc, "/file/path")
+
+			// --- when ---
+			if err := r.Replay(nil); err != nil {
+				t.Fatalf("Replay() unexpected error: %v", err)
+			}
+
+			// --- then ---
+			// Each set must be written with ITS OWN record type, regardless of
+			// where it sits in the group.
+			if len(got) != 2 {
+				t.Fatalf("expected both buckets to be written, got %v", got)
+			}
+			if !got[variableBucket] {
+				t.Errorf("bucket %s is a VARIABLE set but was written with isVariableLength=false",
+					variableBucket)
+			}
+			if got[fixedBucket] {
+				t.Errorf("bucket %s is a FIXED set but was written with isVariableLength=true",
+					fixedBucket)
+			}
+		})
+	}
+}
+
 func TestReplayerImpl_Replay(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

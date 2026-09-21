@@ -53,7 +53,15 @@ func (r *ReplayerImpl) Replay(transactionGroup []byte) error {
 			return errors.Wrap(err, "failed to convert WTSet to CSM")
 		}
 
-		err = r.writeFunc(csm, wtsets[0].RecordType == io.VARIABLE)
+		// Use THIS set's record type, not wtsets[0]'s. A transaction group is a
+		// flush of the write channel and can carry sets for different buckets,
+		// so it may mix FIXED and VARIABLE records; ParseTGData decodes a record
+		// type per set, and local WAL replay switches on it per set too. Reading
+		// index 0 for every set mislabels every set after the first whenever a
+		// group is mixed, which makes WriteCSM strip (or fail to strip) the
+		// Nanoseconds column against the wrong schema and produces a
+		// non-retryable column mismatch that permanently kills replication.
+		err = r.writeFunc(csm, wtSet.RecordType == io.VARIABLE)
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to WriteCSM. csm:%v", csm))
 		}
