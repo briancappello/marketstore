@@ -295,11 +295,13 @@ func (w *Writer) WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) error {
 			/*
 				If we can't get the info, we try here to add a new one
 			*/
-			var recordType io.EnumRecordType
+			// A bare isVariableLength=false is treated as "no preference"
+			// rather than an explicit request for fixed, so a configured
+			// record type still wins.
+			var requestedRecordType *io.EnumRecordType
 			if isVariableLength {
-				recordType = io.VARIABLE
-			} else {
-				recordType = io.FIXED
+				variable := io.VARIABLE
+				requestedRecordType = &variable
 			}
 
 			t, err2 := cs.GetTime()
@@ -310,47 +312,22 @@ func (w *Writer) WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) error {
 				continue
 			}
 
-			// Get input data shapes
-			inputShapes := cs.GetDataShapes()
-
 			// Check if there's a configured schema for this attrgroup
 			attrGroupName := tbk.GetItemInCategory("AttributeGroup")
 			configSchema := getAttrGroupSchemaFromConfig(attrGroupName)
 
-			var finalShapes []io.DataShape
-			if configSchema != nil {
-				// Variable-length records do not store a separate "Nanoseconds"
-				// column (the sub-second offset is folded into the variable
-				// record index, and it was stripped from the input CSM above).
-				// A config schema may still list it as a logical column, so drop
-				// it here before merging to avoid a spurious "missing required
-				// column" failure on bucket creation.
-				mergeSchema := configSchema
-				if isVariableLength {
-					mergeSchema = schemaWithoutNanoseconds(configSchema)
-				}
+			// Shared with the JSON-RPC and gRPC Create paths so the three
+			// cannot drift apart again.
+			finalShapes, recordType, coercions, resolveErr := io.ResolveCreateSchema(
+				configSchema, cs.GetDataShapes(), requestedRecordType, false)
+			if resolveErr != nil {
+				return fmt.Errorf("schema merge for %s: %w", tbk, resolveErr)
+			}
 
-				// Merge config schema with input shapes
-				mergedShapes, coercions, mergeErr := io.MergeSchemaWithInput(mergeSchema, inputShapes)
-				if mergeErr != nil {
-					return fmt.Errorf("schema merge for %s: %w", tbk, mergeErr)
-				}
-				finalShapes = mergedShapes
-
-				// Log coercions at debug level - user configured these intentionally
-				for colName, types := range coercions {
-					log.Debug("[%s] coercing column %s from %s to configured type %s",
-						tbk.GetItemKey(), colName, types[0].String(), types[1].String())
-				}
-
-				// Use configured record type if not explicitly set by caller
-				if !isVariableLength && configSchema.RecordType == io.VARIABLE {
-					recordType = io.VARIABLE
-				} else if isVariableLength && configSchema.RecordType == io.FIXED {
-					log.Warn("[%s] config specifies fixed record type, but caller requested variable", tbk.GetItemKey())
-				}
-			} else {
-				finalShapes = inputShapes
+			// Log coercions at debug level - user configured these intentionally
+			for colName, types := range coercions {
+				log.Debug("[%s] coercing column %s from %s to configured type %s",
+					tbk.GetItemKey(), colName, types[0].String(), types[1].String())
 			}
 
 			year := int16(t[0].Year())
@@ -436,23 +413,4 @@ func getAttrGroupSchemaFromConfig(attrGroupName string) *io.AttrGroupSchema {
 	configTypes[attrGroupName] = cfg
 
 	return io.GetAttrGroupSchema(attrGroupName, configTypes)
-}
-
-// schemaWithoutNanoseconds returns a copy of the schema with any "Nanoseconds"
-// column removed. Variable-length records store the sub-second offset inside the
-// variable record index rather than as a standalone column (WriteCSM strips it
-// from the input CSM), so a config schema that lists "Nanoseconds" must not
-// require it during bucket-creation schema merge.
-func schemaWithoutNanoseconds(schema *io.AttrGroupSchema) *io.AttrGroupSchema {
-	filtered := make([]io.DataShape, 0, len(schema.DataShapes))
-	for _, ds := range schema.DataShapes {
-		if ds.Name == "Nanoseconds" {
-			continue
-		}
-		filtered = append(filtered, ds)
-	}
-	return &io.AttrGroupSchema{
-		DataShapes: filtered,
-		RecordType: schema.RecordType,
-	}
 }

@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -104,64 +105,38 @@ func (s *DataService) Create(_ *http.Request, reqs *MultiCreateRequest, response
 		configSchema := getAttrGroupSchemaFromConfig(attrGroupName)
 
 		// --- Record Type
-		var recordType io.EnumRecordType
+		// A bare IsVariableLength=false is treated as "no preference" rather
+		// than an explicit request for fixed, which preserves the historical
+		// behaviour of letting a configured record type win.
+		var requestedRecordType *io.EnumRecordType
 		if req.IsVariableLength {
-			recordType = io.VARIABLE
-		} else {
-			recordType = io.FIXED
+			variable := io.VARIABLE
+			requestedRecordType = &variable
 		}
 
 		// --- DataShapes
-		var dsv []io.DataShape
-
-		// Determine schema source based on request and config
-		hasRequestSchema := len(req.ColumnNames) > 0
-		hasConfigSchema := configSchema != nil
-
-		switch {
-		case hasRequestSchema && (!hasConfigSchema || req.OverrideSchema):
-			// Use request schema (either no config exists, or override is requested)
-			dsv = make([]io.DataShape, len(req.ColumnNames))
-			for i, name := range req.ColumnNames {
-				t, ok := io.TypeStrToElemType(req.ColumnTypes[i])
-				if !ok {
-					response.appendResponse(fmt.Errorf("unexpected data type:%v", req.ColumnTypes[i]))
-					return nil
-				}
-				dsv[i] = io.DataShape{Name: name, Type: t}
+		requestShapes := make([]io.DataShape, len(req.ColumnNames))
+		for i, name := range req.ColumnNames {
+			t, ok := io.TypeStrToElemType(req.ColumnTypes[i])
+			if !ok {
+				response.appendResponse(fmt.Errorf("unexpected data type:%v", req.ColumnTypes[i]))
+				// NOTE: this abandons any remaining requests in the batch,
+				// unlike every other error path here which continues. Preserved
+				// as-is so this refactor stays behaviour-neutral.
+				return nil
 			}
+			requestShapes[i] = io.DataShape{Name: name, Type: t}
+		}
 
-		case hasConfigSchema && !hasRequestSchema:
-			// Use config schema as the source
-			dsv = configSchema.DataShapes
-			recordType = configSchema.RecordType
-
-		case hasConfigSchema && hasRequestSchema && !req.OverrideSchema:
-			// Merge: config takes precedence for defined columns, request adds extras
-			requestShapes := make([]io.DataShape, len(req.ColumnNames))
-			for i, name := range req.ColumnNames {
-				t, ok := io.TypeStrToElemType(req.ColumnTypes[i])
-				if !ok {
-					response.appendResponse(fmt.Errorf("unexpected data type:%v", req.ColumnTypes[i]))
-					return nil
-				}
-				requestShapes[i] = io.DataShape{Name: name, Type: t}
+		dsv, recordType, _, err := io.ResolveCreateSchema(
+			configSchema, requestShapes, requestedRecordType, req.OverrideSchema)
+		if err != nil {
+			if errors.Is(err, io.ErrNoSchema) {
+				response.appendResponse(fmt.Errorf("no schema provided and no config found for attrgroup %q",
+					attrGroupName))
+			} else {
+				response.appendResponse(fmt.Errorf("schema merge failed: %w", err))
 			}
-
-			mergedShapes, _, mergeErr := io.MergeSchemaWithInput(configSchema, requestShapes)
-			if mergeErr != nil {
-				response.appendResponse(fmt.Errorf("schema merge failed: %w", mergeErr))
-				continue
-			}
-			dsv = mergedShapes
-			// Use config record type unless explicitly overridden by request
-			if !req.IsVariableLength {
-				recordType = configSchema.RecordType
-			}
-
-		default:
-			// No schema from either source
-			response.appendResponse(fmt.Errorf("no schema provided and no config found for attrgroup %q", attrGroupName))
 			continue
 		}
 

@@ -1,7 +1,9 @@
 package io
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
@@ -46,6 +48,137 @@ func GetAttrGroupSchema(attrGroupName string, configTypes map[string]AttrGroupTy
 		RecordType: recordType,
 	}
 }
+
+// SchemaWithoutNanoseconds returns a copy of schema with any "Nanoseconds"
+// column removed.
+//
+// Variable-length records store the sub-second offset inside the variable
+// record index rather than as a standalone column, and writers strip a
+// "Nanoseconds" column from incoming data. A configured schema that lists it
+// must therefore not be treated as requiring it during a merge, or bucket
+// creation fails with a spurious "missing required column".
+func SchemaWithoutNanoseconds(schema *AttrGroupSchema) *AttrGroupSchema {
+	if schema == nil {
+		return nil
+	}
+	filtered := make([]DataShape, 0, len(schema.DataShapes))
+	for _, ds := range schema.DataShapes {
+		if strings.EqualFold(ds.Name, "Nanoseconds") {
+			continue
+		}
+		filtered = append(filtered, ds)
+	}
+	return &AttrGroupSchema{DataShapes: filtered, RecordType: schema.RecordType}
+}
+
+// ResolveCreateSchema decides the column layout and record type for a bucket
+// that is about to be created, given an optional configured attrgroup schema
+// and an optional caller-supplied schema.
+//
+// This exists because bucket creation has three entry points -- implicit
+// create-on-write in the executor, the JSON-RPC Create API, and the gRPC
+// Create API -- which each used to carry their own copy of this decision. The
+// copies drifted: only one of them stripped "Nanoseconds" for variable-length
+// records, so the other two could persist a bucket header that no write could
+// ever satisfy. Resolving in one place is what stops the next schema rule from
+// drifting the same way.
+//
+// requestedRecordType is a tri-state on purpose. nil means the caller
+// expressed no preference, in which case a configured record type wins. A
+// non-nil value means the caller asked explicitly and is honoured. Callers
+// that only have a boolean "is variable" should pass nil for false, which
+// preserves the historical behaviour of letting config decide.
+func ResolveCreateSchema(
+	configSchema *AttrGroupSchema,
+	requestShapes []DataShape,
+	requestedRecordType *EnumRecordType,
+	overrideSchema bool,
+) (dsv []DataShape, recordType EnumRecordType, coercions map[string][2]EnumElementType, err error) {
+	dsv, recordType, coercions, err = resolveShapes(
+		configSchema, requestShapes, requestedRecordType, overrideSchema)
+	if err != nil {
+		return nil, recordType, nil, err
+	}
+
+	// Final, unconditional enforcement of the variable-length invariant,
+	// applied to whichever branch produced the layout. The merge branch also
+	// strips before merging, for a different reason (so config does not demand
+	// a column the caller cannot supply); this catches every other source,
+	// including a caller that passed Nanoseconds explicitly.
+	//
+	// NewTimeBucketInfo strips again as a last line of defence. Both layers are
+	// deliberately independent: relying on a single downstream check is what
+	// let the three creation paths drift apart in the first place.
+	if recordType == VARIABLE {
+		filtered := make([]DataShape, 0, len(dsv))
+		for _, ds := range dsv {
+			if strings.EqualFold(ds.Name, "Nanoseconds") {
+				continue
+			}
+			filtered = append(filtered, ds)
+		}
+		dsv = filtered
+	}
+
+	return dsv, recordType, coercions, nil
+}
+
+func resolveShapes(
+	configSchema *AttrGroupSchema,
+	requestShapes []DataShape,
+	requestedRecordType *EnumRecordType,
+	overrideSchema bool,
+) (dsv []DataShape, recordType EnumRecordType, coercions map[string][2]EnumElementType, err error) {
+	recordType = FIXED
+	if requestedRecordType != nil {
+		recordType = *requestedRecordType
+	}
+
+	hasRequestSchema := len(requestShapes) > 0
+	hasConfigSchema := configSchema != nil
+
+	switch {
+	case hasRequestSchema && (!hasConfigSchema || overrideSchema):
+		// Caller's schema wins: either there is no config, or an override was
+		// explicitly requested.
+		return requestShapes, recordType, nil, nil
+
+	case hasConfigSchema && !hasRequestSchema:
+		// Config is the only source, so it dictates the record type too.
+		return configSchema.DataShapes, configSchema.RecordType, nil, nil
+
+	case hasConfigSchema && hasRequestSchema:
+		// Merge: config types take precedence for columns it defines, the
+		// caller may contribute extra columns.
+		if requestedRecordType == nil {
+			recordType = configSchema.RecordType
+		} else if *requestedRecordType == FIXED && configSchema.RecordType == VARIABLE {
+			recordType = VARIABLE
+		}
+
+		mergeSchema := configSchema
+		if recordType == VARIABLE {
+			mergeSchema = SchemaWithoutNanoseconds(configSchema)
+		}
+		if requestedRecordType != nil && *requestedRecordType == VARIABLE &&
+			configSchema.RecordType == FIXED {
+			log.Warn("attrgroup config specifies a fixed record type, but the caller requested variable")
+		}
+
+		merged, coerced, mergeErr := MergeSchemaWithInput(mergeSchema, requestShapes)
+		if mergeErr != nil {
+			return nil, recordType, nil, mergeErr
+		}
+		return merged, recordType, coerced, nil
+
+	default:
+		return nil, recordType, nil, ErrNoSchema
+	}
+}
+
+// ErrNoSchema is returned by ResolveCreateSchema when neither the request nor
+// the configuration supplies a column layout.
+var ErrNoSchema = errors.New("no schema provided and no attrgroup config found")
 
 // MergeSchemaWithInput takes a configured schema and input data shapes, returning
 // a merged schema that uses configured types for known columns and inferred types

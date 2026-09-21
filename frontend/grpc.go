@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -366,61 +367,39 @@ func (s GRPCService) Create(ctx context.Context, req *proto.MultiCreateRequest) 
 		attrGroupName := tbk.GetItemInCategory("AttributeGroup")
 		configSchema := getAttrGroupSchemaFromConfig(attrGroupName)
 
-		// Determine record type
-		var rt io.EnumRecordType
+		// Determine record type. An empty RowType means the caller expressed no
+		// preference, so a configured record type wins.
+		var requestedRecordType *io.EnumRecordType
 		if req.RowType != "" {
 			switch req.RowType {
 			case "fixed", "variable":
-				rt = io.EnumRecordTypeByName(req.RowType)
+				rt := io.EnumRecordTypeByName(req.RowType)
+				requestedRecordType = &rt
 			default:
 				appendResponse(&response, fmt.Errorf("record type \"%s\" must be one of fixed or variable", req.RowType))
 				continue
 			}
-		} else {
-			rt = io.FIXED // default
 		}
 
 		// Determine data shapes
-		var dsv []io.DataShape
-		hasRequestSchema := len(req.DataShapes) > 0
-		hasConfigSchema := configSchema != nil
-
-		switch {
-		case hasRequestSchema && (!hasConfigSchema || req.OverrideSchema):
-			// Use request schema
-			dsv, err = NewDataShapeVector(req.DataShapes)
+		var requestShapes []io.DataShape
+		if len(req.DataShapes) > 0 {
+			requestShapes, err = NewDataShapeVector(req.DataShapes)
 			if err != nil {
 				appendResponse(&response, err)
 				continue
 			}
+		}
 
-		case hasConfigSchema && !hasRequestSchema:
-			// Use config schema
-			dsv = configSchema.DataShapes
-			rt = configSchema.RecordType
-
-		case hasConfigSchema && hasRequestSchema && !req.OverrideSchema:
-			// Merge: config takes precedence for defined columns
-			requestShapes, err := NewDataShapeVector(req.DataShapes)
-			if err != nil {
-				appendResponse(&response, err)
-				continue
+		dsv, rt, _, err := io.ResolveCreateSchema(
+			configSchema, requestShapes, requestedRecordType, req.OverrideSchema)
+		if err != nil {
+			if errors.Is(err, io.ErrNoSchema) {
+				appendResponse(&response, fmt.Errorf("no schema provided and no config found for attrgroup %q",
+					attrGroupName))
+			} else {
+				appendResponse(&response, fmt.Errorf("schema merge failed: %w", err))
 			}
-
-			mergedShapes, _, mergeErr := io.MergeSchemaWithInput(configSchema, requestShapes)
-			if mergeErr != nil {
-				appendResponse(&response, fmt.Errorf("schema merge failed: %w", mergeErr))
-				continue
-			}
-			dsv = mergedShapes
-			// Use config record type unless explicitly set by request
-			if req.RowType == "" {
-				rt = configSchema.RecordType
-			}
-
-		default:
-			// No schema from either source
-			appendResponse(&response, fmt.Errorf("no schema provided and no config found for attrgroup %q", attrGroupName))
 			continue
 		}
 
