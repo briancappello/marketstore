@@ -723,3 +723,99 @@ func TestNextPreMarketOpen(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionActive(t *testing.T) {
+	t.Parallel()
+
+	ny := calendar.Nasdaq.Tz()
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		// The incident: a drop at 4:36 AM ET on a trading day is inside the
+		// session, and must not be treated as after-hours.
+		{"pre-market, the 2026-09-21 outage", time.Date(2026, 9, 21, 4, 36, 0, 0, ny), true},
+		{"regular session", time.Date(2026, 9, 21, 11, 0, 0, 0, ny), true},
+		{"post-market", time.Date(2026, 9, 21, 19, 58, 0, 0, ny), true},
+		// The warm-up window between the 3:58 wake and the 4:00 open: the
+		// calendar says closed, but the session is seconds away.
+		{"3:59 warm-up window", time.Date(2026, 9, 21, 3, 59, 0, 0, ny), true},
+		{"3:58 scheduled wake", time.Date(2026, 9, 21, 3, 58, 0, 0, ny), true},
+		// Genuinely outside a session.
+		{"3:50, before the lead window", time.Date(2026, 9, 21, 3, 50, 0, 0, ny), false},
+		{"00:01 nightly provider restart", time.Date(2026, 9, 21, 0, 1, 0, 0, ny), false},
+		{"20:01 just after extended close", time.Date(2026, 9, 21, 20, 1, 0, 0, ny), false},
+		{"Saturday", time.Date(2026, 9, 19, 12, 0, 0, 0, ny), false},
+		{"Sunday", time.Date(2026, 9, 20, 12, 0, 0, 0, ny), false},
+		{"holiday", time.Date(2026, 7, 3, 11, 0, 0, 0, ny), false},
+		// Early-close day: extended close moves to 17:00.
+		{"early-close day, still open", time.Date(2026, 11, 27, 16, 30, 0, 0, ny), true},
+		{"early-close day, after extended close", time.Date(2026, 11, 27, 17, 30, 0, 0, ny), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, sessionActive(tt.now))
+		})
+	}
+}
+
+func TestReconnectWait(t *testing.T) {
+	t.Parallel()
+
+	ny := calendar.Nasdaq.Tz()
+	inSession := time.Date(2026, 9, 21, 4, 36, 0, 0, ny)
+	afterHours := time.Date(2026, 9, 21, 0, 1, 0, 0, ny)
+	streamErr := errors.New("read error: i/o timeout")
+
+	t.Run("in session retries immediately with the supplied backoff", func(t *testing.T) {
+		t.Parallel()
+		wait, untilPreMarket := reconnectWait(inSession, streamErr, 2*time.Second)
+		assert.False(t, untilPreMarket, "must not sleep until pre-market during a session")
+		assert.Equal(t, 2*time.Second, wait)
+	})
+
+	t.Run("connection limit in session still retries immediately", func(t *testing.T) {
+		t.Parallel()
+		wait, untilPreMarket := reconnectWait(inSession, ws.ErrConnectionLimit, reconnectBackoffMin)
+		assert.False(t, untilPreMarket)
+		assert.Equal(t, reconnectBackoffMin, wait)
+	})
+
+	t.Run("outside a session waits for the next pre-market open", func(t *testing.T) {
+		t.Parallel()
+		_, untilPreMarket := reconnectWait(afterHours, streamErr, reconnectBackoffMin)
+		assert.True(t, untilPreMarket)
+	})
+
+	t.Run("auth failure never fast-retries, even mid-session", func(t *testing.T) {
+		t.Parallel()
+		_, untilPreMarket := reconnectWait(inSession, ws.ErrAuthFailed, reconnectBackoffMin)
+		assert.True(t, untilPreMarket, "hammering an auth endpoint invites a lockout")
+	})
+}
+
+func TestNextBackoff(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 2*time.Second, nextBackoff(1*time.Second))
+	assert.Equal(t, 4*time.Second, nextBackoff(2*time.Second))
+	assert.Equal(t, reconnectBackoffMax, nextBackoff(reconnectBackoffMax))
+	assert.Equal(t, reconnectBackoffMax, nextBackoff(reconnectBackoffMax*2),
+		"backoff must stay capped")
+	assert.Equal(t, reconnectBackoffMin, nextBackoff(0),
+		"a zero backoff must start at the minimum, not stay at zero")
+
+	// The whole ramp must stay far below a session, or the bounded backoff
+	// quietly becomes the bug it replaced.
+	total := time.Duration(0)
+	d := reconnectBackoffMin
+	for range 10 {
+		total += d
+		d = nextBackoff(d)
+	}
+	assert.Less(t, total, 5*time.Minute, "ten attempts must not consume a meaningful part of a session")
+}

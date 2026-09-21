@@ -350,7 +350,8 @@ func (mf *MassiveFetcher) startStreaming() {
 	client, err := mf.wsConnect(feed, topics)
 	if err != nil {
 		log.Error("[massive] initial connection failed: %v", err)
-		// Retry loop will sleep until the next pre-market open and try again.
+		// The retry loop decides how long to wait: a short backoff if a
+		// session is live, otherwise the next pre-market open.
 		mf.wg.Add(1)
 		go mf.streamWithRestart(feed, topics, streamState{})
 		return
@@ -434,18 +435,24 @@ type streamState struct {
 	isReconnect bool
 }
 
-// streamWithRestart is the outer retry loop for a single data type's WebSocket
-// stream. On any fatal error (including connection-limit rejections), it sleeps
-// until the next pre-market open (3:58 AM ET) and retries. On a successful
-// reconnect it also triggers a backfill to cover any data gap.
+// streamWithRestart is the outer retry loop for the shared WebSocket stream.
+//
+// How it waits depends on whether a session is live. Inside extended hours it
+// reconnects immediately, with a small bounded backoff so a refusing endpoint
+// is not spun against; outside them it sleeps until the next pre-market open
+// (3:58 AM ET). On a successful reconnect it also triggers a backfill to cover
+// the gap the outage left.
 //
 // state.client, if set, is the pre-connected client used for the first
 // iteration (skipping the connect step, since startStreaming already did it).
 func (mf *MassiveFetcher) streamWithRestart(feed ws.Feed, topics []streamTopic, state streamState) {
 	defer mf.wg.Done()
 
+	backoff := reconnectBackoffMin
+
 	for {
 		var err error
+		startedAt := time.Now()
 		if state.client != nil {
 			// Use the pre-connected client (first iteration from startStreaming).
 			err = mf.stream(topics, state.client, state.isReconnect)
@@ -460,22 +467,40 @@ func (mf *MassiveFetcher) streamWithRestart(feed ws.Feed, topics []streamTopic, 
 			return
 		}
 
-		// Log differently for connection-limit vs other fatal errors.
-		if errors.Is(err, ws.ErrConnectionLimit) {
-			log.Error("[massive] connection limit reached, scheduling retry at next pre-market open")
-		} else {
-			log.Error("[massive] stream failed (%v), scheduling retry at next pre-market open", err)
+		// An attempt that lasted this long is not part of a spin, so the next
+		// failure starts backing off from scratch. This measures the whole
+		// iteration rather than stream time specifically: a connect that takes
+		// a minute to fail is already pacing the loop by itself, so resetting
+		// on it costs nothing.
+		if time.Since(startedAt) >= streamHealthyAfter {
+			backoff = reconnectBackoffMin
 		}
 
-		// Sleep until 3:58 AM ET on the next trading day.
-		wakeTime := nextPreMarketOpen(time.Now())
-		log.Info("[massive] next reconnect attempt at %s", wakeTime.Format(time.RFC3339))
+		wait, untilPreMarket := reconnectWait(time.Now(), err, backoff)
+		if untilPreMarket {
+			wakeTime := nextPreMarketOpen(time.Now())
+			wait = time.Until(wakeTime)
+			log.Error("[massive] stream failed outside market hours (%v), next reconnect attempt at %s",
+				err, wakeTime.Format(time.RFC3339))
+		} else {
+			backoff = nextBackoff(backoff)
+			// Connection-limit rejections are named separately because they
+			// are self-clearing: the provider allows one connection, and this
+			// is usually the previous socket not yet reaped on their side.
+			if errors.Is(err, ws.ErrConnectionLimit) {
+				log.Error("[massive] connection limit reached during market hours, retrying in %s", wait)
+			} else {
+				log.Error("[massive] stream failed during market hours (%v), retrying in %s", err, wait)
+			}
+		}
 
 		select {
 		case <-mf.ctx.Done():
 			return
-		case <-time.After(time.Until(wakeTime)):
-			log.Info("[massive] waking up for scheduled reconnect")
+		case <-time.After(wait):
+			if untilPreMarket {
+				log.Info("[massive] waking up for scheduled reconnect")
+			}
 		}
 
 		state.isReconnect = true
@@ -783,6 +808,75 @@ func (mf *MassiveFetcher) parseDataTypes(names []string) ([]subscription.DataTyp
 		out = append(out, dt)
 	}
 	return out, nil
+}
+
+// Reconnect backoff bounds, applied only while a session is live.
+//
+// The delay exists to stop a tight spin against an endpoint that is actively
+// refusing us (most often a connection-limit rejection while the previous
+// socket is still held server-side). It is deliberately small: during a
+// session, every second offline is data that only a later backfill can
+// recover, so the cost of retrying too eagerly is far lower than the cost of
+// waiting.
+const (
+	reconnectBackoffMin = 1 * time.Second
+	reconnectBackoffMax = 30 * time.Second
+
+	// streamHealthyAfter is how long a stream must survive before the next
+	// failure is treated as a fresh outage rather than a continuation of the
+	// previous one. Without it, a stream that reconnects, runs all afternoon
+	// and then drops would inherit the maximum delay from an unrelated
+	// incident hours earlier.
+	streamHealthyAfter = 60 * time.Second
+
+	// preMarketLead covers the gap between the scheduled 3:58 AM ET wake and
+	// the 4:00 AM open. A failure in that two-minute warm-up window is not
+	// "after hours" -- the session it just woke up for is seconds away -- but
+	// the calendar still reports the market closed. Without this lead, a
+	// failed dial at 3:59 would schedule the next attempt for 3:58 tomorrow
+	// and sleep straight through the day it was trying to cover.
+	preMarketLead = 5 * time.Minute
+)
+
+// sessionActive reports whether extended trading is live at now, or begins
+// within preMarketLead.
+//
+// This is the question the retry policy actually turns on: not "did something
+// break" but "is there a session I am currently missing data from".
+func sessionActive(now time.Time) bool {
+	return calendar.Nasdaq.IsMarketOpen(now) || calendar.Nasdaq.IsMarketOpen(now.Add(preMarketLead))
+}
+
+// reconnectWait decides how to wait before the next connection attempt.
+//
+// untilPreMarket=true means the caller should sleep to the next pre-market
+// open; otherwise wait is a bounded delay to apply immediately.
+//
+// The distinction matters because the two cases used to share one path. A
+// stream that drops at 00:01 ET is the data provider's nightly restart and
+// sleeping until pre-market loses nothing. A stream that drops at 04:36 ET is
+// an outage in the middle of a session, and sleeping until pre-market discards
+// the entire trading day -- which is exactly what happened on 2026-09-21, when
+// a single TCP read timeout cost every bar between 04:36 and 20:00 ET.
+func reconnectWait(now time.Time, err error, backoff time.Duration) (wait time.Duration, untilPreMarket bool) {
+	// Credentials do not repair themselves, and hammering an auth endpoint
+	// invites a lockout. Wait for the next session, by which time a human can
+	// have rotated the key.
+	if errors.Is(err, ws.ErrAuthFailed) {
+		return 0, true
+	}
+	if !sessionActive(now) {
+		return 0, true
+	}
+	return backoff, false
+}
+
+// nextBackoff doubles the delay up to reconnectBackoffMax.
+func nextBackoff(cur time.Duration) time.Duration {
+	if cur < reconnectBackoffMin {
+		return reconnectBackoffMin
+	}
+	return min(cur*2, reconnectBackoffMax)
 }
 
 // nextPreMarketOpen returns 3:58 AM ET on the next applicable trading day.
