@@ -42,7 +42,10 @@ func TestDriverReconcileBackfillsEveryBucket(t *testing.T) {
 	write := func(io.ColumnSeriesMap, bool) error { return nil }
 
 	d := backfill.NewDriver(api, nil, write, wm, 4, 0, 0, func(string) bool { return false })
-	require.Nil(t, d.Reconcile(context.Background(), 1000))
+	// now must be at least one timeframe period past the returned epoch, or the
+	// bar counts as still open and is correctly withheld. A 1D bucket needs
+	// now >= epoch+86400; 1000 would leave it unformed.
+	require.Nil(t, d.Reconcile(context.Background(), 10_000_000))
 
 	sort.Strings(api.queried)
 	assert.Equal(t, []string{"AAPL/1Min/OHLCV", "MSFT/1D/OHLCV"}, api.queried)

@@ -148,6 +148,29 @@ func (d *Driver) Reconcile(ctx context.Context, now int64) error {
 			"%d MiB written to disk (process-wide), compare=%v",
 			pass, time.Since(started), wroteRows, stuckRows, stuckBuckets,
 			(selfWriteBytes()-startBytes)/mib, DrainSkipReasons())
+
+		// Row-level accounting. The reason tally above says how many BUCKETS
+		// took each path; this says how many ROWS were touched, which is what
+		// write amplification actually is. Without it the only evidence is the
+		// disk-byte total, which cannot distinguish "the data changed" from
+		// "we rewrote data that had not changed".
+		if rs := DrainRowStats(); rs.Compared > 0 || rs.Schema > 0 {
+			var pctWritten float64
+			if rs.Compared > 0 {
+				pctWritten = 100 * float64(rs.Written()) / float64(rs.Compared)
+			}
+			log.Info("[replication-backfill] %s pass rows: compared=%d identical=%d "+
+				"missing=%d revised=%d written=%d (%.2f%%) local-only=%d schema-skipped=%d",
+				pass, rs.Compared, rs.Identical, rs.Missing, rs.Revised,
+				rs.Written(), pctWritten, rs.LocalOnly, rs.Schema)
+		}
+
+		// Name a few buckets behind each reason. The counts alone say how much
+		// disagreed but not what, so there is nothing to investigate from them.
+		// Logged separately from the summary so the summary stays greppable.
+		for reason, tbks := range DrainSkipSamples() {
+			log.Info("[replication-backfill] %s pass: reason %q e.g. %v", pass, reason, tbks)
+		}
 	}()
 
 	wp := worker.NewWorkerPool(ctx, d.parallelism)

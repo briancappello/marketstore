@@ -3,6 +3,7 @@ package backfill_test
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -110,7 +111,9 @@ func TestBackfillBucketReportsWriteThatCannotAdvanceWatermark(t *testing.T) {
 
 	// A deep pass (lookback > 0) is asking for corrections on purpose, so data
 	// at or below the watermark is exactly what it wants: it must be written.
-	rows, advanced, err := backfill.BackfillBucket(context.Background(), api, nil, write, wm, "AAPL/1D/OHLCV", 999, time.Hour, false)
+	// now is well past epoch+86400 so the 1D bar has closed; an open bar is
+	// withheld regardless of the watermark.
+	rows, advanced, err := backfill.BackfillBucket(context.Background(), api, nil, write, wm, "AAPL/1D/OHLCV", 10_000_000, time.Hour, false)
 	require.Nil(t, err)
 	assert.True(t, called, "a deep pass must write corrections below the watermark")
 	assert.Equal(t, 1, rows)
@@ -290,7 +293,15 @@ func TestBackfillBucketDeepPassWritesOnlyNewTailWhenHistoryMatches(t *testing.T)
 
 // If the history does NOT match, the master has corrected something below the
 // watermark and the whole window must be written.
-func TestBackfillBucketDeepPassWritesFullWindowOnCorrection(t *testing.T) {
+// TestBackfillBucketDeepPassWritesOnlyTheRowsThatDiffer replaces an earlier
+// test that asserted a correction rewrote the WHOLE lookback window.
+//
+// The intent it was protecting -- a master-side correction below the watermark
+// must land, and genuinely new rows must land -- is unchanged and still
+// asserted here. What changed is the cost: a single revised bar used to drag
+// every other bar in the window through the WAL and back out to disk. On a
+// 1Sec bucket that is ~86400 records rewritten to correct one.
+func TestBackfillBucketDeepPassWritesOnlyTheRowsThatDiffer(t *testing.T) {
 	tbk := io.NewTimeBucketKey("AAPL/1Sec/OHLCV")
 	mkcs := func(ep []int64, cl []float32) io.ColumnSeriesMap {
 		cs := io.NewColumnSeries()
@@ -300,7 +311,8 @@ func TestBackfillBucketDeepPassWritesFullWindowOnCorrection(t *testing.T) {
 		m.AddColumnSeries(*tbk, cs)
 		return m
 	}
-	master := mkcs([]int64{100, 200, 300, 400}, []float32{1, 99, 3, 4}) // 200 corrected
+	// 200 was revised by the master; 400 is new. 100 and 300 already match.
+	master := mkcs([]int64{100, 200, 300, 400}, []float32{1, 99, 3, 4})
 	local := mkcs([]int64{100, 200, 300}, []float32{1, 2, 3})
 
 	api := &fakeAPI{ret: master}
@@ -315,6 +327,9 @@ func TestBackfillBucketDeepPassWritesFullWindowOnCorrection(t *testing.T) {
 		"AAPL/1Sec/OHLCV", 999, time.Hour, false)
 	require.Nil(t, err)
 	require.NotNil(t, wrote)
-	assert.Equal(t, []int64{100, 200, 300, 400}, wrote[*tbk].GetEpoch(),
-		"a correction below the watermark must rewrite the whole window")
+
+	got := wrote[*tbk].GetEpoch()
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	assert.Equal(t, []int64{200, 400}, got,
+		"only the revised row and the new row need writing; the two that already matched do not")
 }

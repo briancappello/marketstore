@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/alpacahq/marketstore/v4/utils/io"
+	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
 // ReadFunc reads a local range, mirroring MasterAPI.QueryRange so a deep pass
@@ -16,6 +17,24 @@ type ReadFunc func(ctx context.Context, tbk string, start, end int64) (io.Column
 // WriteFunc writes a ColumnSeriesMap locally. Mirrors the replayer's write seam
 // (executor.WriteCSM / GetDefaultWriter().WriteCSM).
 type WriteFunc func(csm io.ColumnSeriesMap, isVariableLength bool) error
+
+// lastClosedBarEpoch returns the newest epoch whose bar has finished for the
+// timeframe encoded in tbk, i.e. the newest epoch safe to persist at time now.
+//
+// It reports ok=false when the timeframe cannot be determined, in which case
+// the caller must not filter: silently dropping every row because a key failed
+// to parse would look exactly like "the master has no data".
+func lastClosedBarEpoch(tbk string, now int64) (cutoff int64, ok bool) {
+	key := io.NewTimeBucketKey(tbk)
+	if key == nil {
+		return 0, false
+	}
+	tf, err := key.GetTimeFrame()
+	if err != nil || tf == nil || tf.Duration <= 0 {
+		return 0, false
+	}
+	return now - int64(tf.Duration.Seconds()), true
+}
 
 // BackfillBucket queries [watermark+1−lookback, now] for one bucket, writes
 // what it gets, and advances the watermark to the newest epoch written. The
@@ -50,6 +69,26 @@ func BackfillBucket(
 		return 0, false, nil
 	}
 
+	// Persist only bars whose period has closed.
+	//
+	// A bar stamped E covers [E, E+timeframe), so it is still being written on
+	// the master until now >= E+timeframe. Backfilling an open bar copies a
+	// half-formed value that the master will keep revising, which showed up
+	// three ways: the deep pass reported the newest bar as a "correction" on
+	// every single pass (dominated by Close and Volume, the two columns that
+	// keep moving while Open/High/Low have settled), each of those triggered a
+	// full-window rewrite, and the watermark could never advance past it -- the
+	// "rewritten without advancing the watermark" buckets.
+	//
+	// A replica may lag, so the fix is simply not to take the open bar. The
+	// cost is bounded at one timeframe period of freshness; the gain is that a
+	// reported correction now means the master actually revised history.
+	cutoff, haveCutoff := lastClosedBarEpoch(tbk, now)
+	closed := func(e int64) bool { return e <= cutoff }
+	if haveCutoff {
+		csm = FilterCSM(csm, closed)
+	}
+
 	newest := int64(0)
 	for _, cs := range csm {
 		epochs := cs.GetEpoch()
@@ -77,45 +116,95 @@ func BackfillBucket(
 		return 0, false, nil
 	}
 
-	// Deep pass: it re-pulls the whole lookback window purely in case the master
-	// revised something, but revisions are rare, so nearly every row already
-	// matches what is on disk. Rewriting them is not free -- bars live in
-	// index-addressed space, so a handful of them drags whole file blocks along.
-	// Compare first and skip when nothing changed; a failed read falls through
-	// to the write so a correction is never silently dropped.
+	// Deep pass: re-pull the whole lookback window in case the master revised
+	// something, then write only the epochs that actually disagree.
+	//
+	// The window is compared row by row rather than as a whole. Deciding at
+	// window granularity meant one revised bar rewrote every bar in the window:
+	// on a 1Sec bucket that is ~86400 records pushed through the WAL and back
+	// out to index-addressed file space to correct one of them.
+	//
+	// There is deliberately no split at the watermark any more. Rows above it
+	// used to be written blind on the assumption that they were new, but the
+	// live replication stream writes these same buckets independently, so they
+	// are frequently already correct on disk. Comparing everything and writing
+	// the difference makes "new" and "revised" the same case.
 	if lookback > 0 && readLocal != nil {
 		local, rerr := readLocal(ctx, tbk, start, now)
 		if rerr != nil {
-			recordSkipReason("local-read-error")
+			// The error itself was previously discarded, leaving only an
+			// aggregate count with no bucket and no cause -- nothing an
+			// operator could act on. A failed read falls through to the write
+			// below, so this is not fatal, but it does mean the pass rewrote
+			// the bucket blind.
+			recordSkipReason("local-read-error", tbk)
+			log.Warn("[replication-backfill] local read failed for %s, rewriting the whole window blind: %v",
+				tbk, rerr)
 		} else {
-			// Split at the watermark. Rows at or below it are history we should
-			// already hold, and are the only place a correction can hide. Rows
-			// above it are simply new and always need writing.
-			atOrBelow := func(e int64) bool { return e <= prev }
-			above := func(e int64) bool { return e > prev }
+			// Compare like with like. The master side above was reduced to
+			// closed bars, so the local side must be too, or an open bar that
+			// an earlier build already persisted makes local one row longer
+			// than master -- a difference that would be "repaired" on every
+			// pass until that bar finally closes.
+			if haveCutoff {
+				local = FilterCSM(local, closed)
+			}
 
-			eq, reason := CSMDiff(FilterCSM(csm, atOrBelow), FilterCSM(local, atOrBelow))
-			switch {
-			case !eq:
-				// The master revised something below the watermark. Write the
-				// whole window so the correction lands.
-				recordSkipReason("correction:" + reason)
-			case CSMRows(FilterCSM(csm, above)) == 0:
-				// Fully in sync: nothing new, nothing corrected.
-				recordSkipReason("unchanged")
+			diffs := CSMRowDiff(csm, local)
+
+			needed := make(map[io.TimeBucketKey]map[int64]struct{}, len(diffs))
+			var toWrite int
+			inSync := true
+			for key, d := range diffs {
+				recordRowDiff(d)
+				recordSkipReason(diffReason(d), tbk)
+
+				if d.SchemaIssue != "" {
+					// Writing cannot reconcile a schema disagreement: the write
+					// either fails the column check or is coerced straight back
+					// to the local type. Report it and leave the bucket alone
+					// rather than rewriting it on every pass forever.
+					log.Warn("[replication-backfill] %s: cannot compare with master (%s); "+
+						"leaving it untouched, this needs the bucket schema reconciled",
+						tbk, d.SchemaIssue)
+					continue
+				}
+				if len(d.LocalOnly) > 0 {
+					log.Warn("[replication-backfill] %s: holds %d row(s) the master did not return "+
+						"(e.g. epoch %d); a write cannot remove rows",
+						tbk, len(d.LocalOnly), d.LocalOnly[0])
+				}
+				epochs := d.NeedsWrite()
+				if len(epochs) == 0 {
+					continue
+				}
+				inSync = false
+				set := make(map[int64]struct{}, len(epochs))
+				for _, e := range epochs {
+					set[e] = struct{}{}
+				}
+				needed[key] = set
+				toWrite += len(epochs)
+			}
+
+			if inSync {
+				// Nothing to write. The watermark still advances so the next
+				// pass starts from here.
 				if err := wm.Set(tbk, newest); err != nil {
 					return 0, false, err
 				}
 				return 0, newest > prev, nil
-			default:
-				// History matches, so only the tail is genuinely new. Writing
-				// just that, rather than the whole lookback window, is the
-				// difference between touching a few file blocks and rewriting
-				// ~2 MB of index-addressed space for this bucket.
-				recordSkipReason("tail-only")
-				csm = FilterCSM(csm, above)
-				rows = CSMRows(csm)
 			}
+
+			csm = FilterCSMByBucket(csm, func(key io.TimeBucketKey, e int64) bool {
+				set, ok := needed[key]
+				if !ok {
+					return false
+				}
+				_, ok = set[e]
+				return ok
+			})
+			rows = CSMRows(csm)
 		}
 	}
 
