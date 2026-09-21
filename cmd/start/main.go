@@ -152,13 +152,36 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	backfillDriver := c.GetReplicationBackfillDriver()
 
 	// init replication client
+	metrics.ReplicationStreamUp.Set(1)
 	go func() {
 		log.Info("initializing replication client")
 		err := c.GetReplicationClientWithRetry().Run(globalCtx)
-		if err != nil {
-			log.Error("Unable to startup Replication", err)
+		if err == nil {
 			return
 		}
+
+		// The retryer only returns an error once it has given up: either the
+		// context was cancelled (normal shutdown) or it hit a non-retryable
+		// failure, which it does NOT redial after. In the latter case the live
+		// stream is gone for the remaining lifetime of this process.
+		//
+		// The listeners are already up and stay up, so without this the node
+		// would keep answering queries, and keep reporting itself healthy,
+		// from data that silently stops advancing. Mark it broken so the
+		// health endpoints report 503 and an orchestrator can pull it from
+		// rotation. Queries are deliberately left working: the data on disk is
+		// still readable and a caller may legitimately want it.
+		if globalCtx.Err() != nil {
+			log.Info("replication client stopped: %v", err)
+			return
+		}
+
+		metrics.ReplicationStreamUp.Set(0)
+		frontend.SetReplicationBroken()
+		log.Error("replication has stopped permanently and will NOT be retried; "+
+			"this instance keeps serving queries but its data no longer tracks the master, "+
+			"and its health endpoints now report unhealthy. Restart is required to resume "+
+			"replication: %v", err)
 	}()
 
 	// Start the replication backfill reconciler (bootstrap + periodic catch-up).

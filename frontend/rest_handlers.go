@@ -15,8 +15,19 @@ import (
 // A cheap liveness/readiness probe for clients (e.g. a status indicator). It
 // touches no catalog data: 200 {"status":"ok"} once the server is queryable,
 // 503 while it is still starting — consistent with every other REST route.
+//
+// A replica whose live replication stream has stopped for good also reports
+// 503. Its data is still readable, so queries keep working, but it is no
+// longer tracking the master and must not advertise itself as healthy.
 func (s *DataService) handleRESTHealth(w http.ResponseWriter, r *http.Request) {
 	if !requireQueryable(w) {
+		return
+	}
+	if ReplicationBroken() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "replication stopped",
+			"detail": "the live replication stream has stopped; served data is no longer advancing",
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

@@ -103,4 +103,19 @@ var (
 			Name:      "replication_dropped_messages_total",
 			Help:      "Transaction groups dropped due to a full replication buffer.",
 		})
+
+	// ReplicationStreamUp reports whether this replica's live replication
+	// stream is running: 1 while connected or retrying, 0 once it has stopped
+	// for good.
+	//
+	// A replica whose stream has stopped keeps serving queries from data that
+	// no longer advances, so this is the signal that distinguishes "up" from
+	// "up but silently diverging". Alert on it reaching 0.
+	ReplicationStreamUp = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "replication_stream_up",
+			Help:      "1 when the replica's live replication stream is running, 0 when it has stopped permanently.",
+		})
 )
