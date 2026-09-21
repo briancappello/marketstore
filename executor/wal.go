@@ -387,6 +387,13 @@ func serializeTG(tgID int64, commands []*wal.WriteCommand,
 func writeFixedBuffer(writes []wal.OffsetIndexBuffer, fullPath string) error {
 	const batchThreshold = 100
 
+	// Consecutive bars for one bucket are adjacent on disk, so a run of them is
+	// one write, not one per record. Doing this before choosing the file handle
+	// matters: the threshold below is about how many writes we are about to
+	// issue, and after coalescing that is the number of spans, not the number
+	// of records.
+	spans := wal.CoalesceAdjacent(writes)
+
 	type WriteAtCloser interface {
 		goio.WriterAt
 		goio.Closer
@@ -395,7 +402,7 @@ func writeFixedBuffer(writes []wal.OffsetIndexBuffer, fullPath string) error {
 		fp  WriteAtCloser
 		err error
 	)
-	if len(writes) >= batchThreshold {
+	if len(spans) >= batchThreshold {
 		fp, err = buffile.New(fullPath)
 	} else {
 		fp, err = os.OpenFile(fullPath, os.O_RDWR, 0o700)
@@ -411,8 +418,8 @@ func writeFixedBuffer(writes []wal.OffsetIndexBuffer, fullPath string) error {
 		}
 	}()
 
-	for _, buffer := range writes {
-		if err = WriteBufferToFile(fp, buffer); err != nil {
+	for _, span := range spans {
+		if _, err = fp.WriteAt(span.Data, span.Offset); err != nil {
 			log.Error("failed to write committed data: %v", err)
 			return err
 		}
