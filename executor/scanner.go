@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -139,10 +140,59 @@ func NewIOPlan(fl SortedFileList, limit *planner.RowLimit, range2 *planner.DateR
 type Reader struct {
 	pr     planner.ParseResult
 	IOPMap map[utilsio.TimeBucketKey]*IOPlan
+	// scratchSize is how much working space the packing scan needs, derived
+	// from the widest record among the qualified files. The buffers themselves
+	// are borrowed from scratchPool for the duration of Read, not held for the
+	// lifetime of the Reader.
+	scratchSize int
 	// for packingReader to avoid redundant allocation.
-	// really ought to be somewhere close to the function...
+	// Only valid for the duration of a Read call; nil outside it.
 	readBuffer []byte
 	fileBuffer []byte
+}
+
+// scratchPool recycles the two working buffers a Read needs.
+//
+// The scan reads whole blocks of records (recordsPerRead at a time) so it can
+// skip holes cheaply, which makes each buffer recordsPerRead*RecordLen bytes --
+// 256 KiB for a 32-byte OHLCV record, half a megabyte for the pair. That size
+// is a property of the scan, not of the result: every byte Read returns is
+// copied out of these buffers before it returns (readForward and readBackward
+// both append/copy into a separately allocated result buffer), so they never
+// outlive the call.
+//
+// Allocating them per Reader therefore charged the full 512 KiB to callers that
+// wanted a single row. A trigger doing SetRowLimit(io.LAST, 1) asks for 32
+// bytes and paid 512 KiB for it, and at trigger rates that one call site
+// dominated total allocation and made GC the largest consumer of CPU in the
+// process. Pooling keeps the wide scan window while making the steady-state
+// allocation cost of a small read approximately zero.
+var scratchPool = sync.Pool{
+	New: func() interface{} {
+		b := []byte(nil)
+		return &b
+	},
+}
+
+// getScratch borrows a buffer of exactly n bytes. The pooled buffer grows to
+// the largest size any reader has asked for and is reused at that size after.
+func getScratch(n int) *[]byte {
+	bp, ok := scratchPool.Get().(*[]byte)
+	if !ok || bp == nil {
+		b := make([]byte, n)
+		return &b
+	}
+	if cap(*bp) < n {
+		*bp = make([]byte, n)
+		return bp
+	}
+	*bp = (*bp)[:n]
+	return bp
+}
+
+func putScratch(bp *[]byte) {
+	*bp = (*bp)[:0]
+	scratchPool.Put(bp)
 }
 
 func NewReader(pr *planner.ParseResult) (r *Reader, err error) {
@@ -171,9 +221,10 @@ func NewReader(pr *planner.ParseResult) (r *Reader, err error) {
 	// Number of bytes to buffer, some multiple of record length
 	// This should be at least bigger than 4096 and be better multiple of 4KB,
 	// which is the common io size on most of the storage/filesystem.
-	readSize := recordsPerRead * maxRecordLen
-	r.readBuffer = make([]byte, readSize)
-	r.fileBuffer = make([]byte, readSize)
+	// The buffers are borrowed from scratchPool in Read rather than allocated
+	// here, so constructing a Reader that is never read from -- or one that
+	// reads a single row -- costs nothing.
+	r.scratchSize = int(recordsPerRead * maxRecordLen)
 
 	return r, nil
 }
@@ -185,6 +236,18 @@ func (r *Reader) Read() (csm utilsio.ColumnSeriesMap, err error) {
 	// Solution: Hack ColumnSeries add subsection fields to break the one big query
 	// down to several parts of small query and each one's Range.Start follow the last's
 	// Range.End with same other conditions.
+
+	// Borrow the scan scratch space for the duration of this call only. The
+	// results below are copied out of these buffers, never aliased into them,
+	// so returning them to the pool here is safe. See scratchPool.
+	readBuf, fileBuf := getScratch(r.scratchSize), getScratch(r.scratchSize)
+	r.readBuffer, r.fileBuffer = *readBuf, *fileBuf
+	defer func() {
+		r.readBuffer, r.fileBuffer = nil, nil
+		putScratch(readBuf)
+		putScratch(fileBuf)
+	}()
+
 	csm = utilsio.NewColumnSeriesMap()
 	rtMap := r.pr.GetRecordType()
 	dsMap := r.pr.GetDataShapes()
