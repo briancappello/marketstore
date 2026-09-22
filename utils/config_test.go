@@ -410,3 +410,42 @@ func TestAttrGroupConfig_GetRecordType(t *testing.T) {
 
 	assert.Equal(t, "variable", cfg.GetRecordType())
 }
+
+// wal_sync_interval controls how often the background flusher fsyncs the WAL.
+// Each tick is an fsync, so it trades crash-loss window against CPU and IOPS.
+func TestParseConfig_WALSyncInterval(t *testing.T) {
+	t.Parallel()
+
+	yml := []byte(`
+root_directory: /tmp/x
+listen_port: 5993
+wal_sync_interval: 2s
+`)
+	cfg, err := ParseConfig(yml)
+	assert.Nil(t, err)
+	assert.Equal(t, 2*time.Second, cfg.WALSyncInterval)
+}
+
+// Omitting the key must leave the historical 500ms behaviour in place. A zero
+// value reaching SyncWAL would make time.NewTicker panic.
+func TestParseConfig_WALSyncIntervalDefaultsWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	yml := []byte(`
+root_directory: /tmp/x
+listen_port: 5993
+`)
+	cfg, err := ParseConfig(yml)
+	assert.Nil(t, err)
+	assert.Equal(t, 500*time.Millisecond, cfg.WALSyncInterval)
+}
+
+func TestParseConfig_WALSyncIntervalRejectsBadValues(t *testing.T) {
+	t.Parallel()
+
+	for _, val := range []string{"not-a-duration", "0s", "-1s"} {
+		yml := []byte("root_directory: /tmp/x\nlisten_port: 5993\nwal_sync_interval: " + val + "\n")
+		_, err := ParseConfig(yml)
+		require.Error(t, err, "wal_sync_interval %q must be rejected", val)
+	}
+}

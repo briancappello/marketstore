@@ -59,7 +59,14 @@ func (c *Container) GetInitWALFile() *executor.WALFileType {
 			defaultWalSyncInterval            = 500 * time.Millisecond
 			defaultPrimaryDiskRefreshInterval = 5 * time.Minute
 		)
-		go walfile.SyncWAL(defaultWalSyncInterval, defaultPrimaryDiskRefreshInterval, c.mktsConfig.WALRotateInterval)
+		// Every tick costs an fsync on the WAL, so this knob trades crash-loss
+		// window against CPU and IOPS directly. Zero means the config never set
+		// it (e.g. a MktsConfig built by hand in a test), so fall back.
+		walSyncInterval := c.mktsConfig.WALSyncInterval
+		if walSyncInterval <= 0 {
+			walSyncInterval = defaultWalSyncInterval
+		}
+		go walfile.SyncWAL(walSyncInterval, defaultPrimaryDiskRefreshInterval, c.mktsConfig.WALRotateInterval)
 		walfile.IncrementWaitGroup()
 	}
 

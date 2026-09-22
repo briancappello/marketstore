@@ -111,10 +111,15 @@ type MktsConfig struct {
 	// RESTAllowedOrigins is the CORS allow-list for the REST API. Empty
 	// means no CORS headers are emitted and the API is same-origin only.
 	// The literal "*" allows any origin.
-	RESTAllowedOrigins         []string
-	Timezone                   *time.Location
-	StopGracePeriod            time.Duration
-	WALRotateInterval          int
+	RESTAllowedOrigins []string
+	Timezone           *time.Location
+	StopGracePeriod    time.Duration
+	WALRotateInterval  int
+	// WALSyncInterval is how often the background flusher drains the write
+	// channel to the WAL and fsyncs it. It bounds how much recently written
+	// data a crash can lose, and each tick costs an fsync, so it trades
+	// durability directly against CPU and IOPS.
+	WALSyncInterval            time.Duration
 	DisableVariableCompression bool
 	InitCatalog                bool
 	InitWALCache               bool
@@ -135,6 +140,7 @@ const (
 	megabyteToByte                     = 1 << 20
 	defaultReplicationMasterListenPort = 5996
 	defaultWALRotateInterval           = 5 // * DiskRefreshInterval
+	defaultWALSyncInterval             = 500 * time.Millisecond
 )
 
 func NewDefaultConfig(rootDir string) *MktsConfig {
@@ -148,6 +154,7 @@ func NewDefaultConfig(rootDir string) *MktsConfig {
 		Timezone:                   time.UTC,
 		StopGracePeriod:            5 * time.Second,
 		WALRotateInterval:          defaultWALRotateInterval,
+		WALSyncInterval:            defaultWALSyncInterval,
 		DisableVariableCompression: false,
 		InitCatalog:                true,
 		InitWALCache:               true,
@@ -189,6 +196,7 @@ type aux struct {
 	LogLevel                   string   `yaml:"log_level"`
 	StopGracePeriod            int      `yaml:"stop_grace_period"`
 	WALRotateInterval          int      `yaml:"wal_rotate_interval"`
+	WALSyncInterval            string   `yaml:"wal_sync_interval"`
 	DisableVariableCompression string   `yaml:"disable_variable_compression"`
 	InitCatalog                string   `yaml:"init_catalog"`
 	InitWALCache               string   `yaml:"init_wal_cache"`
@@ -274,6 +282,16 @@ func ParseConfig(data []byte) (*MktsConfig, error) {
 
 	if a.WALRotateInterval != 0 {
 		m.WALRotateInterval = a.WALRotateInterval
+	}
+
+	if a.WALSyncInterval != "" {
+		m.WALSyncInterval, err = time.ParseDuration(a.WALSyncInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid wal_sync_interval %q: %w", a.WALSyncInterval, err)
+		}
+		if m.WALSyncInterval <= 0 {
+			return nil, fmt.Errorf("wal_sync_interval must be positive, got %q", a.WALSyncInterval)
+		}
 	}
 
 	if a.LogLevel != "" {

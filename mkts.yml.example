@@ -4,6 +4,12 @@ grpc_listen_port: 5995
 log_level: info
 stop_grace_period: 5
 wal_rotate_interval: 5
+# How often the background flusher drains pending writes to the WAL and fsyncs
+# it. Every tick is an fsync, so this trades the crash-loss window directly
+# against CPU and IOPS: 500ms means at most half a second of writes are lost on
+# an unclean stop, at the cost of two fsyncs per second forever.
+# Accepts a Go duration ("500ms", "2s"). Defaults to 500ms when omitted.
+wal_sync_interval: 500ms
 timezone: "America/New_York"
 
 # CORS allow-list for the REST API. Empty (the default) emits no CORS
