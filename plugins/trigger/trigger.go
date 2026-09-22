@@ -10,10 +10,10 @@
 //
 // Triggers can be configured in the marketstore config file.
 //
-// 	triggers:
-// 	  - module: xxxTrigger.so
-// 	    on: "*/1Min/OHLCV"
-// 	    config: <according to the plugin>
+//	triggers:
+//	  - module: xxxTrigger.so
+//	    on: "*/1Min/OHLCV"
+//	    config: <according to the plugin>
 //
 // The "on" value is matched with the file path to decide whether the trigger
 // is fired or not.  It can contain wildcard character "*".
@@ -49,6 +49,29 @@ type Matcher struct {
 	// fire event.  It is the prefix of file path such as
 	// ""*/1Min/OHLC"
 	On string
+	// onRegex is On compiled once by NewMatcher. Match runs on the write hot
+	// path -- once per registered matcher for every key written -- so
+	// compiling the pattern inside Match made regex compilation a measurable
+	// share of both CPU time and total heap allocation under load.
+	onRegex *regexp.Regexp
+}
+
+// compileOn builds the matching expression for an "on" condition.
+//
+// "on" is a glob over key paths, not a regular expression: the only
+// metacharacter is "*", standing for exactly one path element. Everything else
+// is literal, so the pattern is quoted before "*" is substituted -- otherwise a
+// "." in a bucket name would silently behave as "any character".
+//
+// The expression is anchored. A key path carries a trailing year file
+// ("AAPL/1Min/OHLCV/2024.bin") while "on" names the bucket ("*/1Min/OHLCV"), so
+// the match must start at the beginning and end on a path boundary. Without the
+// anchors the old unanchored match fired "*/1Min/OHLCV" on a differently-named
+// "AAPL/1Min/OHLCVEXTRA" bucket, and on any key merely containing the pattern
+// somewhere in the middle.
+func compileOn(on string) (*regexp.Regexp, error) {
+	pattern := strings.ReplaceAll(regexp.QuoteMeta(on), `\*`, `[^/]+`)
+	return regexp.Compile(`^` + pattern + `(?:/|$)`)
 }
 
 // SymbolLoader is an interface to retrieve symbol object from plugin.
@@ -169,14 +192,29 @@ func NewTriggerMatcher(ts *utils.TriggerSetting) *Matcher {
 
 // NewMatcher creates a new Matcher.
 func NewMatcher(trigger Trigger, on string) *Matcher {
+	re, err := compileOn(on)
+	if err != nil {
+		// A pattern that cannot compile would never match anything, so fail
+		// loudly here rather than silently never firing the trigger at runtime.
+		log.Error("invalid trigger 'on' condition %q: %v", on, err)
+		return nil
+	}
 	return &Matcher{
-		Trigger: trigger, On: on,
+		Trigger: trigger, On: on, onRegex: re,
 	}
 }
 
 // Match returns true if keyPath matches the On condition.
 func (tm *Matcher) Match(keyPath string) bool {
-	pattern := strings.Replace(tm.On, "*", "[^/]+", -1)
-	matched, _ := regexp.MatchString(pattern, keyPath)
-	return matched
+	if tm.onRegex == nil {
+		// Only reachable for a Matcher built as a bare struct literal instead
+		// of via NewMatcher. Compile per call rather than caching, to keep
+		// Match safe for concurrent use.
+		re, err := compileOn(tm.On)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(keyPath)
+	}
+	return tm.onRegex.MatchString(keyPath)
 }
