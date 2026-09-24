@@ -20,7 +20,7 @@ import (
 
 // recordsFor converts a ColumnSeries into trigger records the way the
 // executor's trigger dispatcher does.
-func recordsFor(t *testing.T, cs *io.ColumnSeries, tbk *io.TimeBucketKey) []trigger.Record {
+func recordsFor(t testing.TB, cs *io.ColumnSeries, tbk *io.TimeBucketKey) []trigger.Record {
 	t.Helper()
 	rs, err := cs.ToRowSeries(*tbk, true)
 	require.Nil(t, err)

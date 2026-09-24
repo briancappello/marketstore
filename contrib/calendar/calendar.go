@@ -296,29 +296,36 @@ func (calendar *Calendar) latestMarketTime(now time.Time, includeExtendedHours b
 
 // IsRegularMarketOpen returns true if t is within regular market hours (9:30 AM - 4 PM ET).
 func (calendar *Calendar) IsRegularMarketOpen(now time.Time) bool {
-	wd := now.Weekday()
+	open, close, ok := calendar.RegularSessionBounds(now)
+	return ok && !now.Before(open) && now.Before(close)
+}
+
+// RegularSessionBounds returns the regular session [open, close) for the
+// calendar date of t, as seen in t's own location (the same date
+// IsRegularMarketOpen uses). ok is false on weekends and non-trading days.
+//
+// IsRegularMarketOpen(x) is exactly ok && open <= x < close for any x on the
+// same date, so callers holding many timestamps from one day can compute the
+// bounds once and binary-search, instead of evaluating the calendar per point.
+func (calendar *Calendar) RegularSessionBounds(t time.Time) (open, close time.Time, ok bool) {
+	wd := t.Weekday()
 	if wd == time.Saturday || wd == time.Sunday {
-		return false
+		return time.Time{}, time.Time{}, false
 	}
 
-	year, month, day := now.Date()
+	year, month, day := t.Date()
 
 	// Regular market opens at 9:30 AM.
-	open := time.Date(year, month, day, 9, 30, 0, 0, calendar.tz)
+	open = time.Date(year, month, day, 9, 30, 0, 0, calendar.tz)
 
-	if state, ok := calendar.days[julianDate(now)]; ok {
-		switch state {
-		case EarlyClose:
-			et := calendar.earlyCloseTime
-			close := time.Date(year, month, day, et.hour, et.minute, et.second, 0, calendar.tz)
-			return !now.Before(open) && now.Before(close)
-		default: // Closed
-			return false
+	ct := calendar.closeTime
+	if state, found := calendar.days[julianDate(t)]; found {
+		if state != EarlyClose { // Closed
+			return time.Time{}, time.Time{}, false
 		}
+		ct = calendar.earlyCloseTime
 	}
 
-	// Normal day: regular hours are 9:30 AM to 4:00 PM.
-	ct := calendar.closeTime
-	close := time.Date(year, month, day, ct.hour, ct.minute, ct.second, 0, calendar.tz)
-	return !now.Before(open) && now.Before(close)
+	close = time.Date(year, month, day, ct.hour, ct.minute, ct.second, 0, calendar.tz)
+	return open, close, true
 }

@@ -195,14 +195,15 @@ func (s *OnDiskAggTrigger) Fire(keyPath string, records []trigger.Record) {
 			return
 		}
 
-		// Argument order matters: ColumnSeriesUnion lets the RIGHT side win on
-		// duplicate epochs, and the batch is fresher than the cache. The
-		// upstream cascade rewrites the current source bar as more data lands
-		// inside it (1Sec/OHLCV -> 1Min re-emits the same minute with a growing
-		// cumulative volume), so putting the cache on the right pinned every
-		// bar to the first version seen and the aggregate kept only a few
-		// seconds of each minute.
-		cs = io.ColumnSeriesUnion(&c.cs, cs)
+		// The batch must win on duplicate epochs: it is fresher than the
+		// cache. The upstream cascade rewrites the current source bar as more
+		// data lands inside it (1Sec/OHLCV -> 1Min re-emits the same minute
+		// with a growing cumulative volume), so letting the cache win pinned
+		// every bar to the first version seen and the aggregate kept only a
+		// few seconds of each minute. mergeBatch has the same semantics as
+		// io.ColumnSeriesUnion(cache, batch) without its per-row reflection;
+		// see merge.go. Safe to reuse the cache's arrays: we hold mu.
+		cs = mergeBatch(&c.cs, cs)
 
 		s.write(tbk, cs, tail, head, elements)
 
@@ -342,7 +343,9 @@ func (s *OnDiskAggTrigger) writeAggregates(
 		// and volume. applyingFilter is only ever true for daily-or-longer
 		// windows, so the regular-session qualifier is always the right one
 		// here.
-		tqSlc = slc.ApplyTimeQual(calendar.Nasdaq.EpochIsRegularMarketOpen)
+		// Same result as slc.ApplyTimeQual(calendar.Nasdaq.EpochIsRegularMarketOpen),
+		// without evaluating the calendar per bar; see merge.go.
+		tqSlc = regularSession(&slc)
 
 		// normally this will always be true, but when there are random bars
 		// on the weekend, it won't be, so checking to avoid panic

@@ -256,6 +256,40 @@ func TestEpochIsRegularMarketOpen(t *testing.T) {
 	}
 }
 
+// TestRegularSessionBounds pins the bounds that callers binary-search against
+// in place of calling IsRegularMarketOpen per timestamp.
+func TestRegularSessionBounds(t *testing.T) {
+	t.Parallel()
+
+	at := func(y int, m time.Month, d, hh, mm int) time.Time { return time.Date(y, m, d, hh, mm, 0, 0, NY) }
+
+	tests := []struct {
+		name      string
+		t         time.Time
+		wantOK    bool
+		wantOpen  time.Time
+		wantClose time.Time
+	}{
+		{"normal day", at(2021, 8, 31, 3, 0), true, at(2021, 8, 31, 9, 30), at(2021, 8, 31, 16, 0)},
+		{"normal day, late evening", at(2021, 8, 31, 23, 59), true, at(2021, 8, 31, 9, 30), at(2021, 8, 31, 16, 0)},
+		{"early close", at(2018, 7, 3, 11, 0), true, at(2018, 7, 3, 9, 30), at(2018, 7, 3, 13, 0)},
+		{"weekend", at(2017, 1, 1, 11, 0), false, time.Time{}, time.Time{}},
+		{"holiday", at(2018, 1, 15, 11, 0), false, time.Time{}, time.Time{}},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			open, closeT, ok := Nasdaq.RegularSessionBounds(tt.t)
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.True(t, tt.wantOpen.Equal(open), "open: got %v want %v", open, tt.wantOpen)
+				assert.True(t, tt.wantClose.Equal(closeT), "close: got %v want %v", closeT, tt.wantClose)
+			}
+		})
+	}
+}
+
 // TestRegularIsStrictSubsetOfExtended guards the invariant that makes the
 // daily-bar filter meaningful: anything in the regular session is also in
 // extended hours, and pre/post-market is in extended but not regular.
