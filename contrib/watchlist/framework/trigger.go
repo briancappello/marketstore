@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpacahq/marketstore/v4/executor"
-	"github.com/alpacahq/marketstore/v4/planner"
 	"github.com/alpacahq/marketstore/v4/plugins/trigger"
 	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/io"
@@ -32,11 +30,16 @@ func NewTrigger(conf map[string]interface{}) (trigger.Trigger, error) {
 }
 
 // Fire is called by MarketStore when data matching the trigger's "on:" pattern
-// is written to disk. It runs in its own goroutine and may be called
-// concurrently for different symbols.
+// is written to disk. Fires for one bucket arrive in write order; fires for
+// different buckets may run concurrently.
 //
-// The implementation follows the same disk-query pattern as the stream trigger:
-// read the latest row back from disk rather than parsing raw record bytes.
+// The newest written row is decoded straight from records, which carry the
+// exact bytes just committed. The previous implementation read that row back
+// from disk on every fire (roughly once per second per active symbol), which
+// made it the largest CPU consumer in the server: the backward scan converts
+// every record timestamp in a 256 KiB window to return a single row. The disk
+// read remains as the fallback for variable-length buckets and anything that
+// does not decode cleanly.
 func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
 	// Parse symbol/timeframe/attrgroup/fileName from the key path in a single
 	// pass to avoid repeated allocations on this hot path. keyPath is like
@@ -52,13 +55,8 @@ func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
 		return
 	}
 
-	// Find the max index from the written records to query the latest row.
-	// Avoid the intermediate slice allocation on this per-tick hot path.
-	tail := int64(0)
-	for _, record := range records {
-		if idx := record.Index(); idx > tail {
-			tail = idx
-		}
+	if len(records) == 0 {
+		return
 	}
 
 	// Parse the year from the filename ("2024.bin" -> 2024). Use TrimSuffix
@@ -74,34 +72,12 @@ func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
 	// Falls back to allocating one if not yet cached.
 	tbk := tbkCache.Get(symbol, timeframe, attrGroup)
 	tf := utils.NewTimeframe(timeframe)
-	end := io.IndexToTime(tail, tf.Duration, int16(year))
 
-	// Query the latest row from disk.
-	cDir := executor.ThisInstance.CatalogDir
-	q := planner.NewQuery(cDir)
-	q.AddTargetKey(tbk)
-	q.SetEnd(end)
-	q.SetRowLimit(io.LAST, 1)
-
-	parsed, err := q.Parse()
+	cs, err := latestRow(tbk, tf.Duration, int16(year), records)
 	if err != nil {
-		log.Error("[watchlist] query parse error for %s: %v", symbol, err)
+		log.Error("[watchlist] %s: %v", symbol, err)
 		return
 	}
-
-	scanner, err := executor.NewReader(parsed)
-	if err != nil {
-		log.Error("[watchlist] reader error for %s: %v", symbol, err)
-		return
-	}
-
-	csm, err := scanner.Read()
-	if err != nil {
-		log.Error("[watchlist] read error for %s: %v", symbol, err)
-		return
-	}
-
-	cs := csm[*tbk]
 	if cs == nil || cs.Len() == 0 {
 		return
 	}

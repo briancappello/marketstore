@@ -16,9 +16,6 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/watchlist/framework"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/frontend/stream"
-	"github.com/alpacahq/marketstore/v4/internal/di"
-	"github.com/alpacahq/marketstore/v4/plugins/trigger"
-	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 )
 
@@ -73,6 +70,8 @@ func (m *mockWatchlist) Rank(curated map[string]*framework.SymbolState) []framew
 
 type testHarness struct {
 	t        *testing.T
+	capture  *framework.RecordCapture
+	fires    map[string]int
 	trigger  *framework.WatchlistTrigger
 	worker   *framework.WatchlistWorker
 	wsServer *httptest.Server
@@ -82,13 +81,9 @@ type testHarness struct {
 func newTestHarness(t *testing.T) *testHarness {
 	t.Helper()
 
-	rootDir := t.TempDir()
-	cfg := utils.NewDefaultConfig(rootDir)
-	cfg.BackgroundSync = false
-	cfg.Timezone, _ = time.LoadLocation("America/New_York")
-	utils.InstanceConfig = *cfg
-	c := di.NewContainer(cfg)
-	executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
+	// The WAL dispatches every write to capture, so Fire receives exactly
+	// the records production does.
+	capture := framework.SetupCapturingInstance(t)
 
 	stream.Initialize()
 
@@ -112,6 +107,8 @@ func newTestHarness(t *testing.T) *testHarness {
 
 	h := &testHarness{
 		t:        t,
+		capture:  capture,
+		fires:    map[string]int{},
 		trigger:  trig.(*framework.WatchlistTrigger),
 		worker:   worker.(*framework.WatchlistWorker),
 		wsServer: wsServer,
@@ -145,21 +142,12 @@ func (h *testHarness) writeOHLCVAndFire(symbol string, epoch time.Time, o, hi, l
 	err := executor.WriteCSM(csm, false)
 	require.NoError(h.t, err)
 
-	// Build the keyPath and records to simulate what the WAL dispatch does.
-	// We use the query-from-disk approach, so we just need a valid keyPath
-	// with a Record that has the correct index.
-	yearStr := epoch.Format("2006")
-	keyPath := symbol + "/1Min/OHLCV/" + yearStr + ".bin"
+	// Fire with the records the WAL actually dispatched for this write.
+	keyPath := symbol + "/1Min/OHLCV/" + epoch.Format("2006") + ".bin"
+	records := h.capture.Next(h.t, keyPath, h.fires[keyPath])
+	h.fires[keyPath]++
 
-	// Build a minimal record with the correct index.
-	idx := io.TimeToIndex(epoch, time.Minute)
-	idxBytes, _ := io.Serialize(nil, idx)
-	// Pad with enough payload bytes for the OHLCV columns.
-	// Open(4) + High(4) + Low(4) + Close(4) + Volume(8) = 24 bytes
-	payload := make([]byte, 24)
-	record := trigger.Record(append(idxBytes, payload...))
-
-	h.trigger.Fire(keyPath, []trigger.Record{record})
+	h.trigger.Fire(keyPath, records)
 }
 
 // connectAndSubscribe creates a WS client and subscribes.
