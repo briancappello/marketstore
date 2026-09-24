@@ -1,5 +1,7 @@
 package framework
 
+import "sync"
+
 // SymbolState holds per-symbol state maintained across ticks.
 // The framework updates the core fields on every tick; custom Curator
 // and WatchlistStrategy implementations can use the Extra map for
@@ -31,7 +33,8 @@ type SymbolState struct {
 	// LowOfDay is the running minimum low of the current day.
 	LowOfDay float64
 
-	// CumulativeVolume is the running sum of volume for the current day.
+	// CumulativeVolume is the current day's volume: the sum of the volume
+	// ledger below (see day_state.go), not a running sum of fires.
 	CumulativeVolume int64
 
 	// PremarketVolume is the running sum of premarket session volume.
@@ -57,14 +60,14 @@ type SymbolState struct {
 
 	// --- Day tracking ---
 
-	// SeededDay is the calendar day (truncated to midnight UTC) that the
+	// SeededDay is the New York trading day (Unix seconds at midnight) that the
 	// running state was seeded from during baseline computation. When the
 	// first live tick arrives for a different day, ResetDaily() is called
 	// before processing the tick. This prevents stale seeded values from
 	// contaminating live intraday state.
 	SeededDay int64
 
-	// LiveDay is the calendar day of the most recent live tick processed.
+	// LiveDay is the New York trading day of the most recent bar processed.
 	// Used to detect day boundaries for intraday state resets.
 	LiveDay int64
 
@@ -82,6 +85,17 @@ type SymbolState struct {
 	// store arbitrary per-symbol state. The framework never reads or writes
 	// this map; it is entirely owned by custom code.
 	Extra map[string]interface{}
+
+	// mu serializes updates; the 1Sec and 1Min triggers and the baseline
+	// seeding can update the same symbol concurrently.
+	mu sync.Mutex
+	// minuteVol is the day's volume per minute (keyed by minute start) from
+	// 1Min-or-coarser bars. subMinuteVol holds 1Sec bar volumes (minute ->
+	// second -> volume) for minutes that have no 1Min bar yet.
+	minuteVol    map[int64]int64
+	subMinuteVol map[int64]map[int64]int64
+	// dayOpenEpoch is the start of the bar DayOpen was taken from.
+	dayOpenEpoch int64
 }
 
 // NewSymbolState creates a new SymbolState with initialized Extra map.
@@ -106,4 +120,7 @@ func (s *SymbolState) ResetDaily() {
 	s.PctChange = 0
 	s.VolumeMultipleOfMed = 0
 	s.DollarVolumeRate = 0
+	s.minuteVol = nil
+	s.subMinuteVol = nil
+	s.dayOpenEpoch = 0
 }

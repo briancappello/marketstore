@@ -141,6 +141,11 @@ func computeSymbolBaseline(
 		n = len(volumes)
 	}
 	recentVols := volumes[len(volumes)-n:]
+
+	// Triggers may already be updating this symbol (startup backfill), so
+	// baseline writes happen under the state's lock.
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	state.MedianVolume50D = median(recentVols)
 
 	// Extract close column for PriorClose.
@@ -158,27 +163,33 @@ func computeSymbolBaseline(
 		state.PriorClose = closes[0]
 	}
 
-	// Determine "today" for intraday queries.
-	today := time.Now().Truncate(24 * time.Hour)
+	// "Today" is the New York trading day.
+	today := tradingDay(time.Now().Unix())
 
-	// Try to seed from today's intraday data (most accurate).
-	// If intraday data exists, SeededDay and LiveDay are both set to today.
-	if seedFromIntraday(catalogDir, symbol, state, today) {
-		state.SeededDay = today.Unix()
+	// Try to seed from today's intraday data (most accurate). The bars go
+	// through the same ledger as live fires, so seeding and fires that race
+	// it at startup combine correctly. applyBars takes the lock itself.
+	if intraday := readIntradayBars(catalogDir, symbol, time.Unix(today, 0)); len(intraday) > 0 {
+		state.mu.Unlock()
+		state.applyBars(intraday, false)
+		state.mu.Lock()
+		state.SeededDay = today
+		log.Debug("[watchlist] seeded %s from %d intraday bars", symbol, len(intraday))
 		return
+	}
+	if state.LiveDay == today {
+		return // live fires already started today's state
 	}
 
 	// Fallback: seed from the most recent daily bar.
-	// SeededDay is set to the date of the last daily bar (which is likely
-	// yesterday or the last trading day). When the first live tick arrives
-	// for a new day, the day-boundary check in updateSymbolState will detect
-	// that LiveDay != SeededDay and call ResetDaily() before processing.
+	// SeededDay is the trading day of the last daily bar (likely the last
+	// session). The first bar of a newer day resets the running state
+	// before it is applied (see applyBars).
 	epochs := cs.GetEpoch()
 	if len(epochs) > 0 {
-		lastBarDay := time.Unix(epochs[len(epochs)-1], 0).Truncate(24 * time.Hour)
-		state.SeededDay = lastBarDay.Unix()
+		state.SeededDay = tradingDay(epochs[len(epochs)-1])
 	} else {
-		state.SeededDay = today.Unix()
+		state.SeededDay = today
 	}
 
 	seedFromDailyBar(state, closes, volumes,
@@ -188,103 +199,31 @@ func computeSymbolBaseline(
 	)
 }
 
-// seedFromIntraday attempts to read today's 1Min OHLCV bars from disk and
-// compute accurate running state from them. Returns true if intraday data
-// was found and used.
-func seedFromIntraday(
-	catalogDir *catalog.Directory,
-	symbol string,
-	state *SymbolState,
-	today time.Time,
-) bool {
+// readIntradayBars returns the symbol's 1Min bars from dayStart until now.
+func readIntradayBars(catalogDir *catalog.Directory, symbol string, dayStart time.Time) []bar {
 	tbk := io.NewTimeBucketKey(symbol + "/1Min/OHLCV")
 
 	q := planner.NewQuery(catalogDir)
 	q.AddTargetKey(tbk)
-	q.SetRange(today, time.Now())
+	q.SetRange(dayStart, time.Now())
 
 	parsed, err := q.Parse()
 	if err != nil {
-		return false
+		return nil
 	}
-
 	scanner, err := executor.NewReader(parsed)
 	if err != nil {
-		return false
+		return nil
 	}
-
 	csm, err := scanner.Read()
 	if err != nil {
-		return false
+		return nil
 	}
-
 	cs := csm[*tbk]
 	if cs == nil || cs.Len() == 0 {
-		return false
+		return nil
 	}
-
-	// We have today's intraday data. Compute running state from it.
-	opens := toFloat64Slice(cs.GetColumn("Open"))
-	highs := toFloat64Slice(cs.GetColumn("High"))
-	lows := toFloat64Slice(cs.GetColumn("Low"))
-	closes := toFloat64Slice(cs.GetColumn("Close"))
-	volumes := toFloat64Slice(cs.GetColumn("Volume"))
-
-	if len(closes) == 0 {
-		return false
-	}
-
-	// DayOpen: the first bar's open.
-	if len(opens) > 0 {
-		state.DayOpen = opens[0]
-	}
-
-	// HighOfDay: max of all bar highs.
-	state.HighOfDay = highs[0]
-	for _, h := range highs[1:] {
-		if h > state.HighOfDay {
-			state.HighOfDay = h
-		}
-	}
-
-	// LowOfDay: min of all bar lows.
-	state.LowOfDay = lows[0]
-	for _, l := range lows[1:] {
-		if l < state.LowOfDay {
-			state.LowOfDay = l
-		}
-	}
-
-	// LastPrice / LastClose: the most recent bar's close.
-	state.LastPrice = closes[len(closes)-1]
-	state.LastClose = closes[len(closes)-1]
-
-	// CumulativeVolume: sum of all bar volumes.
-	var totalVol int64
-	for _, v := range volumes {
-		totalVol += int64(v)
-	}
-	state.CumulativeVolume = totalVol
-
-	// TickCount: number of bars we've seen.
-	state.TickCount = int64(len(closes))
-
-	// LiveDay: we have real intraday data for today, mark it.
-	state.LiveDay = today.Unix()
-
-	// Compute derived metrics.
-	if state.PriorClose != 0 {
-		state.PctChange = (state.LastPrice - state.PriorClose) / state.PriorClose * 100
-	}
-	if state.MedianVolume50D != 0 {
-		state.VolumeMultipleOfMed = float64(state.CumulativeVolume) / state.MedianVolume50D
-	}
-	if state.TickCount > 0 && state.LastPrice > 0 {
-		state.DollarVolumeRate = float64(state.CumulativeVolume) * state.LastPrice / float64(state.TickCount*60)
-	}
-
-	log.Debug("[watchlist] seeded %s from %d intraday bars", symbol, len(closes))
-	return true
+	return barsFromColumnSeries(cs)
 }
 
 // seedFromDailyBar seeds running state from the most recent daily bar.

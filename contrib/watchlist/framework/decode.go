@@ -79,6 +79,27 @@ func latestRow(tbk *io.TimeBucketKey, tf time.Duration, year int16, records []tr
 	return readLatestFromDisk(tbk, io.IndexToTime(rec.Index(), tf, year))
 }
 
+// writtenRows returns every row carried by records, in record order. When
+// the records cannot be decoded (variable-length buckets, unexpected sizes)
+// it falls back to the newest row read from disk.
+func writtenRows(tbk *io.TimeBucketKey, tf time.Duration, year int16, records []trigger.Record) (*io.ColumnSeries, error) {
+	if l, err := layoutFor(tbk); err == nil && !l.variable {
+		ok := true
+		for _, r := range records {
+			if len(r) != l.recLen {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			if cs, err := trigger.RecordsToColumnSeries(*tbk, l.shapes, tf, year, records); err == nil {
+				return cs, nil
+			}
+		}
+	}
+	return latestRow(tbk, tf, year, records)
+}
+
 // readLatestFromDisk is the original read-back path, kept for variable-length
 // buckets (whose records may pack several rows per index) and for anything
 // that fails to decode.
