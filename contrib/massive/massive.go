@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -165,6 +166,12 @@ type MassiveFetcher struct {
 	// enabledTickTypes is the set of tick DataTypes in ws_data_types
 	// (subset of {Trades, Quotes}). Used by the control loop's reconcile sweep.
 	enabledTickTypes []subscription.DataType
+
+	// backfills serializes the startup backfill and reconnect gap-fills.
+	backfills *backfillRunner
+	// lastDataAt is the wall-clock time (UnixNano) the last data message was
+	// received on any connection; it marks where a stream outage began.
+	lastDataAt atomic.Int64
 }
 
 // NewBgWorker returns a new instance of MassiveFetcher.
@@ -293,18 +300,24 @@ func (mf *MassiveFetcher) Run() {
 		go mf.runControlLoop()
 	}
 
+	// All backfills (startup and reconnect gap-fills) run one at a time.
+	mf.backfills = newBackfillRunner(mf.runBackfillRequest, &mf.wg)
+
+	// Decide the startup backfill before streaming starts: it reads the
+	// newest streamed bar on disk to find the outage this restart caused.
+	var startup backfillRequest
+	if utils.InstanceConfig.NoBackfill {
+		log.Info("[massive] backfill disabled via --no-backfill flag, skipping")
+	} else {
+		startup = mf.startupBackfill(time.Now())
+	}
+
 	// Start WebSocket streaming immediately to avoid missing real-time data.
 	mf.startStreaming()
 
-	// Run backfill concurrently if query_start is set and backfill is not disabled.
-	// Any overlap with streaming data is harmless - duplicate writes are idempotent.
-	if len(mf.config.QueryStart) > 0 {
-		if utils.InstanceConfig.NoBackfill {
-			log.Info("[massive] backfill disabled via --no-backfill flag, skipping")
-		} else if err := mf.runBackfill(); err != nil {
-			log.Info("[massive] backfill stopped: %v", err)
-		}
-	}
+	// Backfill concurrently with streaming. Any overlap with streaming data
+	// is harmless - duplicate writes are idempotent.
+	mf.backfills.submit(startup)
 
 	// Wait for context cancellation.
 	<-mf.ctx.Done()
@@ -576,14 +589,10 @@ func (mf *MassiveFetcher) stream(topics []streamTopic, client *ws.Client, isReco
 		defer mf.dynClients.clear(dt)
 	}
 
-	// On reconnect, backfill any data gap in the background.
-	if isReconnect && len(mf.config.QueryStart) > 0 && !utils.InstanceConfig.NoBackfill {
-		go func() {
-			log.Info("[massive] running gap-fill backfill after reconnect")
-			if err := mf.runBackfill(); err != nil && err != context.Canceled {
-				log.Warn("[massive] gap-fill backfill failed: %v", err)
-			}
-		}()
+	// On reconnect, fill the gap the outage left (in the background, one
+	// backfill at a time; see gapfill.go).
+	if isReconnect && !utils.InstanceConfig.NoBackfill {
+		mf.requestGapFill(time.Now())
 	}
 
 	for {
@@ -599,7 +608,11 @@ func (mf *MassiveFetcher) stream(topics []streamTopic, client *ws.Client, isReco
 			log.Info("[massive] stopping stream")
 			return nil
 		case <-client.Done():
-			// Connection lost. Retrieve the error.
+			// Connection lost. Messages the read loop had already queued are
+			// complete data; write them rather than dropping them with the
+			// connection.
+			mf.drainOutput(client.Output(), router)
+			// Retrieve the error.
 			select {
 			case err := <-client.Err():
 				return fmt.Errorf("fatal stream error: %w", err)
@@ -607,9 +620,47 @@ func (mf *MassiveFetcher) stream(topics []streamTopic, client *ws.Client, isReco
 				return fmt.Errorf("connection closed unexpectedly")
 			}
 		case msg := <-client.Output():
+			mf.lastDataAt.Store(time.Now().UnixNano())
 			router.dispatch(msg)
 		}
 	}
+}
+
+// drainOutput dispatches every message already queued on out, without
+// waiting for more.
+func (mf *MassiveFetcher) drainOutput(out <-chan json.RawMessage, router *messageRouter) {
+	for {
+		select {
+		case msg := <-out:
+			mf.lastDataAt.Store(time.Now().UnixNano())
+			router.dispatch(msg)
+		default:
+			return
+		}
+	}
+}
+
+// requestGapFill queues the backfill a reconnect at reconnectedAt needs.
+func (mf *MassiveFetcher) requestGapFill(reconnectedAt time.Time) {
+	var lastData time.Time
+	if ns := mf.lastDataAt.Load(); ns != 0 {
+		lastData = time.Unix(0, ns)
+	}
+	req := planReconnectBackfill(lastData, reconnectedAt)
+	if req.full && len(mf.config.QueryStart) == 0 {
+		req.full = false
+	}
+	if req.gap != nil && len(mf.streamedBarTimeframes()) == 0 {
+		req.gap = nil
+	}
+	switch {
+	case req.full:
+		log.Info("[massive] reconnected after a long or overnight outage (last data %v); queuing full backfill", lastData.Format(time.RFC3339))
+	case req.gap != nil:
+		log.Info("[massive] reconnected; queuing outage fill %s to %s",
+			req.gap.from.Format(time.RFC3339), req.gap.to.Format(time.RFC3339))
+	}
+	mf.backfills.submit(req)
 }
 
 // messageRouter dispatches each incoming WebSocket message to the handler for

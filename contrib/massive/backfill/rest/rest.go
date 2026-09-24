@@ -278,21 +278,7 @@ func Bars(
 		return nil
 	}
 
-	model := models.NewBar(symbol, timeframe, len(allResults))
-	for _, bar := range allResults {
-		epoch := bar.EpochMilliseconds / millisToSec
-		ts := time.Unix(epoch, 0)
-		if ts.After(to) || ts.Before(from) {
-			continue
-		}
-		model.Add(epoch,
-			modelsenum.Price(bar.Open),
-			modelsenum.Price(bar.High),
-			modelsenum.Price(bar.Low),
-			modelsenum.Price(bar.Close),
-			modelsenum.Size(bar.Volume),
-		)
-	}
+	model, _ := barsModel(symbol, timeframe, allResults, from, to)
 
 	writerWP.Do(func() {
 		if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol, false); err != nil {
@@ -313,6 +299,65 @@ func writeModel(csm *io.ColumnSeriesMap, writer backfill.Writer, dataType, symbo
 		return writer.WriteCSM(*csm, isVariableLength)
 	}
 	return executor.WriteCSM(*csm, isVariableLength)
+}
+
+// barsModel builds a bar model from API results, keeping only bars that start
+// within [from, to]. n is the number of bars kept.
+func barsModel(symbol, timeframe string, results []api.AggResult, from, to time.Time) (model *models.Bar, n int) {
+	model = models.NewBar(symbol, timeframe, len(results))
+	for _, bar := range results {
+		epoch := bar.EpochMilliseconds / millisToSec
+		ts := time.Unix(epoch, 0)
+		if ts.After(to) || ts.Before(from) {
+			continue
+		}
+		model.Add(epoch,
+			modelsenum.Price(bar.Open),
+			modelsenum.Price(bar.High),
+			modelsenum.Price(bar.Low),
+			modelsenum.Price(bar.Close),
+			modelsenum.Size(bar.Volume),
+		)
+		n++
+	}
+	return model, n
+}
+
+// BarsWindow fetches the bars of one symbol that start within [from, to],
+// using exact millisecond bounds, and writes them before returning. It is
+// meant for short windows such as a stream outage; Bars is for whole days.
+// It returns the number of bars written. If writer is nil, data is written
+// directly via executor.WriteCSM.
+func BarsWindow(
+	ctx context.Context,
+	client *http.Client,
+	symbol, timeframe string,
+	from, to time.Time,
+	limit int,
+	adjusted bool,
+	writer backfill.Writer,
+) (int, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+	apiTimespan, multiplier, err := timeframeToAPI(timeframe)
+	if err != nil {
+		return 0, fmt.Errorf("invalid timeframe %q: %w", timeframe, err)
+	}
+	resp, err := api.GetAggregatesWindow(client, symbol, apiTimespan, multiplier, from, to, limit, adjusted)
+	if err != nil {
+		return 0, err
+	}
+	model, n := barsModel(symbol, timeframe, resp.Results, from, to)
+	if n == 0 {
+		return 0, nil
+	}
+	if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol, false); err != nil {
+		return 0, fmt.Errorf("write %s bars for %s: %w", timeframe, symbol, err)
+	}
+	return n, nil
 }
 
 // fetchAndWriteBars is a helper for single-chunk bar fetches (no parallelization).
@@ -343,21 +388,7 @@ func fetchAndWriteBars(
 		return nil
 	}
 
-	model := models.NewBar(symbol, timeframe, len(resp.Results))
-	for _, bar := range resp.Results {
-		epoch := bar.EpochMilliseconds / millisToSec
-		ts := time.Unix(epoch, 0)
-		if ts.After(to) || ts.Before(from) {
-			continue
-		}
-		model.Add(epoch,
-			modelsenum.Price(bar.Open),
-			modelsenum.Price(bar.High),
-			modelsenum.Price(bar.Low),
-			modelsenum.Price(bar.Close),
-			modelsenum.Size(bar.Volume),
-		)
-	}
+	model, _ := barsModel(symbol, timeframe, resp.Results, from, to)
 
 	writerWP.Do(func() {
 		if err := writeModel(model.BuildCsm(), writer, timeframe+" bars", symbol, false); err != nil {

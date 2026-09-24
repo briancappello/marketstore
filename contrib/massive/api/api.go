@@ -84,8 +84,36 @@ func GetHistoricAggregates(
 	limit int,
 	adjusted bool,
 ) (*HistoricAggregates, error) {
-	u, err := url.Parse(fmt.Sprintf(aggsURL, baseURL, ticker, multiplier, timespan,
-		from.Format(dateFormat), to.Format(dateFormat)))
+	return getAggregates(client, ticker, timespan, multiplier,
+		from.Format(dateFormat), to.Format(dateFormat), limit, adjusted)
+}
+
+// GetAggregatesWindow is GetHistoricAggregates with the window sent as Unix
+// millisecond timestamps instead of dates, so the API returns only bars that
+// start within [from, to] rather than every bar of the days they fall on.
+// Use it for short intraday windows (e.g. filling a stream outage), where a
+// date-bounded request would download a full day of second bars per symbol.
+func GetAggregatesWindow(
+	client *http.Client,
+	ticker, timespan string,
+	multiplier int,
+	from, to time.Time,
+	limit int,
+	adjusted bool,
+) (*HistoricAggregates, error) {
+	return getAggregates(client, ticker, timespan, multiplier,
+		strconv.FormatInt(from.UnixMilli(), 10), strconv.FormatInt(to.UnixMilli(), 10), limit, adjusted)
+}
+
+func getAggregates(
+	client *http.Client,
+	ticker, timespan string,
+	multiplier int,
+	from, to string,
+	limit int,
+	adjusted bool,
+) (*HistoricAggregates, error) {
+	u, err := url.Parse(fmt.Sprintf(aggsURL, baseURL, ticker, multiplier, timespan, from, to))
 	if err != nil {
 		return nil, fmt.Errorf("parse aggs URL: %w", err)
 	}

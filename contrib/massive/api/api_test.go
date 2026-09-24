@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -285,4 +286,31 @@ func TestDownload_TransientErrorRetries(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, body)
 	assert.Equal(t, 3, callCount, "should retry transient errors")
+}
+
+// GetAggregatesWindow must bound the request with millisecond timestamps.
+// A date-bounded request for second bars returns the whole day, which for a
+// two-minute outage fill across ~12k symbols is orders of magnitude more data.
+// Not parallel: it points the package-level baseURL at a test server.
+func TestGetAggregatesWindowUsesMillisecondBounds(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"ticker":"AAPL","status":"OK","results":[]}`))
+	}))
+	defer srv.Close()
+	orig := baseURL
+	SetBaseURL(srv.URL)
+	defer SetBaseURL(orig)
+
+	from := time.Date(2026, 9, 24, 15, 37, 0, 0, time.UTC)
+	to := from.Add(2 * time.Minute)
+	_, err := GetAggregatesWindow(srv.Client(), "AAPL", "second", 1, from, to, 50000, true)
+	assert.NoError(t, err)
+	assert.Equal(t, "/v2/aggs/ticker/AAPL/range/1/second/1790264220000/1790264340000", gotPath)
+
+	// The date-bounded variant is unchanged.
+	_, err = GetHistoricAggregates(srv.Client(), "AAPL", "minute", 1, from, to, 50000, true)
+	assert.NoError(t, err)
+	assert.Equal(t, "/v2/aggs/ticker/AAPL/range/1/minute/2026-09-24/2026-09-24", gotPath)
 }
