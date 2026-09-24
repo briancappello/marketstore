@@ -269,9 +269,14 @@ func (s *OnDiskAggTrigger) writeAggregates(
 		return fmt.Errorf("timeframe not found in %s: %w", dest.String, err)
 	}
 	start := window.Truncate(head).Unix()
+	// end is the last second of the window (inclusive); sliceEnd is the first
+	// second after it. SliceColumnSeriesByEpoch excludes its end bound, so
+	// slicing with end dropped every source bar in the window's final second
+	// (the :59 bar of every minute for 1Sec -> 1Min).
 	end := window.Ceil(tail).Add(-time.Second).Unix()
+	sliceEnd := end + 1
 
-	slc, err := io.SliceColumnSeriesByEpoch(cs, &start, &end)
+	slc, err := io.SliceColumnSeriesByEpoch(cs, &start, &sliceEnd)
 	if err != nil {
 		return err
 	}
@@ -292,7 +297,7 @@ func (s *OnDiskAggTrigger) writeAggregates(
 		}
 		if start < currentStart {
 			start = currentStart
-			slc, err = io.SliceColumnSeriesByEpoch(cs, &start, &end)
+			slc, err = io.SliceColumnSeriesByEpoch(cs, &start, &sliceEnd)
 			if err != nil {
 				return err
 			}
@@ -320,7 +325,7 @@ func (s *OnDiskAggTrigger) writeAggregates(
 			tEpoch := t.Unix()
 			h := time.Unix(end, 0)
 
-			cacheSlc, _ := io.SliceColumnSeriesByEpoch(cs, &tEpoch, &end)
+			cacheSlc, _ := io.SliceColumnSeriesByEpoch(cs, &tEpoch, &sliceEnd)
 
 			s.aggCache.Store(baseTbk.String(), &cachedAgg{
 				cs:   cacheSlc,
