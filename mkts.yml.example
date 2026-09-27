@@ -103,9 +103,30 @@ triggers:
         - 1Min
 
   # Stage 3: 1Min -> 1D OHLCV bars
+  #
+  # Two settings here protect the authoritative vendor day_aggs 1D bar, which
+  # this trigger would otherwise overwrite (executor.WriteCSM overwrites by
+  # epoch, and the trigger fires on every 1Min write, backfill included).
+  #
+  # filter: nasdaq
+  #   Time-qualifies the source 1Min bars to the REGULAR session (09:30-16:00
+  #   ET) before aggregating, so pre/post-market prints cannot set the daily
+  #   high, low, close or volume. Daily bars are regular-session only by
+  #   definition, and the watchlist framework relies on it: it reads a day's
+  #   1D close as that day's official close (the afterhours session baseline
+  #   and the next day's traditional prior close).
+  #
+  # current_period_only: true
+  #   Only the in-progress day is derived from 1Min. Completed days are left
+  #   alone, so the vendor daily bar is never clobbered. This is a hard guard,
+  #   not an ordering assumption: triggers fire asynchronously
+  #   (executor/written.go), so writing 1Min before 1D still left ~9% of daily
+  #   bars overwritten by late-finishing trigger goroutines.
   - module: ondiskagg.so
     on: "*/1Min/OHLCV"
     config:
+      filter: nasdaq
+      current_period_only: true
       destinations:
         - 1D
 
