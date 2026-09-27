@@ -7,7 +7,7 @@ Stores per-symbol, per-trading-date session facts (each session's volume and clo
 ### Requirement: Session facts bucket
 The system SHALL keep one row per symbol per completed trading date in the bucket `<SYMBOL>/1D/SESSIONS`, with these columns:
 - `PreVolume`, `RegVolume`, `PostVolume`: each session's total volume from 1Min bars
-- `PreClose`, `PostClose`: the last premarket and last afterhours 1Min close
+- `PreClose`, `RegClose`, `PostClose`: the last 1Min close of each session
 - `Version`: the definition version the row was computed with
 
 A session with no bars SHALL be recorded so that it can be told apart from a session that has not been computed yet. The bucket SHALL be readable through the normal query APIs.

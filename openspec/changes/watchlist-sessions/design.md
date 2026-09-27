@@ -78,7 +78,7 @@ Protection for the live path:
 
 ### D7. Session facts (`1D/SESSIONS`)
 A separate package, `contrib/watchlist/sessionfacts`. Its interface is `Version`, `Compute(date, bars) Row`, `Write(rows)`, `Read(symbol, from, to)`, so it can later be moved into a framework.
-- **Row.** Epoch = the trading date, the same as 1D bars. Columns: `PreVolume/RegVolume/PostVolume int64`, `PreClose/PostClose float64`, `PreBars/RegBars/PostBars int32` (0 means the session had no bars), `Version int32`. A fixed-width bucket, so it is replicated like any other.
+- **Row.** Epoch = the trading date, the same as 1D bars. Columns: `PreVolume/RegVolume/PostVolume int64`, `PreClose/RegClose/PostClose float64`, `PreBars/RegBars/PostBars int32` (0 means the session had no bars), `Version int32`. A fixed-width bucket, so it is replicated like any other.
 - **R2 (rebuildable).** Live rows are computed **from the 1Min bars on disk**, not from the in-memory ledger. The job runs after afterhours ends plus a grace period, and it is the same `Compute` the rebuild command uses. It reads about 960 bars per symbol per day, once a day.
 - **R3 (versioned).** A reader drops rows with a version other than the current one, and they count as missing.
 - **R4 (late data).** The 1Min watchlist trigger already sees every write, and `applyBars` already notices earlier-day bars. Those now add `(symbol, date)` to a dirty set. The set is written to an append-only journal under the root directory, so a restart doesn't lose it. The bgworker works through it every few minutes. Journal entries are removed after the recompute is written.
@@ -90,7 +90,7 @@ A separate package, `contrib/watchlist/sessionfacts`. Its interface is `Version`
 - *Alternative:* keep facts in memory and rebuild at startup. Rejected: that is a ~20 GB scan per startup. *Alternative:* a separate database. Rejected: it wouldn't be replicated, and it would be a second source of truth (see the derived-data discussion in the proposal).
 
 ### D8. Baselines and medians
-- **Official close RC(date):** the 1D close. For today before the 1D bar exists, the last regular close in the live ledger.
+- **Official close RC(date):** the 1D close. When the 1D bar does not exist yet: for today, the last regular close in the live state; for a past date, `RegClose` from that date's facts row (1D bars can land days late, e.g. no 1D bar for Fri 2026-09-25 on Sun 09-27).
 - **Session `prior_close`:** premarket uses `PostClose` of the previous trading date's facts; regular uses today's live premarket `last` (a rewind uses `PreClose`/fold); afterhours uses RC(today).
 - **Traditional `prior_close`:** RC(previous trading date), from the 1D bar of **the previous trading date by calendar**, not `closes[len-2]`.
 - **Medians:** computed on read from the last N facts rows before the date, per session (R1). Loaded at startup (about 50 rows per symbol) and refreshed when the day rolls. For a rewind, loaded for the requested date.
@@ -118,9 +118,11 @@ At each tick, the ranking loop resolves the live window (D1). An extra tick is s
 - **[Memory]** Per-session accumulators add a few fields per symbol. The per-minute ledger is the same size as today (one trading date).
 - **[Replica role]** A misconfigured replica with no `master_host` would act as a leader and try to write facts. → The same risk exists for all leader-only behavior today. Nothing new.
 
+- **[Live-day 1D bars built from extended hours]** The leader's 1Min→1D aggregation has no market-hours filter, so the live day's 1D bar closes on the last afterhours print until the vendor bar replaces it. Baselines read it as the official close. → The 1D stage gets `filter: "nasdaq"` (task 13.0), which matches the definition that daily bars are regular-session only.
+
 ## Migration Plan
 
-1. Merge and deploy the marketstore changes and the marketstore-watchlists changes together (ABI). `deploy.sh` rebuilds both.
+1. Merge and deploy the marketstore changes and the marketstore-watchlists changes together (ABI). `deploy.sh` rebuilds both. Add `filter: "nasdaq"` to the leader's 1Min→1D ondiskagg stage in the same deploy.
 2. With the leader (taichi) stopped, run `marketstore tool session-facts rebuild --from <today-60 trading days> --to <yesterday>` in offline mode. Start the leader. It writes facts from then on.
 3. The replica (p1) receives the facts through replication. Restart p1 on the new build.
 4. Deploy the ta-droid update.
