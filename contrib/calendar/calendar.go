@@ -35,6 +35,7 @@ type Calendar struct {
 	days           map[int]MarketState
 	tz             *time.Location
 	openTime       Time // Pre-market open (e.g., 4:00 AM for extended hours)
+	regularOpen    Time // Regular session open (e.g., 9:30 AM)
 	closeTime      Time // Regular market close (e.g., 4:00 PM)
 	earlyCloseTime Time // Early close time (e.g., 1:00 PM)
 }
@@ -44,8 +45,10 @@ type calendarJSON struct {
 	EarlyCloses    []string `json:"early_closes"`
 	Timezone       string   `json:"timezone"`
 	OpenTime       string   `json:"open_time"`
-	CloseTime      string   `json:"close_time"`
-	EarlyCloseTime string   `json:"early_close_time"`
+	// RegularOpenTime is optional and defaults to 09:30:00.
+	RegularOpenTime string `json:"regular_open_time"`
+	CloseTime       string `json:"close_time"`
+	EarlyCloseTime  string `json:"early_close_time"`
 }
 
 // Nasdaq implements market calendar for the NASDAQ.
@@ -86,6 +89,10 @@ func New(calendarJSONStr string) *Calendar {
 	}
 	cal.tz, _ = time.LoadLocation(cmap.Timezone)
 	cal.openTime = ParseTime(cmap.OpenTime)
+	cal.regularOpen = Time{9, 30, 0}
+	if cmap.RegularOpenTime != "" {
+		cal.regularOpen = ParseTime(cmap.RegularOpenTime)
+	}
 	cal.closeTime = ParseTime(cmap.CloseTime)
 	cal.earlyCloseTime = ParseTime(cmap.EarlyCloseTime)
 	return &cal
@@ -308,24 +315,9 @@ func (calendar *Calendar) IsRegularMarketOpen(now time.Time) bool {
 // same date, so callers holding many timestamps from one day can compute the
 // bounds once and binary-search, instead of evaluating the calendar per point.
 func (calendar *Calendar) RegularSessionBounds(t time.Time) (open, close time.Time, ok bool) {
-	wd := t.Weekday()
-	if wd == time.Saturday || wd == time.Sunday {
+	ds, err := calendar.SessionBounds(t.Date())
+	if err != nil {
 		return time.Time{}, time.Time{}, false
 	}
-
-	year, month, day := t.Date()
-
-	// Regular market opens at 9:30 AM.
-	open = time.Date(year, month, day, 9, 30, 0, 0, calendar.tz)
-
-	ct := calendar.closeTime
-	if state, found := calendar.days[julianDate(t)]; found {
-		if state != EarlyClose { // Closed
-			return time.Time{}, time.Time{}, false
-		}
-		ct = calendar.earlyCloseTime
-	}
-
-	close = time.Date(year, month, day, ct.hour, ct.minute, ct.second, 0, calendar.tz)
-	return open, close, true
+	return ds.Regular.Start, ds.Regular.End, true
 }
