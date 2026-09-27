@@ -2,6 +2,7 @@ package framework
 
 import (
 	"testing"
+	"time"
 
 	"github.com/alpacahq/marketstore/v4/plugins/trigger"
 )
@@ -20,4 +21,12 @@ func SetupCapturingInstance(t testing.TB) *RecordCapture {
 // Next returns the n-th (0-based) dispatched batch for keyPath.
 func (r *RecordCapture) Next(t testing.TB, keyPath string, n int) []trigger.Record {
 	return r.c.next(t, keyPath, n)
+}
+
+// SetClock replaces the framework clock for the duration of the test.
+func SetClock(t testing.TB, fn func() time.Time) {
+	t.Helper()
+	prev := now
+	now = fn
+	t.Cleanup(func() { now = prev })
 }

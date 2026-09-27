@@ -1,6 +1,10 @@
 package frontend
 
-import "sync"
+import (
+	"errors"
+	"sync"
+	"time"
+)
 
 // WatchlistProvider is an optional interface that plugins can implement
 // to expose watchlist data via the RPC layer. The watchlist BgWorker
@@ -14,7 +18,44 @@ type WatchlistProvider interface {
 	GetRanking(name string) []WatchlistRankingEntry
 	// AllRankings returns the current rankings for all watchlists.
 	AllRankings() map[string][]WatchlistRankingEntry
+	// Rankings answers a live or rewind query. Errors wrap
+	// ErrWatchlistInvalid or ErrWatchlistNotFound.
+	Rankings(q WatchlistQuery) (WatchlistResult, error)
 }
+
+// WatchlistQuery asks for rankings. Empty Session and AsOf mean the live
+// session; empty Names means every list available in the resolved session.
+type WatchlistQuery struct {
+	Names   []string
+	Session string
+	AsOf    string
+}
+
+// WatchlistList is one list with the ranking window it covers.
+type WatchlistList struct {
+	Name        string
+	Basis       string // "session" or "traditional"
+	Session     string // "premarket", "regular" or "afterhours"
+	TradingDate string // YYYY-MM-DD, America/New_York
+	WindowStart time.Time
+	WindowEnd   time.Time
+	Complete    bool
+	Entries     []WatchlistRankingEntry
+}
+
+// WatchlistResult answers a WatchlistQuery.
+type WatchlistResult struct {
+	Lists []WatchlistList
+}
+
+var (
+	// ErrWatchlistInvalid is a client error: a malformed session or as_of, a
+	// non-trading date, a session not started, or a list not available in
+	// the session. REST maps it to 400, gRPC to InvalidArgument.
+	ErrWatchlistInvalid = errors.New("invalid watchlist request")
+	// ErrWatchlistNotFound: no such watchlist. REST 404, gRPC NotFound.
+	ErrWatchlistNotFound = errors.New("watchlist not found")
+)
 
 // WatchlistRankingField is a single named numeric metric on a watchlist
 // ranking entry. Mirrors framework.Field at the frontend layer.

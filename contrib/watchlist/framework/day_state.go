@@ -98,6 +98,10 @@ func barsFromColumnSeries(cs *io.ColumnSeries) []bar {
 // sources finer than one minute (1Sec). Bars may arrive in any order and may
 // repeat; the result depends only on the latest version of each bar.
 //
+// Every bar also goes to the session (premarket, regular, afterhours) that
+// contains it, so each session has its own open, high, low, last price and
+// volume. Bars outside every session count only toward the day.
+//
 // It reports whether any bar belonged to the current trading day.
 func (s *SymbolState) applyBars(bars []bar, subMinute bool) bool {
 	s.mu.Lock()
@@ -114,16 +118,18 @@ func (s *SymbolState) applyBars(bars []bar, subMinute bool) bool {
 		case current != 0 && day < current:
 			continue // an earlier day being backfilled; not today's state
 		case current != 0 && day > current:
-			if s.LastClose != 0 {
-				s.PriorClose = s.LastClose
-			}
-			s.ResetDaily()
+			s.rollDay(day)
 		}
 		s.LiveDay = day
+		s.ensureBounds(day)
 		applied = true
 
 		if b.hasVolume {
-			s.recordVolume(b.epoch, b.volume, subMinute)
+			minute, delta := s.recordVolume(b.epoch, b.volume, subMinute)
+			s.CumulativeVolume += delta
+			if i := s.sessionIndex(minute); i >= 0 {
+				s.sessions[i].volume += delta
+			}
 		}
 		if b.close != 0 {
 			if b.high != 0 && (s.HighOfDay == 0 || b.high > s.HighOfDay) {
@@ -141,22 +147,187 @@ func (s *SymbolState) applyBars(bars []bar, subMinute bool) bool {
 				s.LastPrice = b.close
 				s.LastEpoch = b.epoch
 			}
+			if i := s.sessionIndex(b.epoch); i >= 0 {
+				s.sessions[i].apply(b)
+			}
 		}
 		s.TickCount++
 	}
 	if applied {
+		s.PremarketVolume = s.sessions[calendar.Premarket].volume
 		s.recomputeDerived()
 	}
 	return applied
 }
 
-// recordVolume updates the volume ledger for one bar.
-func (s *SymbolState) recordVolume(epoch, volume int64, subMinute bool) {
+// rollDay starts trading day newDay.
+//
+// When the bgworker has already loaded newDay's baselines they are applied.
+// Otherwise the previous day's sessions become the new day's baselines where
+// the definitions say so: its afterhours close is the next premarket's
+// session baseline, and its official close is the next day's traditional
+// baseline. The official close is the day's 1D close when known, and
+// otherwise the last regular-session close. It is never the last print of
+// the day, which is an afterhours price.
+func (s *SymbolState) rollDay(newDay int64) {
+	if p := s.pending; p != nil && p.Date.Unix() == newDay {
+		s.pending = nil
+		s.ResetDaily()
+		s.applyBaselinesLocked(*p)
+		return
+	}
+	s.pending = nil
+
+	prevPost := s.sessions[calendar.Afterhours]
+	prevReg := s.sessions[calendar.Regular]
+
+	official := s.OfficialClose
+	if official == 0 && prevReg.hasBars() {
+		official = prevReg.last
+	}
+	if official != 0 {
+		s.PriorClose = official
+	}
+	s.PrevAfterhoursClose = 0
+	if prevPost.hasBars() {
+		s.PrevAfterhoursClose = prevPost.last
+	}
+	s.OfficialClose = 0
+	s.ResetDaily()
+}
+
+// SetBaselines installs baselines for trading date b.Date. They apply now
+// when the state is on that date (or has no date yet), are held until the
+// day rolls when the date is still ahead, and are ignored when stale.
+func (s *SymbolState) SetBaselines(b Baselines) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	day := b.Date.Unix()
+	current := s.LiveDay
+	if current == 0 {
+		current = s.SeededDay
+	}
+	switch {
+	case current == 0:
+		s.SeededDay = day
+		s.applyBaselinesLocked(b)
+	case current == day:
+		s.applyBaselinesLocked(b)
+	case day > current:
+		cp := b
+		s.pending = &cp
+	}
+}
+
+func (s *SymbolState) applyBaselinesLocked(b Baselines) {
+	s.PriorClose = b.PriorClose
+	s.PrevAfterhoursClose = b.PrevAfterhoursClose
+	s.OfficialClose = b.OfficialClose
+	s.SessionMedianVolume = b.SessionMedianVolume
+	s.MedianVolume50D = b.SessionMedianVolume[calendar.Regular]
+	s.recomputeDerived()
+}
+
+// ensureBounds computes day's session boundaries once per day.
+func (s *SymbolState) ensureBounds(day int64) {
+	if s.boundsDay == day {
+		return
+	}
+	s.boundsDay = day
+	ds, err := calendar.Nasdaq.SessionBoundsAt(time.Unix(day, 0))
+	if err != nil {
+		s.boundsOK = false
+		return
+	}
+	s.boundsOK = true
+	s.bounds = [len(s.bounds)]int64{
+		ds.Premarket.Start.Unix(), ds.Regular.Start.Unix(),
+		ds.Afterhours.Start.Unix(), ds.Afterhours.End.Unix(),
+	}
+}
+
+// sessionIndex returns the calendar.Session index containing epoch on
+// LiveDay, or -1 when epoch lies outside every session.
+func (s *SymbolState) sessionIndex(epoch int64) int {
+	if !s.boundsOK || epoch < s.bounds[0] {
+		return -1
+	}
+	for i := 1; i < len(s.bounds); i++ {
+		if epoch < s.bounds[i] {
+			return i - 1
+		}
+	}
+	return -1
+}
+
+// sessionAcc holds one session's running values.
+type sessionAcc struct {
+	open      float64
+	openEpoch int64
+	high, low float64
+	last      float64
+	lastEpoch int64
+	volume    int64
+}
+
+func (a *sessionAcc) hasBars() bool { return a.openEpoch != 0 || a.lastEpoch != 0 }
+
+// apply folds a priced bar into the session. The open is the earliest bar's
+// open and the last price the latest bar's close, whatever order bars
+// arrive in.
+func (a *sessionAcc) apply(b bar) {
+	if b.high != 0 && (a.high == 0 || b.high > a.high) {
+		a.high = b.high
+	}
+	if b.low != 0 && (a.low == 0 || b.low < a.low) {
+		a.low = b.low
+	}
+	if b.open != 0 && (a.openEpoch == 0 || b.epoch < a.openEpoch) {
+		a.open = b.open
+		a.openEpoch = b.epoch
+	}
+	if b.epoch >= a.lastEpoch {
+		a.last = b.close
+		a.lastEpoch = b.epoch
+	}
+}
+
+// SessionStats is one session's running values for a symbol.
+type SessionStats struct {
+	// Open is the open of the session's first bar; Last the close of its
+	// latest bar. High, Low and Volume cover the session so far.
+	Open, High, Low, Last float64
+	Volume                int64
+	// OpenEpoch and LastEpoch are the start times of those bars.
+	OpenEpoch, LastEpoch int64
+	// HasBars is false when no bar of the session has been seen.
+	HasBars bool
+}
+
+// SessionStats returns the running values of session sess on LiveDay.
+func (s *SymbolState) SessionStats(sess calendar.Session) SessionStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionStatsLocked(sess)
+}
+
+func (s *SymbolState) sessionStatsLocked(sess calendar.Session) SessionStats {
+	a := s.sessions[sess]
+	return SessionStats{
+		Open: a.open, High: a.high, Low: a.low, Last: a.last,
+		Volume: a.volume, OpenEpoch: a.openEpoch, LastEpoch: a.lastEpoch,
+		HasBars: a.hasBars(),
+	}
+}
+
+// recordVolume updates the volume ledger for one bar. It returns the start
+// of the bar's minute and the change in that minute's volume.
+func (s *SymbolState) recordVolume(epoch, volume int64, subMinute bool) (minute, delta int64) {
 	if s.minuteVol == nil {
 		s.minuteVol = make(map[int64]int64)
 		s.subMinuteVol = make(map[int64]map[int64]int64)
 	}
-	minute := epoch - epoch%60
+	minute = epoch - epoch%60
 	if !subMinute {
 		old, had := s.minuteVol[minute]
 		if !had {
@@ -166,19 +337,19 @@ func (s *SymbolState) recordVolume(epoch, volume int64, subMinute bool) {
 			delete(s.subMinuteVol, minute)
 		}
 		s.minuteVol[minute] = volume
-		s.CumulativeVolume += volume - old
-		return
+		return minute, volume - old
 	}
 	if _, ok := s.minuteVol[minute]; ok {
-		return // the minute's own bar is authoritative
+		return minute, 0 // the minute's own bar is authoritative
 	}
 	secs := s.subMinuteVol[minute]
 	if secs == nil {
 		secs = make(map[int64]int64)
 		s.subMinuteVol[minute] = secs
 	}
-	s.CumulativeVolume += volume - secs[epoch]
+	delta = volume - secs[epoch]
 	secs[epoch] = volume
+	return minute, delta
 }
 
 // minuteVolume is the ledger's volume for the minute starting at minute.

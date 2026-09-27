@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/alpacahq/marketstore/v4/cmd/tool/integrity"
+	"github.com/alpacahq/marketstore/v4/cmd/tool/sessionfacts"
 	"github.com/alpacahq/marketstore/v4/cmd/tool/wal"
 )
 
@@ -26,5 +27,6 @@ var Cmd = &cobra.Command{
 // nolint:gochecknoinits // cobra's standard way to initialize flags
 func init() {
 	Cmd.AddCommand(integrity.Cmd)
+	Cmd.AddCommand(sessionfacts.Cmd)
 	Cmd.AddCommand(wal.Cmd)
 }

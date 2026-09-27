@@ -9,6 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/alpacahq/marketstore/v4/catalog"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/proto"
@@ -462,32 +465,33 @@ func (s GRPCService) ListWatchlists(ctx context.Context, req *proto.ListWatchlis
 	if atomic.LoadUint32(&Queryable) == 0 {
 		return nil, errNotQueryable
 	}
-
-	provider := GetWatchlistProvider()
-	if provider == nil {
-		return &proto.ListWatchlistsResponse{}, nil
+	q := WatchlistQuery{}
+	if req != nil {
+		q.Session, q.AsOf = req.Session, req.AsOf
+		if req.Name != "" {
+			q.Names = []string{req.Name}
+		}
 	}
-
-	if req != nil && req.Name != "" {
-		ranking := provider.GetRanking(req.Name)
-		return &proto.ListWatchlistsResponse{
-			Watchlists: []*proto.WatchlistRanking{
-				convertRankingToProto(req.Name, ranking),
-			},
-		}, nil
+	lists, err := queryWatchlists(q)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrWatchlistNotFound):
+			return nil, status.Error(codes.NotFound, err.Error())
+		case errors.Is(err, ErrWatchlistInvalid):
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		return nil, err
 	}
-
-	all := provider.AllRankings()
-	watchlists := make([]*proto.WatchlistRanking, 0, len(all))
-	for name, entries := range all {
-		watchlists = append(watchlists, convertRankingToProto(name, entries))
+	watchlists := make([]*proto.WatchlistRanking, len(lists))
+	for i, l := range lists {
+		watchlists[i] = convertListToProto(l)
 	}
 	return &proto.ListWatchlistsResponse{Watchlists: watchlists}, nil
 }
 
-func convertRankingToProto(name string, entries []WatchlistRankingEntry) *proto.WatchlistRanking {
-	protoEntries := make([]*proto.WatchlistEntry, len(entries))
-	for i, e := range entries {
+func convertListToProto(l WatchlistList) *proto.WatchlistRanking {
+	protoEntries := make([]*proto.WatchlistEntry, len(l.Entries))
+	for i, e := range l.Entries {
 		fields := make(map[string]float64, len(e.Fields))
 		for _, f := range e.Fields {
 			fields[f.Key] = f.Value
@@ -499,8 +503,14 @@ func convertRankingToProto(name string, entries []WatchlistRankingEntry) *proto.
 		}
 	}
 	return &proto.WatchlistRanking{
-		Name:    name,
-		Entries: protoEntries,
+		Name:        l.Name,
+		Entries:     protoEntries,
+		Basis:       l.Basis,
+		Session:     l.Session,
+		TradingDate: l.TradingDate,
+		WindowStart: l.WindowStart.Unix(),
+		WindowEnd:   l.WindowEnd.Unix(),
+		Complete:    l.Complete,
 	}
 }
 

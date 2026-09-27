@@ -89,7 +89,13 @@ func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
 	// from an earlier day (a backfill) do not touch today's state and are
 	// not pushed.
 	state := Manager.GetOrCreate(symbol)
-	if !state.applyBars(barsFromColumnSeries(cs), tf.Duration < time.Minute) {
+	bars := barsFromColumnSeries(cs)
+	if tf.Duration == time.Minute {
+		// Session facts derive from 1Min bars; report ones that land after
+		// their date's facts may have been written.
+		markLateBars(symbol, bars, state.liveDay())
+	}
+	if !state.applyBars(bars, tf.Duration < time.Minute) {
 		return
 	}
 
@@ -102,9 +108,9 @@ func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
 	// Evaluate curation.
 	curated := true
 	if Manager.curator != nil {
-		curated = Manager.curator.Evaluate(symbol, state)
+		curated = Manager.curator.Evaluate(symbol, state.curationSnapshot())
 	}
-	state.IsCurated = curated
+	state.setCurated(curated)
 	Manager.UpdateCuration(symbol, curated)
 
 	// Determine msg_type from the attribute group.

@@ -17,7 +17,11 @@
 //	    config: <according to the plulgin>
 package bgworker
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 // BgWorker is the interface that background worker plugins must implement.
 // Run is called in a separate goroutine and should block until the worker
@@ -58,7 +62,47 @@ type WatchlistDataSource interface {
 	GetWatchlistRanking(name string) []WatchlistRankingEntry
 	// AllWatchlistRankings returns all current watchlist rankings.
 	AllWatchlistRankings() map[string][]WatchlistRankingEntry
+	// Rankings answers a query for live or rewound rankings. Errors wrap
+	// ErrWatchlistInvalid (a bad or unavailable request) or
+	// ErrWatchlistNotFound (an unknown list name).
+	Rankings(q WatchlistQuery) (WatchlistResult, error)
 }
+
+// WatchlistQuery asks for rankings. Empty Session and AsOf mean the live
+// session. Empty Names means every list available in the resolved session.
+type WatchlistQuery struct {
+	Names   []string
+	Session string // "premarket", "regular" or "afterhours"
+	AsOf    string // ISO-8601 date or date-time
+}
+
+// WatchlistList is one list with the ranking window it covers.
+type WatchlistList struct {
+	Name        string
+	Basis       string // "session" or "traditional"
+	Session     string
+	TradingDate string // YYYY-MM-DD, America/New_York
+	WindowStart time.Time
+	WindowEnd   time.Time
+	Complete    bool
+	Entries     []WatchlistRankingEntry
+}
+
+// WatchlistResult answers a WatchlistQuery.
+type WatchlistResult struct {
+	Lists []WatchlistList
+}
+
+// Errors a WatchlistDataSource wraps, so the host can classify failures that
+// happen inside a plugin without importing the plugin's packages.
+var (
+	// ErrWatchlistInvalid: the request is malformed, names a non-trading
+	// date or a session that has not started, or asks for a list that is
+	// not available in the session.
+	ErrWatchlistInvalid = errors.New("invalid watchlist request")
+	// ErrWatchlistNotFound: no such watchlist.
+	ErrWatchlistNotFound = errors.New("watchlist not found")
+)
 
 // SubscriptionController is an optional interface a BgWorker can implement to
 // allow the RPC layer to drive live tick subscriptions at runtime. The host
@@ -75,6 +119,16 @@ type SubscriptionController interface {
 	// ActiveSubscriptions returns the current intended subscription set as a
 	// map of symbol -> data types.
 	ActiveSubscriptions() map[string][]string
+}
+
+// SessionFactsRebuilder is an optional interface a BgWorker can implement to
+// let the RPC layer queue a rebuild of derived session facts. The host checks
+// for it after loading the plugin and wires it into the frontend.
+type SessionFactsRebuilder interface {
+	// QueueSessionFactsRebuild queues every trading day from..to for the
+	// given symbols (all symbols with 1Min data when empty) and returns how
+	// many (symbol, day) entries were queued. It fails on a replica.
+	QueueSessionFactsRebuild(symbols []string, from, to time.Time) (queued int, err error)
 }
 
 // SymbolLoader is an interface to retrieve symbol object from plugin.

@@ -80,6 +80,13 @@ var decodeFuncMap = map[string]func(resp *http.Response) (response interface{}, 
 	"Query":        decodeMultiQueryResponse,
 	"SQLStatement": decodeMultiQueryResponse,
 	"ListSymbols":  decodeListSymbols,
+	"RebuildSessionFacts": func(resp *http.Response) (response interface{}, err error) {
+		result := &frontend.RebuildSessionFactsResponse{}
+		if err = msgpack2.DecodeClientResponse(resp.Body, result); err != nil {
+			return nil, fmt.Errorf("decode RebuildSessionFacts API client response:%w", err)
+		}
+		return result, nil
+	},
 	"Write": func(resp *http.Response) (response interface{}, err error) {
 		_, err = decodeMultiServerResponse(resp)
 		if err != nil {

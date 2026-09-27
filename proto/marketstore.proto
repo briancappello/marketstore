@@ -172,6 +172,12 @@ message ServerVersionResponse {
 // If name is empty, all watchlists are returned.
 message ListWatchlistsRequest {
     string name = 1;
+    // session is "premarket", "regular" or "afterhours". Optional.
+    string session = 2;
+    // as_of is an ISO-8601 date or date-time (America/New_York when it has
+    // no offset). Optional. Without session and as_of, the live rankings
+    // are returned.
+    string as_of = 3;
 }
 
 // WatchlistEntry is a single ranked symbol in a watchlist.
@@ -186,6 +192,19 @@ message WatchlistEntry {
 message WatchlistRanking {
     string name = 1;
     repeated WatchlistEntry entries = 2;
+    // basis is "session" or "traditional": what prior_close and pct_change
+    // mean in this list.
+    string basis = 3;
+    // session is the resolved session: "premarket", "regular" or
+    // "afterhours".
+    string session = 4;
+    // trading_date is the session's date, YYYY-MM-DD in America/New_York.
+    string trading_date = 5;
+    // window_start and window_end bound the ranking window, Unix seconds.
+    int64 window_start = 6;
+    int64 window_end = 7;
+    // complete is true when the window covers the whole session.
+    bool complete = 8;
 }
 
 // ListWatchlistsResponse contains the current rankings for one or more watchlists.

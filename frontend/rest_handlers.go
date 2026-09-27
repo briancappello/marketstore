@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -273,41 +274,51 @@ func (s *DataService) handleRESTQuotes(w http.ResponseWriter, r *http.Request) {
 	writeJSONCached(w, r, http.StatusOK, quotesResponse{Quotes: quotes})
 }
 
-// handleRESTWatchlists serves GET /v1/watchlists.
+// watchlistQueryFrom reads the optional session and as_of query parameters.
+func watchlistQueryFrom(r *http.Request) WatchlistQuery {
+	q := r.URL.Query()
+	return WatchlistQuery{Session: q.Get("session"), AsOf: q.Get("as_of")}
+}
+
+// writeWatchlistError maps a watchlist query error to its HTTP status: 400
+// for an invalid or unavailable request, 404 for an unknown watchlist.
+func writeWatchlistError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrWatchlistNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrWatchlistInvalid):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+// handleRESTWatchlists serves GET /v1/watchlists[?session=&as_of=].
 //
 // The watchlist plugin is optional; with no provider registered this returns
 // an empty list rather than an error, matching DataService.ListWatchlists.
+// Only the lists available in the resolved session are returned.
 func (s *DataService) handleRESTWatchlists(w http.ResponseWriter, r *http.Request) {
 	if !requireQueryable(w) {
 		return
 	}
-
-	provider := GetWatchlistProvider()
-	if provider == nil {
-		writeJSON(w, http.StatusOK, ListWatchlistsResponse{
-			Watchlists: []WatchlistRankingResponse{},
-		})
+	lists, err := queryWatchlists(watchlistQueryFrom(r))
+	if err != nil {
+		writeWatchlistError(w, err)
 		return
 	}
-
-	all := provider.AllRankings()
-	names := make([]string, 0, len(all))
-	for name := range all {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	out := make([]WatchlistRankingResponse, len(names))
-	for i, name := range names {
-		out[i] = convertRanking(name, all[name])
+	out := make([]WatchlistRankingResponse, len(lists))
+	for i, l := range lists {
+		out[i] = convertList(l)
 	}
 	writeJSON(w, http.StatusOK, ListWatchlistsResponse{Watchlists: out})
 }
 
-// handleRESTWatchlist serves GET /v1/watchlists/{name}.
+// handleRESTWatchlist serves GET /v1/watchlists/{name}[?session=&as_of=].
 //
 // Unlike the collection endpoint, an unknown name is a 404: the caller named
-// a specific resource that does not exist.
+// a specific resource that does not exist. A known list with no entries is
+// a 200 with an empty list.
 func (s *DataService) handleRESTWatchlist(w http.ResponseWriter, r *http.Request) {
 	if !requireQueryable(w) {
 		return
@@ -318,21 +329,21 @@ func (s *DataService) handleRESTWatchlist(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "watchlist name is required")
 		return
 	}
-
-	provider := GetWatchlistProvider()
-	if provider == nil {
+	if GetWatchlistProvider() == nil {
 		writeError(w, http.StatusNotFound, "no such watchlist: "+name)
 		return
 	}
 
-	// GetRanking returns a []WatchlistRankingEntry; treat both nil and an
-	// empty slice as "not found" so an implementation that returns an empty
-	// non-nil slice for an unknown name still yields a 404.
-	ranking := provider.GetRanking(name)
-	if len(ranking) == 0 {
+	q := watchlistQueryFrom(r)
+	q.Names = []string{name}
+	lists, err := queryWatchlists(q)
+	if err != nil {
+		writeWatchlistError(w, err)
+		return
+	}
+	if len(lists) == 0 {
 		writeError(w, http.StatusNotFound, "no such watchlist: "+name)
 		return
 	}
-
-	writeJSON(w, http.StatusOK, convertRanking(name, ranking))
+	writeJSON(w, http.StatusOK, convertList(lists[0]))
 }

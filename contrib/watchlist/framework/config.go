@@ -64,6 +64,10 @@ type WorkerConfig struct {
 	RankingIntervalMs    int    `json:"ranking_interval_ms"`
 	RefreshInterval      string `json:"refresh_interval"`
 
+	// SessionFactsGrace is how long after afterhours ends the daily session
+	// facts job waits for end-of-day fills (a Go duration, default "30m").
+	SessionFactsGrace string `json:"session_facts_grace"`
+
 	// StrategyConfig is an optional map of strategy-name to config that is
 	// passed to each WatchlistStrategy factory at creation time. This allows
 	// bgworker-level config (e.g., database DSNs) to reach strategies that

@@ -1,8 +1,11 @@
 package frontend_test
 
 import (
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -11,7 +14,8 @@ import (
 
 // mockProvider implements frontend.WatchlistProvider for testing.
 type mockProvider struct {
-	rankings map[string][]frontend.WatchlistRankingEntry
+	rankings  map[string][]frontend.WatchlistRankingEntry
+	lastQuery frontend.WatchlistQuery
 }
 
 func (m *mockProvider) ListNames() []string {
@@ -28,6 +32,54 @@ func (m *mockProvider) GetRanking(name string) []frontend.WatchlistRankingEntry 
 
 func (m *mockProvider) AllRankings() map[string][]frontend.WatchlistRankingEntry {
 	return m.rankings
+}
+
+// Rankings imitates the watchlist plugin: unknown names are not found, a
+// _TRADITIONAL list outside the regular session and a weekend as_of are
+// invalid, and every list carries the resolved window.
+func (m *mockProvider) Rankings(q frontend.WatchlistQuery) (frontend.WatchlistResult, error) {
+	m.lastQuery = q
+	sess := q.Session
+	if sess == "" {
+		sess = "regular"
+	}
+	if sess != "premarket" && sess != "regular" && sess != "afterhours" {
+		return frontend.WatchlistResult{}, fmt.Errorf("%w: invalid session %q", frontend.ErrWatchlistInvalid, sess)
+	}
+	if strings.HasPrefix(q.AsOf, "2026-09-26") {
+		return frontend.WatchlistResult{}, fmt.Errorf("%w: 2026-09-26: not a trading day", frontend.ErrWatchlistInvalid)
+	}
+	names := q.Names
+	if len(names) == 0 {
+		for n := range m.rankings {
+			names = append(names, n)
+		}
+	}
+	start := time.Date(2026, 9, 21, 9, 30, 0, 0, time.UTC)
+	var res frontend.WatchlistResult
+	for _, n := range names {
+		entries, ok := m.rankings[n]
+		if !ok {
+			return frontend.WatchlistResult{}, fmt.Errorf("%w: %s", frontend.ErrWatchlistNotFound, n)
+		}
+		basis := "session"
+		if strings.HasSuffix(n, "_TRADITIONAL") {
+			basis = "traditional"
+			if sess != "regular" {
+				if len(q.Names) > 0 {
+					return frontend.WatchlistResult{}, fmt.Errorf(
+						"%w: %s is only available in the regular session", frontend.ErrWatchlistInvalid, n)
+				}
+				continue
+			}
+		}
+		res.Lists = append(res.Lists, frontend.WatchlistList{
+			Name: n, Basis: basis, Session: sess, TradingDate: "2026-09-21",
+			WindowStart: start, WindowEnd: start.Add(105 * time.Minute), Complete: false,
+			Entries: entries,
+		})
+	}
+	return res, nil
 }
 
 func setupWatchlistTest(t *testing.T, provider frontend.WatchlistProvider) {
@@ -122,10 +174,9 @@ func TestListWatchlists_UnknownWatchlist(t *testing.T) {
 	var resp frontend.ListWatchlistsResponse
 	err := service.ListWatchlists(nil, req, &resp)
 
-	assert.Nil(t, err)
-	assert.Len(t, resp.Watchlists, 1)
-	assert.Equal(t, "NONEXISTENT", resp.Watchlists[0].Name)
-	assert.Empty(t, resp.Watchlists[0].Entries)
+	// An unknown name is an error that says so, not an empty list.
+	assert.ErrorIs(t, err, frontend.ErrWatchlistNotFound)
+	assert.Contains(t, err.Error(), "NONEXISTENT")
 }
 
 func TestListWatchlists_NotQueryable(t *testing.T) {

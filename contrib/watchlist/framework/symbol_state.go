@@ -1,6 +1,10 @@
 package framework
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/alpacahq/marketstore/v4/contrib/calendar"
+)
 
 // SymbolState holds per-symbol state maintained across ticks.
 // The framework updates the core fields on every tick; custom Curator
@@ -12,8 +16,25 @@ type SymbolState struct {
 	// MedianVolume50D is the 50-day rolling median of daily volume.
 	MedianVolume50D float64
 
-	// PriorClose is yesterday's closing price.
+	// PriorClose is the official close of the previous trading date: the
+	// traditional baseline. It is never taken from a premarket or
+	// afterhours print.
 	PriorClose float64
+
+	// PrevAfterhoursClose is the last afterhours 1Min close of the previous
+	// trading date: the session baseline for premarket. Zero means the
+	// previous afterhours session had no bars.
+	PrevAfterhoursClose float64
+
+	// SessionMedianVolume is each session's median volume over the median
+	// window of trading dates before the current one, indexed by
+	// calendar.Session. Zero means no history for that session.
+	SessionMedianVolume [len(calendar.Sessions)]float64
+
+	// OfficialClose is the current trading date's official close (its 1D
+	// bar close) once the 1D bar exists; zero until then. It is the session
+	// baseline for afterhours and becomes PriorClose when the day rolls.
+	OfficialClose float64
 
 	// --- Running state (updated per tick by Trigger) ---
 
@@ -37,7 +58,9 @@ type SymbolState struct {
 	// ledger below (see day_state.go), not a running sum of fires.
 	CumulativeVolume int64
 
-	// PremarketVolume is the running sum of premarket session volume.
+	// PremarketVolume is the current trading date's premarket volume: the
+	// volume so far during premarket, and the whole premarket session's
+	// volume after it ends.
 	PremarketVolume int64
 
 	// LastEpoch is the epoch timestamp of the most recent tick.
@@ -96,6 +119,20 @@ type SymbolState struct {
 	subMinuteVol map[int64]map[int64]int64
 	// dayOpenEpoch is the start of the bar DayOpen was taken from.
 	dayOpenEpoch int64
+
+	// sessions holds the running values of each session of LiveDay,
+	// indexed by calendar.Session.
+	sessions [len(calendar.Sessions)]sessionAcc
+	// bounds are LiveDay's session boundaries in Unix seconds: premarket
+	// start, regular start, afterhours start, afterhours end. boundsDay is
+	// the day they were computed for; boundsOK is false on non-trading days.
+	bounds    [len(calendar.Sessions) + 1]int64
+	boundsDay int64
+	boundsOK  bool
+
+	// pending holds baselines loaded for a trading date the state has not
+	// reached yet; they are applied when the day rolls to that date.
+	pending *Baselines
 }
 
 // NewSymbolState creates a new SymbolState with initialized Extra map.
@@ -123,4 +160,69 @@ func (s *SymbolState) ResetDaily() {
 	s.minuteVol = nil
 	s.subMinuteVol = nil
 	s.dayOpenEpoch = 0
+	s.sessions = [len(calendar.Sessions)]sessionAcc{}
+}
+
+// curationChange is the result of syncCuration.
+type curationChange int
+
+const (
+	curationUnchanged curationChange = iota
+	curationAdded
+	curationRemoved
+)
+
+// setCurated records the curator's verdict under the state's lock.
+func (s *SymbolState) setCurated(curated bool) {
+	s.mu.Lock()
+	s.IsCurated = curated
+	s.mu.Unlock()
+}
+
+// syncCuration compares IsCurated with WasCurated, makes WasCurated match,
+// and reports the change.
+func (s *SymbolState) syncCuration() curationChange {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.IsCurated && !s.WasCurated:
+		s.WasCurated = true
+		return curationAdded
+	case !s.IsCurated && s.WasCurated:
+		s.WasCurated = false
+		return curationRemoved
+	}
+	return curationUnchanged
+}
+
+// curationSnapshot returns a copy of the fields a Curator reads, taken
+// under the lock, so the curator never reads fields a trigger is writing.
+func (s *SymbolState) curationSnapshot() *SymbolState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return &SymbolState{
+		MedianVolume50D:     s.MedianVolume50D,
+		PriorClose:          s.PriorClose,
+		PrevAfterhoursClose: s.PrevAfterhoursClose,
+		OfficialClose:       s.OfficialClose,
+		SessionMedianVolume: s.SessionMedianVolume,
+		DayOpen:             s.DayOpen,
+		LastClose:           s.LastClose,
+		LastPrice:           s.LastPrice,
+		HighOfDay:           s.HighOfDay,
+		LowOfDay:            s.LowOfDay,
+		CumulativeVolume:    s.CumulativeVolume,
+		PremarketVolume:     s.PremarketVolume,
+		LastEpoch:           s.LastEpoch,
+		TickCount:           s.TickCount,
+		PctChange:           s.PctChange,
+		VolumeMultipleOfMed: s.VolumeMultipleOfMed,
+		DollarVolumeRate:    s.DollarVolumeRate,
+		SeededDay:           s.SeededDay,
+		LiveDay:             s.LiveDay,
+		IsCurated:           s.IsCurated,
+		WasCurated:          s.WasCurated,
+		Extra:               s.Extra,
+		sessions:            s.sessions,
+	}
 }

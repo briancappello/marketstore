@@ -19,6 +19,9 @@ import (
 	"github.com/alpacahq/marketstore/v4/utils/io"
 )
 
+// ny is the exchange timezone the session boundaries are defined in.
+var ny, _ = time.LoadLocation("America/New_York")
+
 // ---------------------------------------------------------------------------
 // Mock Curator and WatchlistStrategy
 // ---------------------------------------------------------------------------
@@ -367,39 +370,40 @@ func TestWatchlistRanking(t *testing.T) {
 	defer conn.Close()
 	time.Sleep(50 * time.Millisecond)
 
-	baseTime := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
+	// Rank the regular session of Wed 2025-01-15 at 10:31.
+	baseTime := time.Date(2025, 1, 15, 10, 30, 0, 0, ny)
+	framework.SetClock(t, func() time.Time { return baseTime.Add(time.Minute) })
 
-	// Set prior closes so PctChange is computed.
-	aaplState := framework.Manager.GetOrCreate("AAPL")
-	aaplState.PriorClose = 100
-	nvdaState := framework.Manager.GetOrCreate("NVDA")
-	nvdaState.PriorClose = 200
+	// Traditional baselines (previous official close) so PctChange is
+	// computed for the _TRADITIONAL list.
+	day := time.Date(2025, 1, 15, 0, 0, 0, 0, ny)
+	framework.Manager.GetOrCreate("AAPL").SetBaselines(framework.Baselines{Date: day, PriorClose: 100})
+	framework.Manager.GetOrCreate("NVDA").SetBaselines(framework.Baselines{Date: day, PriorClose: 200})
 
-	// Write bars that produce known percent changes.
-	// AAPL: high=105, prior_close=100 -> +5%
+	// AAPL: close=104, prior_close=100 -> +4%
 	h.writeOHLCVAndFire("AAPL", baseTime, 101, 105, 100, 104, 50000)
-	// NVDA: high=208, prior_close=200 -> +4%
+	// NVDA: close=206, prior_close=200 -> +3%
 	h.writeOHLCVAndFire("NVDA", baseTime, 201, 208, 199, 206, 30000)
 
-	// Trigger ranking manually.
 	h.worker.TriggerRanking()
 
 	msgs := collectMessages(ch, 500*time.Millisecond)
-	// We should get at least 1 watchlist update.
-	found := false
+	names := map[string][]interface{}{}
 	for _, msg := range msgs {
 		if msg["msg_type"] == "watchlist_update" {
-			found = true
 			payload, _ := msg["payload"].(map[string]interface{})
-			assert.Equal(t, "TEST_GAINERS", payload["name"])
+			name, _ := payload["name"].(string)
 			symbols, _ := payload["symbols"].([]interface{})
-			if len(symbols) >= 2 {
-				first, _ := symbols[0].(map[string]interface{})
-				assert.Equal(t, "AAPL", first["symbol"])
-			}
+			names[name] = symbols
 		}
 	}
-	assert.True(t, found, "should receive at least one watchlist_update message")
+	require.Contains(t, names, "TEST_GAINERS", "the session list is pushed")
+	require.Contains(t, names, "TEST_GAINERS_TRADITIONAL", "the traditional list is pushed in the regular session")
+	trad := names["TEST_GAINERS_TRADITIONAL"]
+	require.Len(t, trad, 2)
+	first, _ := trad[0].(map[string]interface{})
+	assert.Equal(t, "AAPL", first["symbol"])
+	assert.Empty(t, names["TEST_GAINERS"], "no premarket bars today: no session baseline, so both drop out")
 }
 
 // Test 10: PushDirect with wildcard in non-symbol position.
@@ -554,7 +558,10 @@ func TestNegativePctChange(t *testing.T) {
 	assert.InDelta(t, -18.0, state.PctChange, 0.01) // (82 - 100) / 100 * 100
 }
 
-// Test: Day-boundary reset clears running state and updates PriorClose.
+// Test: Day-boundary reset clears running state, and the new day's baselines
+// come from the right sessions: PriorClose is the previous day's regular
+// close (never an afterhours print), and PrevAfterhoursClose is the previous
+// day's last afterhours close.
 func TestDayBoundaryReset(t *testing.T) {
 	h := newTestHarness(t)
 
@@ -568,34 +575,34 @@ func TestDayBoundaryReset(t *testing.T) {
 	defer conn.Close()
 	time.Sleep(50 * time.Millisecond)
 
-	day1 := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
-
-	// Day 1: two ticks
+	// Wed 2025-01-15 (EST): two regular-session bars, then an afterhours
+	// print well away from the regular close.
+	day1 := time.Date(2025, 1, 15, 10, 30, 0, 0, ny)
 	h.writeOHLCVAndFire("DAYRESET", day1, 101, 105, 100, 104, 10000)
 	h.writeOHLCVAndFire("DAYRESET", day1.Add(time.Minute), 104, 108, 103, 107, 20000)
+	h.writeOHLCVAndFire("DAYRESET", time.Date(2025, 1, 15, 17, 0, 0, 0, ny), 99, 99, 99, 99, 300)
 
 	assert.Equal(t, 101.0, state.DayOpen)
 	assert.Equal(t, 108.0, state.HighOfDay)
-	assert.Equal(t, int64(30000), state.CumulativeVolume)
-	assert.InDelta(t, 7.0, state.PctChange, 0.01) // (107 - 100) / 100 * 100
-	assert.Equal(t, int64(2), state.TickCount)
+	assert.Equal(t, int64(30300), state.CumulativeVolume)
+	assert.Equal(t, int64(3), state.TickCount)
 
-	// Day 2: first tick on a new calendar day triggers ResetDaily.
-	day2 := time.Date(2025, 1, 16, 9, 30, 0, 0, time.UTC)
+	// Thu: the first bar of a new trading day resets the running state.
+	day2 := time.Date(2025, 1, 16, 9, 30, 0, 0, ny)
 	h.writeOHLCVAndFire("DAYRESET", day2, 110, 112, 109, 111, 5000)
 
-	// PriorClose should now be the last close from day 1 (107), not the
-	// original PriorClose (100).
+	// PriorClose is day 1's regular close (107), not the afterhours print
+	// (99) and not the original baseline (100).
 	assert.Equal(t, 107.0, state.PriorClose)
+	assert.Equal(t, 99.0, state.PrevAfterhoursClose)
 
-	// Running state should be reset for the new day.
+	// Running state is reset for the new day.
 	assert.Equal(t, 110.0, state.DayOpen)
 	assert.Equal(t, 112.0, state.HighOfDay)
 	assert.Equal(t, 109.0, state.LowOfDay)
 	assert.Equal(t, int64(5000), state.CumulativeVolume)
 	assert.Equal(t, int64(1), state.TickCount)
 
-	// PctChange should use the new PriorClose (107).
 	// (111 - 107) / 107 * 100 ≈ 3.74
 	assert.InDelta(t, 3.738, state.PctChange, 0.01)
 }
@@ -707,31 +714,95 @@ func TestWatchlistRankingIncludesPrice(t *testing.T) {
 	defer conn.Close()
 	time.Sleep(50 * time.Millisecond)
 
-	baseTime := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
-	aapl := framework.Manager.GetOrCreate("AAPL")
-	aapl.PriorClose = 100
-	// close=104 -> LastPrice becomes 104 after the bar fires.
+	baseTime := time.Date(2025, 1, 15, 10, 30, 0, 0, ny)
+	framework.SetClock(t, func() time.Time { return baseTime.Add(time.Minute) })
+	framework.Manager.GetOrCreate("AAPL").SetBaselines(framework.Baselines{
+		Date: time.Date(2025, 1, 15, 0, 0, 0, 0, ny), PriorClose: 100,
+	})
+	// A premarket bar closing at 102 is the session baseline.
+	h.writeOHLCVAndFire("AAPL", time.Date(2025, 1, 15, 9, 0, 0, 0, ny), 99, 102, 99, 102, 1000)
+	// The 10:30 regular bar: open 101, close 104.
 	h.writeOHLCVAndFire("AAPL", baseTime, 101, 105, 100, 104, 50000)
 
 	h.worker.TriggerRanking()
 	msgs := collectMessages(ch, 500*time.Millisecond)
 
-	found := false
+	got := map[string]map[string]interface{}{}
 	for _, msg := range msgs {
 		if msg["msg_type"] != "watchlist_update" {
 			continue
 		}
 		payload, _ := msg["payload"].(map[string]interface{})
+		name, _ := payload["name"].(string)
 		symbols, _ := payload["symbols"].([]interface{})
 		for _, s := range symbols {
 			m, _ := s.(map[string]interface{})
 			if m["symbol"] == "AAPL" {
-				found = true
-				assert.EqualValues(t, 104, m["price"])
-				assert.EqualValues(t, 100, m["prior_close"])
-				assert.EqualValues(t, 101, m["open"])
+				got[name] = m
 			}
 		}
 	}
-	assert.True(t, found, "AAPL watchlist_update should carry price/prior_close/open")
+	require.Contains(t, got, "TEST_GAINERS_TRADITIONAL")
+	trad := got["TEST_GAINERS_TRADITIONAL"]
+	assert.EqualValues(t, 104, trad["price"])
+	assert.EqualValues(t, 100, trad["prior_close"], "traditional: the previous official close")
+	assert.EqualValues(t, 101, trad["open"], "the regular session's open, not the premarket bar")
+	assert.EqualValues(t, 1000, trad["premarket_volume"])
+
+	require.Contains(t, got, "TEST_GAINERS")
+	sess := got["TEST_GAINERS"]
+	assert.EqualValues(t, 104, sess["price"])
+	assert.EqualValues(t, 102, sess["prior_close"], "session: today's premarket close")
+	assert.EqualValues(t, 101, sess["open"])
+}
+
+// 8.2: every watchlist_update says which ranking it is, and traditional
+// lists are pushed only during the regular session.
+func TestWatchlistUpdateCarriesSessionMetadata(t *testing.T) {
+	h := newTestHarness(t)
+	framework.Manager.SetCurator(&mockCurator{allowed: nil})
+	framework.Manager.AddStrategy(&mockWatchlist{
+		name: "META",
+		rankFn: func(curated map[string]*framework.SymbolState) []framework.RankedSymbol {
+			return nil
+		},
+	})
+	conn, ch := h.connectAndSubscribe("WATCHLISTS/1Min/*")
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	pushed := func(at time.Time) map[string]map[string]interface{} {
+		framework.SetClock(t, func() time.Time { return at })
+		h.worker.TriggerRanking()
+		out := map[string]map[string]interface{}{}
+		for _, msg := range collectMessages(ch, 300*time.Millisecond) {
+			if msg["msg_type"] == "watchlist_update" {
+				p, _ := msg["payload"].(map[string]interface{})
+				name, _ := p["name"].(string)
+				out[name] = p
+			}
+		}
+		return out
+	}
+
+	pre := pushed(time.Date(2026, 9, 22, 8, 0, 0, 0, ny))
+	require.Len(t, pre, 1, "premarket: only the bare list")
+	p := pre["META"]
+	assert.Equal(t, "session", p["basis"])
+	assert.Equal(t, "premarket", p["session"])
+	assert.Equal(t, "2026-09-22", p["trading_date"])
+	assert.EqualValues(t, time.Date(2026, 9, 22, 8, 0, 0, 0, ny).Unix(), p["as_of"])
+	assert.Equal(t, false, p["complete"])
+
+	reg := pushed(time.Date(2026, 9, 22, 11, 0, 0, 0, ny))
+	require.Len(t, reg, 2)
+	assert.Equal(t, "session", reg["META"]["basis"])
+	assert.Equal(t, "traditional", reg["META_TRADITIONAL"]["basis"])
+	assert.Equal(t, "regular", reg["META_TRADITIONAL"]["session"])
+
+	night := pushed(time.Date(2026, 9, 22, 22, 0, 0, 0, ny))
+	require.Len(t, night, 1)
+	assert.Equal(t, "afterhours", night["META"]["session"])
+	assert.Equal(t, true, night["META"]["complete"])
+	assert.EqualValues(t, time.Date(2026, 9, 22, 20, 0, 0, 0, ny).Unix(), night["META"]["as_of"])
 }

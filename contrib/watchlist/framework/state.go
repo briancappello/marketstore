@@ -19,9 +19,9 @@ type SymbolStateManager struct {
 	curatedMu sync.RWMutex
 	curated   map[string]struct{}
 
-	// watchlists stores the latest ranking results per watchlist name.
+	// lists stores the latest live lists per published name.
 	watchlistsMu sync.RWMutex
-	watchlists   map[string][]RankedSymbol
+	lists        map[string]RankedList
 
 	// curator is the active Curator implementation.
 	curator Curator
@@ -39,9 +39,9 @@ type SymbolStateManager struct {
 // NewSymbolStateManager creates a new empty state manager.
 func NewSymbolStateManager() *SymbolStateManager {
 	return &SymbolStateManager{
-		states:     make(map[string]*SymbolState),
-		curated:    make(map[string]struct{}),
-		watchlists: make(map[string][]RankedSymbol),
+		states:  make(map[string]*SymbolState),
+		curated: make(map[string]struct{}),
+		lists:   make(map[string]RankedList),
 	}
 }
 
@@ -182,26 +182,61 @@ func (m *SymbolStateManager) CuratedCount() int {
 	return len(m.curated)
 }
 
-// SetWatchlistRanking stores the latest ranking for a named watchlist.
+// SetWatchlistRanking stores a ranking for a named watchlist without window
+// metadata. Live rankings go through setLists.
 func (m *SymbolStateManager) SetWatchlistRanking(name string, ranking []RankedSymbol) {
 	m.watchlistsMu.Lock()
 	defer m.watchlistsMu.Unlock()
-	m.watchlists[name] = ranking
+	l := m.lists[name]
+	l.Name, l.Symbols = name, ranking
+	m.lists[name] = l
+}
+
+// setLists replaces the live lists with lists.
+func (m *SymbolStateManager) setLists(lists []RankedList) {
+	next := make(map[string]RankedList, len(lists))
+	for _, l := range lists {
+		next[l.Name] = l
+	}
+	m.watchlistsMu.Lock()
+	defer m.watchlistsMu.Unlock()
+	m.lists = next
 }
 
 // GetWatchlistRanking returns the latest ranking for a named watchlist.
 func (m *SymbolStateManager) GetWatchlistRanking(name string) []RankedSymbol {
 	m.watchlistsMu.RLock()
 	defer m.watchlistsMu.RUnlock()
-	return m.watchlists[name]
+	return m.lists[name].Symbols
+}
+
+// GetList returns the latest live list with its metadata.
+func (m *SymbolStateManager) GetList(name string) (RankedList, bool) {
+	m.watchlistsMu.RLock()
+	defer m.watchlistsMu.RUnlock()
+	l, ok := m.lists[name]
+	return l, ok
+}
+
+// AllLists returns the latest live lists with their metadata.
+func (m *SymbolStateManager) AllLists() []RankedList {
+	m.watchlistsMu.RLock()
+	defer m.watchlistsMu.RUnlock()
+	out := make([]RankedList, 0, len(m.lists))
+	for _, l := range m.lists {
+		cp := l
+		cp.Symbols = append([]RankedSymbol(nil), l.Symbols...)
+		out = append(out, cp)
+	}
+	return out
 }
 
 // ListWatchlistNames returns the names of all watchlists that have rankings.
 func (m *SymbolStateManager) ListWatchlistNames() []string {
 	m.watchlistsMu.RLock()
 	defer m.watchlistsMu.RUnlock()
-	names := make([]string, 0, len(m.watchlists))
-	for name := range m.watchlists {
+	names := make([]string, 0, len(m.lists))
+	for name := range m.lists {
 		names = append(names, name)
 	}
 	return names
@@ -211,11 +246,9 @@ func (m *SymbolStateManager) ListWatchlistNames() []string {
 func (m *SymbolStateManager) AllWatchlistRankings() map[string][]RankedSymbol {
 	m.watchlistsMu.RLock()
 	defer m.watchlistsMu.RUnlock()
-	cp := make(map[string][]RankedSymbol, len(m.watchlists))
-	for name, ranking := range m.watchlists {
-		dst := make([]RankedSymbol, len(ranking))
-		copy(dst, ranking)
-		cp[name] = dst
+	cp := make(map[string][]RankedSymbol, len(m.lists))
+	for name, l := range m.lists {
+		cp[name] = append([]RankedSymbol(nil), l.Symbols...)
 	}
 	return cp
 }

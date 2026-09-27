@@ -59,11 +59,14 @@ func PushCurationChange(timeframe string, added, removed []CurationChangeEntry, 
 // Each entry is serialized as a fresh map[string]interface{} for the stream
 // layer (which expects map-shaped payloads). The map is sized to the exact
 // field count plus the symbol/rank/sector keys to avoid bucket growth, and
-// each typed Field is unboxed into the map exactly once. This is still
-// O(symbols * fields) allocations per push, but eliminates the redundant
-// per-row map+box pass that previously happened inside each strategy's
-// Rank() method (the Fields map there has been replaced with a typed slice).
-func PushWatchlistUpdate(timeframe, watchlistName string, symbols []RankedSymbol) {
+// each typed Field is unboxed into the map exactly once.
+//
+// Besides name, timeframe and symbols, the payload says which ranking this
+// is: basis ("session" or "traditional"), session, trading_date (YYYY-MM-DD,
+// America/New_York) and as_of (the window end, Unix seconds). A client can
+// always tell what prior_close and pct_change mean from basis.
+func PushWatchlistUpdate(timeframe string, list RankedList) {
+	symbols := list.Symbols
 	symbolMaps := make([]map[string]interface{}, len(symbols))
 	for i, rs := range symbols {
 		size := 2 + len(rs.Fields)
@@ -85,13 +88,18 @@ func PushWatchlistUpdate(timeframe, watchlistName string, symbols []RankedSymbol
 	payload := map[string]interface{}{
 		"msg_type": MsgTypeWatchlistUpdate,
 		"payload": map[string]interface{}{
-			"name":      watchlistName,
-			"timeframe": timeframe,
-			"symbols":   symbolMaps,
+			"name":         list.Name,
+			"timeframe":    timeframe,
+			"symbols":      symbolMaps,
+			"basis":        list.Basis.String(),
+			"session":      list.Window.Session.String(),
+			"trading_date": list.Window.TradingDateString(),
+			"as_of":        list.Window.End.Unix(),
+			"complete":     list.Window.Complete,
 		},
 	}
 
-	tbk := tbkCache.GetByItemKey("WATCHLISTS/" + timeframe + "/" + watchlistName)
+	tbk := tbkCache.GetByItemKey("WATCHLISTS/" + timeframe + "/" + list.Name)
 	_ = stream.Push(*tbk, payload)
 }
 

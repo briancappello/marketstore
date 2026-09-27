@@ -177,11 +177,15 @@ func TestVolumeTradingDayIsNewYork(t *testing.T) {
 	h.write("NY", "1Min", flat(et(2026, 1, 15, 19, 30, 0), 100, 20)) // 00:30 UTC next day
 	st := Manager.Get("NY")
 	assert.Equal(t, int64(30), st.CumulativeVolume, "same trading day in New York")
+	post := st.SessionStats(calendar.Afterhours)
+	assert.Equal(t, int64(30), post.Volume, "19:30 EST is still this day's afterhours")
 
-	// The next New York day does reset, and carries the close forward.
+	// The next New York day does reset. Both prints were afterhours, so they
+	// become the premarket session baseline, never the traditional one.
 	h.write("NY", "1Min", flat(et(2026, 1, 16, 4, 0, 0), 101, 5))
 	assert.Equal(t, int64(5), st.CumulativeVolume)
-	assert.Equal(t, 100.0, st.PriorClose)
+	assert.Equal(t, 100.0, st.PrevAfterhoursClose)
+	assert.Equal(t, 0.0, st.PriorClose, "no regular close on day 1, so no traditional baseline")
 }
 
 // DollarVolumeRate is dollar volume per second over the configured lookback
