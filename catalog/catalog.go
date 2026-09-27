@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -72,6 +73,12 @@ func load(rootDmap *sync.Map, d *Directory, subPath, rootPath string) error {
 	}
 	for _, dirname := range dirlist {
 		leafPath := path.Clean(subPath + "/" + dirname.Name())
+		// Hidden directories hold server state, never data (symbols and
+		// timeframes cannot start with a dot), e.g. the watchlist plugin's
+		// .watchlist journal directory under the root.
+		if dirname.IsDir() && strings.HasPrefix(dirname.Name(), ".") {
+			continue
+		}
 		if dirname.IsDir() && dirname.Name() != "metadata.db" {
 			itemName := dirname.Name()
 			d.subDirs[itemName] = &Directory{

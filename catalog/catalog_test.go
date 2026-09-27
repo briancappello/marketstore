@@ -319,3 +319,19 @@ func exists(fp string) bool {
 	}
 	return true
 }
+
+// Hidden directories under the root hold server state (e.g. the watchlist
+// plugin's .watchlist journal) and are skipped, not loaded as categories.
+func TestHiddenDirectoriesAreSkipped(t *testing.T) {
+	rootDir := t.TempDir()
+	test.MakeDummyCurrencyDir(rootDir, false, false)
+	hidden := filepath.Join(rootDir, ".watchlist")
+	assert.Nil(t, os.MkdirAll(hidden, 0o755))
+	assert.Nil(t, os.WriteFile(filepath.Join(hidden, "sessionfacts.dirty"), []byte("X\t2026-09-22\n"), 0o600))
+
+	d, err := catalog.NewDirectory(rootDir)
+	assert.Nil(t, err)
+	for _, sub := range d.GetListOfSubDirs() {
+		assert.NotEqual(t, ".watchlist", sub.GetName())
+	}
+}
