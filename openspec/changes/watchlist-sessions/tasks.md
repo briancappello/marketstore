@@ -78,7 +78,7 @@
 
 ## 13. Rollout
 
-- [ ] 13.0 Add `filter: "nasdaq"` to the leader's 1Min→1D `ondiskagg` stage (taichi's config and `mkts.yml.example`), so the live day's 1D bar is regular-session only. Without it, afterhours rewinds and the next day's traditional baseline read an afterhours print as the official close (found end-to-end; see notes). Verify: after a live day, the day's 1D close equals its last regular 1Min close, not its last afterhours print.
+- [x] 13.0 The leader's 1Min→1D `ondiskagg` stage must be regular-session only (`filter: nasdaq`), so a live day's 1D bar never closes on an afterhours print. Taichi's live config already has `filter: nasdaq` and `current_period_only: true`; `mkts.yml.example` did not, and now mirrors taichi. Verified on taichi: the 2026-09-25 1D close of AAPL, MSFT, NVDA, TSLA and SPY equals each one's 15:59 ET regular 1Min close, not its last afterhours print.
 - [ ] 13.1 Run the offline rebuild on taichi for the last 60 trading dates. Verify by checking the row counts per date in `*/1D/SESSIONS`, and by spot-checking AAPL/MSFT/TSLA against 1Min sums.
 - [ ] 13.2 Deploy taichi and then p1. Verify that p1 has the replicated `1D/SESSIONS` rows and made no write attempts (logs). Check live rankings through each session boundary for one trading day.
 - [ ] 13.3 Re-run the baseline from 0.1 and report failures that already existed and new ones as separate counts.

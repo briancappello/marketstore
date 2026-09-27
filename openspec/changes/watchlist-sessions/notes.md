@@ -97,13 +97,14 @@ multiples against the oracle's own 50-day medians.
 
 ### Defects found by the end-to-end run (all fixed and covered by unit tests)
 
-- **The 1D stage must be regular-session only (config, needs rollout).** The leader's
-  1Min→1D `ondiskagg` stage (`mkts.yml.example`, and so taichi) has no `filter: "nasdaq"`.
-  For the live day it builds a 1D bar from *all* 1Min bars, so its close is the last
-  afterhours print (the vendor bar overwrites it later). The baseline loader reads that bar as
-  the official close, so afterhours rewinds compute every move as 0%, and the next day's
-  traditional baseline would be the afterhours print (bug #3 again). With the filter added,
-  the 1D bar is the regular session and every check passes. **Rollout task 13.0 added.**
+- **The 1D stage must be regular-session only.** The e2e environment copied the 1Min→1D
+  stage from `mkts.yml.example`, which has no `filter: "nasdaq"`. There, a live day's 1D bar
+  closed on the last afterhours print, and because the baseline loader reads a 1D close as the
+  official close, afterhours rewinds computed every move as 0% (and the next day's
+  traditional baseline would have been an afterhours print). With the filter, every check
+  passes. **Correction to the first write-up:** taichi's live config already has
+  `filter: nasdaq` (and `current_period_only: true`), and its 2026-09-25 1D closes equal the
+  15:59 regular closes. Only `mkts.yml.example` lacked it and now mirrors taichi (task 13.0).
 - **Nondeterministic order of tied entries.** Strategies sorted map-derived entries with
   `sort.Slice` and no tie-break, so a restart or rewind could order ties differently from the
   live ranking. All 10 sort sites (defaults and marketstore-watchlists) now break ties by

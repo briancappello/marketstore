@@ -118,11 +118,11 @@ At each tick, the ranking loop resolves the live window (D1). An extra tick is s
 - **[Memory]** Per-session accumulators add a few fields per symbol. The per-minute ledger is the same size as today (one trading date).
 - **[Replica role]** A misconfigured replica with no `master_host` would act as a leader and try to write facts. → The same risk exists for all leader-only behavior today. Nothing new.
 
-- **[Live-day 1D bars built from extended hours]** The leader's 1Min→1D aggregation has no market-hours filter, so the live day's 1D bar closes on the last afterhours print until the vendor bar replaces it. Baselines read it as the official close. → The 1D stage gets `filter: "nasdaq"` (task 13.0), which matches the definition that daily bars are regular-session only.
+- **[Live-day 1D bars built from extended hours]** Baselines read a day's 1D close as its official close, so the leader's 1Min→1D aggregation must be regular-session only. Without `filter: "nasdaq"` the live day's 1D bar would close on the last afterhours print. → Taichi's config has the filter; `mkts.yml.example` now does too (task 13.0).
 
 ## Migration Plan
 
-1. Merge and deploy the marketstore changes and the marketstore-watchlists changes together (ABI). `deploy.sh` rebuilds both. Add `filter: "nasdaq"` to the leader's 1Min→1D ondiskagg stage in the same deploy.
+1. Merge and deploy the marketstore changes and the marketstore-watchlists changes together (ABI). `deploy.sh` rebuilds both. The leader's 1Min→1D ondiskagg stage must keep `filter: "nasdaq"` (taichi has it).
 2. With the leader (taichi) stopped, run `marketstore tool session-facts rebuild --from <today-60 trading days> --to <yesterday>` in offline mode. Start the leader. It writes facts from then on.
 3. The replica (p1) receives the facts through replication. Restart p1 on the new build.
 4. Deploy the ta-droid update.
