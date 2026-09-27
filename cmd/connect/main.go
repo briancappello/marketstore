@@ -33,6 +33,10 @@ const (
 	dirDesc           = "filesystem path of the directory containing database files when used in local mode"
 	defaultVarCompOff = false
 	varCompOffDesc    = "disables the compression of variable data (on by default, uses snappy)"
+	configDesc        = "server configuration file to read the database timezone from " +
+		"(default: ./mkts.yml when present)"
+	timezoneDesc = "timezone the database was written with, e.g. America/New_York " +
+		"(overrides --config)"
 )
 
 var (
@@ -53,6 +57,9 @@ var (
 	dir string
 	// turns compression of variable data off.
 	varCompOff bool
+	// configPath and timezone select the timezone bar times are decoded in.
+	configPath string
+	timezone   string
 )
 
 // nolint:gochecknoinits // cobra's standard way to initialize flags
@@ -60,6 +67,8 @@ func init() {
 	Cmd.Flags().StringVarP(&url, urlFlag, "u", defaultURL, urlDesc)
 	Cmd.Flags().StringVarP(&dir, dirFlag, "d", defaultDir, dirDesc)
 	Cmd.Flags().BoolVarP(&varCompOff, "disable_variable_compression", "c", defaultVarCompOff, varCompOffDesc)
+	Cmd.Flags().StringVar(&configPath, "config", "", configDesc)
+	Cmd.Flags().StringVar(&timezone, "timezone", "", timezoneDesc)
 }
 
 // validateArgs returns an error that prevents cmd execution if
@@ -78,6 +87,13 @@ func executeConnect(cmd *cobra.Command, args []string) error {
 		conn session.APIClient
 		err  error
 	)
+
+	// Set the timezone before any bucket is opened: local mode decodes row
+	// indexes with it, and both modes print times in it, so local and remote
+	// sessions started with the same flags show the same timestamps.
+	if err = configureTimezone(configPath, timezone); err != nil {
+		return err
+	}
 
 	// Attempt local mode.
 	if dir != "" {
