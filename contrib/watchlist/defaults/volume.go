@@ -50,7 +50,10 @@ func (s *VolumeUp) Rank(curated map[string]*framework.SymbolState) []framework.R
 	s.entries = entries
 
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].volume > entries[j].volume
+		if entries[i].volume != entries[j].volume {
+			return entries[i].volume > entries[j].volume
+		}
+		return entries[i].symbol < entries[j].symbol // deterministic ties
 	})
 
 	limit := s.limit
@@ -108,7 +111,10 @@ func (s *VolumeDown) Rank(curated map[string]*framework.SymbolState) []framework
 	s.entries = entries
 
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].volume > entries[j].volume
+		if entries[i].volume != entries[j].volume {
+			return entries[i].volume > entries[j].volume
+		}
+		return entries[i].symbol < entries[j].symbol // deterministic ties
 	})
 
 	limit := s.limit

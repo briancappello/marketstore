@@ -52,7 +52,10 @@ func (s *PctChangeUp) Rank(curated map[string]*framework.SymbolState) []framewor
 	s.entries = entries
 
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].pctChange > entries[j].pctChange
+		if entries[i].pctChange != entries[j].pctChange {
+			return entries[i].pctChange > entries[j].pctChange
+		}
+		return entries[i].symbol < entries[j].symbol // deterministic ties
 	})
 
 	limit := s.limit
@@ -110,7 +113,10 @@ func (s *PctChangeDown) Rank(curated map[string]*framework.SymbolState) []framew
 	s.entries = entries
 
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].pctChange < entries[j].pctChange
+		if entries[i].pctChange != entries[j].pctChange {
+			return entries[i].pctChange < entries[j].pctChange
+		}
+		return entries[i].symbol < entries[j].symbol // deterministic ties
 	})
 
 	limit := s.limit
