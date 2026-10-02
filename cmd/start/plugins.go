@@ -2,7 +2,6 @@ package start
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/alpacahq/marketstore/v4/frontend"
 	"github.com/alpacahq/marketstore/v4/plugins"
@@ -96,9 +95,9 @@ func (a *watchlistAdapter) Rankings(q frontend.WatchlistQuery) (frontend.Watchli
 		// the message.
 		switch {
 		case errors.Is(err, bgworker.ErrWatchlistNotFound):
-			return frontend.WatchlistResult{}, fmt.Errorf("%w: %v", frontend.ErrWatchlistNotFound, err)
+			return frontend.WatchlistResult{}, classedError{class: frontend.ErrWatchlistNotFound, err: err}
 		case errors.Is(err, bgworker.ErrWatchlistInvalid):
-			return frontend.WatchlistResult{}, fmt.Errorf("%w: %v", frontend.ErrWatchlistInvalid, err)
+			return frontend.WatchlistResult{}, classedError{class: frontend.ErrWatchlistInvalid, err: err}
 		}
 		return frontend.WatchlistResult{}, err
 	}
@@ -112,6 +111,17 @@ func (a *watchlistAdapter) Rankings(q frontend.WatchlistQuery) (frontend.Watchli
 	}
 	return out, nil
 }
+
+// classedError gives a plugin error the frontend's error class. Its message
+// is the plugin's, which already starts with the same class text; wrapping
+// it with fmt.Errorf would repeat that prefix.
+type classedError struct {
+	class error
+	err   error
+}
+
+func (e classedError) Error() string   { return e.err.Error() }
+func (e classedError) Unwrap() []error { return []error{e.class, e.err} }
 
 // convertBgRanking translates the bgworker's typed ranking entries to the
 // frontend's parallel type. Both shapes are identical by construction; this

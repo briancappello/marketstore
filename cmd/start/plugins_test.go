@@ -52,11 +52,14 @@ func TestWatchlistAdapterRankings(t *testing.T) {
 	src.err = fmt.Errorf("%w: GAP_UP", bgworker.ErrWatchlistNotFound)
 	_, err = a.Rankings(frontend.WatchlistQuery{})
 	assert.ErrorIs(t, err, frontend.ErrWatchlistNotFound)
-	assert.Contains(t, err.Error(), "GAP_UP")
+	// The class prefix appears once, not once per layer.
+	assert.Equal(t, "watchlist not found: GAP_UP", err.Error())
 
 	src.err = fmt.Errorf("%w: not a trading day", bgworker.ErrWatchlistInvalid)
 	_, err = a.Rankings(frontend.WatchlistQuery{})
 	assert.ErrorIs(t, err, frontend.ErrWatchlistInvalid)
+	assert.ErrorIs(t, err, bgworker.ErrWatchlistInvalid)
+	assert.Equal(t, "invalid watchlist request: not a trading day", err.Error())
 
 	src.err = errors.New("disk on fire")
 	_, err = a.Rankings(frontend.WatchlistQuery{})
