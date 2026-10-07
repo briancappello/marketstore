@@ -33,9 +33,26 @@ func normalizeMapKeys(v interface{}) interface{} {
 }
 
 // TriggerConfig is the config block for the watchlist trigger in mkts.yml.
+//
+// It does not select watchlists. The bgworker builds one strategy for every
+// factory the plugin registers (RegisterWatchlist), and per-strategy settings
+// go in the bgworker's strategy_config. See ignoredTriggerKeys.
 type TriggerConfig struct {
-	Curation   CurationConfig    `json:"curation"`
-	Watchlists []WatchlistConfig `json:"watchlists"`
+	Curation CurationConfig `json:"curation"`
+}
+
+// ignoredTriggerKeys returns the keys of a raw trigger config that look
+// meaningful but are not read, so NewTrigger can warn instead of letting them
+// silently do nothing.
+//
+// "watchlists" once listed the watchlists to run, with per-list limits. Nothing
+// ever read it: the set of watchlists is the set the plugin registers.
+func ignoredTriggerKeys(raw map[string]interface{}) []string {
+	var keys []string
+	if _, ok := raw["watchlists"]; ok {
+		keys = append(keys, "watchlists")
+	}
+	return keys
 }
 
 // CurationConfig defines the criteria for symbol curation.
@@ -45,16 +62,6 @@ type CurationConfig struct {
 	MinPrice         float64 `json:"min_price"`
 	MinDollarVolRate float64 `json:"min_dollar_vol_rate"`
 	LookbackSecs     int     `json:"lookback_secs"`
-}
-
-// WatchlistConfig is the per-watchlist config block.
-type WatchlistConfig struct {
-	Name    string                 `json:"name"`
-	SortBy  string                 `json:"sort_by"`
-	SortDir string                 `json:"sort_dir"`
-	Limit   int                    `json:"limit"`
-	Filters map[string]float64     `json:"filters"`
-	Extra   map[string]interface{} `json:"extra"`
 }
 
 // WorkerConfig is the config block for the watchlist bgworker in mkts.yml.

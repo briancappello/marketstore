@@ -26,6 +26,10 @@ func NewTrigger(conf map[string]interface{}) (trigger.Trigger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("watchlist trigger config error: %w", err)
 	}
+	for _, k := range ignoredTriggerKeys(conf) {
+		log.Warn("[watchlist] trigger config key %q is ignored: every watchlist the plugin "+
+			"registers runs; configure strategies in the bgworker's strategy_config", k)
+	}
 	if cfg.Curation.LookbackSecs > 0 {
 		dollarVolLookback.Store(int64(cfg.Curation.LookbackSecs))
 	}

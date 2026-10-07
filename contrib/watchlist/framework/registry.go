@@ -6,8 +6,9 @@ import "sync"
 // in mkts.yml).
 type CuratorFactory func(config map[string]interface{}) (Curator, error)
 
-// WatchlistFactory creates a WatchlistStrategy from a config map (one entry
-// in the "watchlists" array in mkts.yml).
+// WatchlistFactory creates a WatchlistStrategy from a config map: the
+// bgworker's strategy_config entry for the watchlist's name, or nil. Every
+// registered factory is built; there is no list of watchlists to enable.
 type WatchlistFactory func(config map[string]interface{}) (WatchlistStrategy, error)
 
 var (
@@ -26,8 +27,8 @@ func RegisterCurator(factory CuratorFactory) {
 }
 
 // RegisterWatchlist registers a named WatchlistStrategy factory.
-// The name should match the watchlist's Name() return value and is used
-// for lookup when mkts.yml references a watchlist by name.
+// The name should match the watchlist's Name() return value; it is the key
+// of the strategy's entry in the bgworker's strategy_config.
 // Typically called from an init() function in the plugin's package main.
 func RegisterWatchlist(name string, factory WatchlistFactory) {
 	registryMu.Lock()

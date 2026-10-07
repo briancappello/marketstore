@@ -288,11 +288,9 @@ triggers:
         min_price: 0.10
         min_dollar_vol_rate: 1000.0
         lookback_secs: 300
-      watchlists:
-        - name: PCT_CHANGE_UP
-          limit: 100
-        - name: MOMENTUM
-          limit: 50
+      # There is no list of watchlists here: every watchlist the plugin
+      # registers runs. Per-watchlist settings go in the bgworker's
+      # strategy_config, keyed by watchlist name.
 
   # Aggregation chain
   - module: ondiskagg.so
@@ -311,6 +309,9 @@ bgworkers:
       baseline_lookback_days: 60
       median_window: 50
       ranking_interval_ms: 1000
+      strategy_config:
+        RELATIVE_VOLUME:
+          limit: 50
 
   - module: massive.so
     name: Massive
