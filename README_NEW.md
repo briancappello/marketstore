@@ -283,14 +283,8 @@ triggers:
   # Watchlist trigger: sole outbound WS gateway
   - module: watchlist.so
     on: "*/1Min/*"
-    config:
-      curation:
-        min_price: 0.10
-        min_dollar_vol_rate: 1000.0
-        lookback_secs: 300
-      # There is no list of watchlists here: every watchlist the plugin
-      # registers runs. Per-watchlist settings go in the bgworker's
-      # strategy_config, keyed by watchlist name.
+    # No config: watchlists and curation are configured on the watchlist
+    # bgworker below. Every watchlist the plugin registers runs.
 
   # Aggregation chain
   - module: ondiskagg.so
@@ -309,6 +303,14 @@ bgworkers:
       baseline_lookback_days: 60
       median_window: 50
       ranking_interval_ms: 1000
+      # Passed to the registered curator. lookback_secs is the window of
+      # the dollar volume rate (default 300); the other keys are the
+      # curator's own.
+      curation:
+        min_price: 0.10
+        min_dollar_vol_rate: 1000.0
+        lookback_secs: 300
+      # Per-watchlist settings, keyed by watchlist name.
       strategy_config:
         RELATIVE_VOLUME:
           limit: 50

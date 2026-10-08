@@ -37,7 +37,7 @@ and days are New York trading days.
 */
 
 // dollarVolLookback is the DollarVolumeRate window in seconds, from the
-// trigger's curation.lookback_secs.
+// bgworker's curation.lookback_secs.
 var dollarVolLookback atomic.Int64
 
 const defaultDollarVolLookback = 300

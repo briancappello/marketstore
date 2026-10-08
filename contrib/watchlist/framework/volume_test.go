@@ -39,9 +39,8 @@ func newVolHarness(t *testing.T) *volHarness {
 		stream.Shutdown()
 		Manager = nil
 	})
-	trig, err := NewTrigger(map[string]interface{}{
-		"curation": map[string]interface{}{"lookback_secs": 300},
-	})
+	// DollarVolumeRate uses the default 300s lookback.
+	trig, err := NewTrigger(map[string]interface{}{})
 	require.NoError(t, err)
 	return &volHarness{t: t, capture: capture, trig: trig.(*WatchlistTrigger), fires: map[string]int{}}
 }

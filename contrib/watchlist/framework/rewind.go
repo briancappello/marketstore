@@ -171,6 +171,7 @@ const rewindCacheSize = 64
 type rewinder struct {
 	medianWindow   int
 	strategyConfig map[string]map[string]interface{}
+	curationConfig map[string]interface{}
 
 	// runMu lets one rewind compute at a time, bounding the extra read load.
 	runMu sync.Mutex
@@ -204,10 +205,13 @@ type rewindCacheItem struct {
 	lists []RankedList
 }
 
-func newRewinder(medianWindow int, strategyConfig map[string]map[string]interface{}) *rewinder {
+func newRewinder(medianWindow int, strategyConfig map[string]map[string]interface{},
+	curationConfig map[string]interface{},
+) *rewinder {
 	r := &rewinder{
 		medianWindow:   medianWindow,
 		strategyConfig: strategyConfig,
+		curationConfig: curationConfig,
 		flight:         map[string]*rewindCall{},
 		cache:          map[string]*list.Element{},
 		lru:            list.New(),
@@ -221,7 +225,7 @@ func newRewinder(medianWindow int, strategyConfig map[string]map[string]interfac
 // rewinder returns the worker's rewind engine, creating it on first use.
 func (w *WatchlistWorker) rewinder() *rewinder {
 	w.rewindOnce.Do(func() {
-		w.rewind = newRewinder(w.config.MedianWindow, w.config.StrategyConfig)
+		w.rewind = newRewinder(w.config.MedianWindow, w.config.StrategyConfig, w.config.Curation)
 	})
 	return w.rewind
 }
@@ -302,13 +306,11 @@ func (r *rewinder) build() error {
 	if r.built {
 		return nil
 	}
-	if f := GetCuratorFactory(); f != nil {
-		c, err := f(nil)
-		if err != nil {
-			return fmt.Errorf("create rewind curator: %w", err)
-		}
-		r.curator = c
+	c, err := newCurator(r.curationConfig)
+	if err != nil {
+		return fmt.Errorf("create rewind curator: %w", err)
 	}
+	r.curator = c
 	for name, f := range GetAllWatchlistFactories() {
 		var conf map[string]interface{}
 		if r.strategyConfig != nil {

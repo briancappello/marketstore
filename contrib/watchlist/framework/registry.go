@@ -2,8 +2,9 @@ package framework
 
 import "sync"
 
-// CuratorFactory creates a Curator from a config map (the "curation" block
-// in mkts.yml).
+// CuratorFactory creates a Curator from a config map: the watchlist
+// bgworker's "curation" block in mkts.yml (empty, never nil, when unset).
+// Numbers in it are float64.
 type CuratorFactory func(config map[string]interface{}) (Curator, error)
 
 // WatchlistFactory creates a WatchlistStrategy from a config map: the

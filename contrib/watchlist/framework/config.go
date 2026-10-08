@@ -34,34 +34,31 @@ func normalizeMapKeys(v interface{}) interface{} {
 
 // TriggerConfig is the config block for the watchlist trigger in mkts.yml.
 //
-// It does not select watchlists. The bgworker builds one strategy for every
-// factory the plugin registers (RegisterWatchlist), and per-strategy settings
-// go in the bgworker's strategy_config. See ignoredTriggerKeys.
-type TriggerConfig struct {
-	Curation CurationConfig `json:"curation"`
-}
+// The trigger has no settings of its own. Watchlists and curation belong to
+// the bgworker, which owns the curator and the strategies: see WorkerConfig
+// and ignoredTriggerKeys.
+type TriggerConfig struct{}
 
 // ignoredTriggerKeys returns the keys of a raw trigger config that look
-// meaningful but are not read, so NewTrigger can warn instead of letting them
-// silently do nothing.
+// meaningful but are not read, with where each belongs instead, so NewTrigger
+// can warn rather than let them silently do nothing.
 //
 // "watchlists" once listed the watchlists to run, with per-list limits. Nothing
 // ever read it: the set of watchlists is the set the plugin registers.
-func ignoredTriggerKeys(raw map[string]interface{}) []string {
-	var keys []string
+//
+// "curation" set the curator's thresholds, but the curator is built by the
+// bgworker, so only lookback_secs ever took effect. There are also two
+// trigger instances (1Sec and 1Min), which could disagree.
+func ignoredTriggerKeys(raw map[string]interface{}) map[string]string {
+	keys := map[string]string{}
 	if _, ok := raw["watchlists"]; ok {
-		keys = append(keys, "watchlists")
+		keys["watchlists"] = "every watchlist the plugin registers runs; " +
+			"configure strategies in the bgworker's strategy_config"
+	}
+	if _, ok := raw["curation"]; ok {
+		keys["curation"] = "move it to the watchlist bgworker's config"
 	}
 	return keys
-}
-
-// CurationConfig defines the criteria for symbol curation.
-// These are the default fields available to the Curator; custom Curator
-// implementations may use additional fields from the raw config map.
-type CurationConfig struct {
-	MinPrice         float64 `json:"min_price"`
-	MinDollarVolRate float64 `json:"min_dollar_vol_rate"`
-	LookbackSecs     int     `json:"lookback_secs"`
 }
 
 // WorkerConfig is the config block for the watchlist bgworker in mkts.yml.
@@ -80,6 +77,28 @@ type WorkerConfig struct {
 	// bgworker-level config (e.g., database DSNs) to reach strategies that
 	// need it.
 	StrategyConfig map[string]map[string]interface{} `json:"strategy_config"`
+
+	// Curation is passed as-is to the registered curator's factory, for the
+	// live curator and the rewind's own. Its keys are the curator's (the
+	// default liquidity curator reads min_price, min_dollar_vol_rate and
+	// min_median_volume). Numbers arrive as float64 whatever their YAML form.
+	//
+	// The framework itself reads one key, lookback_secs: the window in
+	// seconds of SymbolState.DollarVolumeRate (default 300).
+	Curation map[string]interface{} `json:"curation"`
+}
+
+// lookbackSecs returns curation.lookback_secs, and false when it is not set.
+func (c *WorkerConfig) lookbackSecs() (int64, bool, error) {
+	v, ok := c.Curation["lookback_secs"]
+	if !ok {
+		return 0, false, nil
+	}
+	f, isNum := v.(float64)
+	if !isNum || f <= 0 || f != float64(int64(f)) {
+		return 0, false, fmt.Errorf("curation.lookback_secs must be a positive whole number of seconds, got %v", v)
+	}
+	return int64(f), true, nil
 }
 
 // ParseTriggerConfig parses a raw config map into a TriggerConfig.
@@ -117,6 +136,9 @@ func ParseWorkerConfig(raw map[string]interface{}) (*WorkerConfig, error) {
 	}
 	if cfg.RefreshInterval == "" {
 		cfg.RefreshInterval = "24h"
+	}
+	if _, _, err := cfg.lookbackSecs(); err != nil {
+		return nil, err
 	}
 	return &cfg, nil
 }

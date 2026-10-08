@@ -44,6 +44,11 @@ func NewBgWorker(conf map[string]interface{}) (bgworker.BgWorker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("watchlist worker config error: %w", err)
 	}
+	// Validated by ParseWorkerConfig. Set here, before Run, so no state
+	// computes DollarVolumeRate over the default window first.
+	if secs, ok, _ := cfg.lookbackSecs(); ok {
+		dollarVolLookback.Store(secs)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WatchlistWorker{
@@ -67,15 +72,11 @@ func (w *WatchlistWorker) Run() {
 	w.startSessionFacts()
 
 	// Create the Curator.
-	factory := GetCuratorFactory()
-	if factory != nil {
-		curator, err := factory(nil) // TODO: pass curation config from trigger
-		if err != nil {
-			log.Error("[watchlist] failed to create curator: %v", err)
-		} else {
-			Manager.SetCurator(curator)
-			log.Info("[watchlist] curator registered")
-		}
+	if curator, err := newCurator(w.config.Curation); err != nil {
+		log.Error("[watchlist] failed to create curator: %v", err)
+	} else if curator != nil {
+		Manager.SetCurator(curator)
+		log.Info("[watchlist] curator registered (curation config: %v)", w.config.Curation)
 	} else {
 		log.Warn("[watchlist] no curator registered, all symbols will be curated")
 	}
@@ -235,6 +236,20 @@ func (w *WatchlistWorker) TriggerRanking() {
 	for _, list := range RunRankings(Manager, win) {
 		PushWatchlistUpdate(w.timeframe, list)
 	}
+}
+
+// newCurator builds a curator from the registered factory with the
+// bgworker's curation config. It returns nil, nil when no factory is
+// registered.
+func newCurator(config map[string]interface{}) (Curator, error) {
+	f := GetCuratorFactory()
+	if f == nil {
+		return nil, nil
+	}
+	if config == nil {
+		config = map[string]interface{}{}
+	}
+	return f(config)
 }
 
 // initialCurationPass evaluates every symbol against the curator using the
