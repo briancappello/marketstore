@@ -249,5 +249,11 @@ func (c *Container) GetReplicationBackfillDriver() *backfill.Driver {
 		c.mktsConfig.Replication.BackfillParallelism,
 		c.mktsConfig.Replication.BackfillLookback,
 		c.mktsConfig.Replication.DeepHealInterval, isVar)
+	// Without this state a deep pass reaches back only from the watermarks,
+	// and corrections the master made shortly before a restart can be missed.
+	healPath := filepath.Join(c.GetAbsRootDir(), "replication_deep_heal.json")
+	if err := c.replicationBackfill.TrackDeepHeals(healPath); err != nil {
+		log.Error("replication backfill: %v; deep passes reach back from the watermarks only", err)
+	}
 	return c.replicationBackfill
 }

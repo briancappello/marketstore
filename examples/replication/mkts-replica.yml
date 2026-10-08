@@ -41,9 +41,10 @@ replication:
   # mirror; lower it for faster catch-up at the cost of more query volume.
   reconcile_interval: 5m
 
-  # Trailing window re-pulled on every reconcile, to heal master-side
-  # corrections to recent epochs that were missed while disconnected. Re-pulling
-  # already-held data is harmless (idempotent by epoch for fixed records).
+  # How far a deep pass (once per deep_heal_interval, at startup and after a
+  # stream reconnect) reaches before the last complete deep pass, to heal
+  # master-side corrections missed while disconnected. Only rows that differ
+  # are written.
   backfill_lookback: 24h
 
   # Bounds concurrent per-bucket backfill queries.

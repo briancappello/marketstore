@@ -58,10 +58,17 @@ not the stream. The reconciler runs in three situations:
 1. **Bootstrap** — at startup, backfill every bucket from the beginning.
 2. **Reconnect gap** — after any live-stream disconnect, backfill
    `[watermark, now]` for all buckets before/while resuming the stream.
-3. **Periodic reconcile** — on a slow timer, re-pull
-   `[watermark − backfill_lookback, now]` for all buckets to heal any messages
-   dropped while connected and any master-side corrections to recent epochs
-   missed while disconnected.
+3. **Periodic reconcile** — every `reconcile_interval`, pull
+   `[watermark + 1, now]` for all buckets to heal any messages dropped while
+   connected. Once per `deep_heal_interval`, at startup and after a stream
+   reconnect, a **deep pass** instead reaches back to
+   `min(watermark + 1, start of the last complete deep pass) − backfill_lookback`,
+   to pick up master-side corrections missed while disconnected. Anchoring at
+   the last complete deep pass (persisted in `replication_deep_heal.json`)
+   means a correction made to an epoch less than `backfill_lookback` old is
+   caught by the next complete deep pass however long the replica was down.
+   Measuring from the watermark alone missed corrections that were already
+   nearly a lookback old when the next deep pass ran.
 
 Master-side **corrections** (writes to older epochs) propagate through the live
 stream like any other write — the WAL tap fires on every flush regardless of
@@ -167,10 +174,11 @@ New fields required on the replica for backfill:
 - `master_query_host` — the master's **main** gRPC address (e.g. `host:5995`)
   used by the backfill client. Distinct from `master_host` (the stream port).
 - `reconcile_interval` — periodic reconcile cadence (default e.g. 5m).
-- `backfill_lookback` — trailing window re-pulled on every reconcile (default
-  24h). Heals master-side corrections to epochs within the window that were
-  missed while disconnected or dropped. Re-pulling already-held data is
-  harmless (idempotent by epoch); the cost is only query volume.
+- `backfill_lookback` — how far a deep pass reaches before the last complete
+  deep pass (default 24h). Heals master-side corrections to epochs that were
+  less than this old when made and were missed while disconnected or dropped.
+  Only rows that differ are written; the cost is query volume.
+- `deep_heal_interval` — how often the deep pass runs (default 24h).
 - Optional: `backfill_parallelism`, backfill start bound.
 
 TLS is optional and off by default (LAN, trusted).

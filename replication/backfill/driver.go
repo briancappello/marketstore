@@ -2,6 +2,7 @@ package backfill
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -28,6 +29,84 @@ type Driver struct {
 	mu        sync.Mutex
 	lastHeal  int64 // unix seconds of the last deep pass; 0 = never
 	forceHeal bool  // set by RequestDeepHeal, cleared by the next pass
+
+	// healAnchor is the start time (unix seconds) of the last deep pass that
+	// completed for every bucket; 0 = unknown. A deep pass reaches back to
+	// healAnchor - lookback, not just watermark - lookback. See bucketLookback.
+	// Persisted in healAnchorPath when TrackDeepHeals was called, so a restart
+	// (or an outage) cannot skip the corrections made since that pass.
+	healAnchor     int64
+	healAnchorPath string
+}
+
+// healAnchorFile is the persisted form of Driver.healAnchor.
+type healAnchorFile struct {
+	LastDeepHealStart int64 `json:"last_deep_heal_start"`
+}
+
+// TrackDeepHeals loads the last complete deep pass's start time from path and
+// persists it there after every complete deep pass. A missing file is not an
+// error: the first deep pass then reaches back from the watermarks only.
+func (d *Driver) TrackDeepHeals(path string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.healAnchorPath = path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read deep heal state %s: %w", path, err)
+	}
+	var f healAnchorFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return fmt.Errorf("parse deep heal state %s: %w", path, err)
+	}
+	d.healAnchor = f.LastDeepHealStart
+	return nil
+}
+
+// completeDeepPass records that the deep pass started at start reached every
+// bucket, and persists it when tracking.
+func (d *Driver) completeDeepPass(start int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.healAnchor = start
+	if d.healAnchorPath == "" {
+		return nil
+	}
+	data, err := json.Marshal(healAnchorFile{LastDeepHealStart: start})
+	if err != nil {
+		return err
+	}
+	tmp := d.healAnchorPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write deep heal state: %w", err)
+	}
+	return os.Rename(tmp, d.healAnchorPath)
+}
+
+// bucketLookback returns the lookback for one bucket on a deep pass.
+//
+// A deep pass exists to pick up epochs the master revised after we already
+// held them. With the lookback measured back from the watermark alone, a
+// correction to an epoch that is already about one lookback old by the next
+// deep pass is never seen: taichi's overnight fill of the previous day's first
+// premarket minutes lands roughly 24h after their epochs, so a deep pass some
+// hours later started past them, and they stayed missing on the replica.
+//
+// Measuring back from the start of the previous complete deep pass instead
+// guarantees that any correction made with an epoch within one lookback of
+// when it was made is caught by the next complete deep pass, however long
+// the replica was down in between. It costs at most one heal interval of
+// extra reading per deep pass (the watermark trails "now", so watermark -
+// anchor is about the time since the last deep pass); writes are unchanged,
+// since only rows that differ are written.
+func bucketLookback(lookback time.Duration, watermark, anchor int64) time.Duration {
+	if lookback <= 0 || anchor <= 0 || watermark+1 <= anchor {
+		return lookback
+	}
+	return lookback + time.Duration(watermark+1-anchor)*time.Second
 }
 
 // defaultHealInterval is used when the configured interval is unset. It must
@@ -129,17 +208,25 @@ func (d *Driver) Reconcile(ctx context.Context, now int64) error {
 	if lookback > 0 {
 		pass = "deep"
 	}
+	d.mu.Lock()
+	anchor := d.healAnchor
+	d.mu.Unlock()
 	// Log both ends of the pass. Without the completion line there is no way to
 	// tell a long-running pass from a finished one, which makes write-rate
 	// regressions in here effectively undiagnosable from the outside.
-	log.Info("[replication-backfill] %s pass starting: %d buckets, lookback=%s", pass, len(tbks), lookback)
+	if lookback > 0 && anchor > 0 {
+		log.Info("[replication-backfill] %s pass starting: %d buckets, lookback=%s before the last complete deep pass (%s)",
+			pass, len(tbks), lookback, time.Unix(anchor, 0).UTC().Format(time.RFC3339))
+	} else {
+		log.Info("[replication-backfill] %s pass starting: %d buckets, lookback=%s", pass, len(tbks), lookback)
+	}
 	started := time.Now()
 
 	// stuckRows counts rows written whose epochs we already covered, i.e. work
 	// that will be repeated identically on every future pass. It is the tell for
 	// replica write amplification and cannot be seen from the watermark file or
 	// the data directory size.
-	var wroteRows, stuckRows, stuckBuckets int64
+	var wroteRows, stuckRows, stuckBuckets, failedBuckets int64
 	startBytes := selfWriteBytes()
 	defer func() {
 		const mib = 1 << 20
@@ -186,8 +273,10 @@ func (d *Driver) Reconcile(ctx context.Context, now int64) error {
 			continue
 		}
 		wp.Do(func() {
-			rows, advanced, err := BackfillBucket(ctx, d.api, d.readLocal, d.write, d.wm, tbk, now, lookback, false)
+			lb := bucketLookback(lookback, d.wm.Get(tbk), anchor)
+			rows, advanced, err := BackfillBucket(ctx, d.api, d.readLocal, d.write, d.wm, tbk, now, lb, false)
 			if err != nil {
+				atomic.AddInt64(&failedBuckets, 1)
 				log.Warn("[replication-backfill] %s: %v", tbk, err)
 				return
 			}
@@ -205,6 +294,18 @@ func (d *Driver) Reconcile(ctx context.Context, now int64) error {
 	// advanced bucket (~10k of them, i.e. ~9.7 GB, per pass).
 	if err := d.wm.Flush(); err != nil {
 		return fmt.Errorf("persist watermarks: %w", err)
+	}
+
+	// Only a deep pass that reached every bucket moves the anchor. After a
+	// failed bucket or a cancelled pass the next deep pass keeps measuring
+	// from the older anchor, so the failed range is still covered.
+	if lookback > 0 && ctx.Err() == nil {
+		if failed := atomic.LoadInt64(&failedBuckets); failed > 0 {
+			log.Warn("[replication-backfill] deep pass incomplete (%d buckets failed); "+
+				"the next deep pass reaches back to the previous complete one", failed)
+		} else if err := d.completeDeepPass(now); err != nil {
+			return fmt.Errorf("persist deep heal state: %w", err)
+		}
 	}
 	return nil
 }
