@@ -25,12 +25,11 @@ func TestTriggerConfigLegacyKeysAreIgnored(t *testing.T) {
 	assert.Contains(t, ignored, "curation")
 }
 
-func TestTriggerConfigWithoutLegacyKeysHasNothingIgnored(t *testing.T) {
-	raw := map[string]interface{}{}
-
-	_, err := ParseTriggerConfig(raw)
+// A trigger entry with no config: block at all reaches NewTrigger as nil.
+func TestTriggerWithoutConfigLoads(t *testing.T) {
+	_, err := NewTrigger(nil)
 	require.NoError(t, err)
-	assert.Empty(t, ignoredTriggerKeys(raw))
+	assert.Empty(t, ignoredTriggerKeys(nil))
 }
 
 // stubCurator curates everything.
