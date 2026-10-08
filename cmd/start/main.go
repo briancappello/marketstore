@@ -2,12 +2,14 @@ package start
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime/pprof"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -248,6 +250,23 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	// graceful stop instead of abruptly killing connections.
 	httpServer := &http.Server{Addr: config.ListenURL}
 
+	// shutdownDone is closed once the signal handler has run the graceful
+	// sequence to completion, including the final WAL flush.
+	//
+	// The handshake is required: httpServer.Shutdown() below unblocks
+	// ListenAndServe() as soon as connections have drained, which happens
+	// BEFORE the WAL flush runs. Without waiting, executeStart returns and the
+	// process exits mid-flush, leaving the WAL OPEN/NOTREPLAYED -- byte for
+	// byte the state a crash leaves, with up to one WAL refresh interval of
+	// buffered writes dropped.
+	shutdownDone := make(chan struct{})
+
+	// A second SIGINT/SIGTERM must not re-enter the sequence. Neither
+	// stream.Shutdown() nor WALFile.Shutdown() is idempotent: the latter ends
+	// in finishAndWait(), which closes the trigger-dispatch channel, so a
+	// second call panics on close of a closed channel.
+	var shutdownOnce sync.Once
+
 	// Spawn a goroutine and listen for a signal.
 	const defaultSignalChanLen = 10
 	signalChan := make(chan os.Signal, defaultSignalChanLen)
@@ -256,66 +275,101 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 			switch s {
 			case syscall.SIGUSR1:
 				log.Info("dumping stack traces due to SIGUSR1 request")
-				err := pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
-				if err != nil {
+				if err := pprof.Lookup("goroutine").WriteTo(os.Stdout, 1); err != nil {
+					// Log and keep serving signals. Returning here would
+					// abandon the loop, leaving SIGTERM unhandled for the rest
+					// of the process lifetime -- i.e. no graceful shutdown at
+					// all, for nothing worse than a failed debug dump.
 					log.Error("failed to write goroutine pprof: %v", err)
-					return
 				}
 			case syscall.SIGINT, syscall.SIGTERM:
-				log.Info("initiating graceful shutdown due to '%v' request", s)
+				shutdownOnce.Do(func() {
+					// Unblocks executeStart even if a step below panics.
+					defer close(shutdownDone)
 
-				// Stop accepting new gRPC requests and drain in-flight RPCs.
-				c.GetGRPCServer().GracefulStop()
-				log.Info("shutdown grpc API server...")
+					log.Info("initiating graceful shutdown due to '%v' request", s)
 
-				// Cancel the global context (used by replication client, etc.).
-				globalCancel()
+					// Stop accepting new gRPC requests and drain in-flight RPCs.
+					c.GetGRPCServer().GracefulStop()
+					log.Info("shutdown grpc API server...")
 
-				if c.GetGRPCReplicationServer() != nil {
-					c.GetGRPCReplicationServer().Stop() // gRPC stream connection doesn't close by GracefulStop()
-				}
-				log.Info("shutdown grpc Replication server...")
+					// Cancel the global context (used by replication client, etc.).
+					globalCancel()
 
-				// Disable query access so new requests are rejected.
-				atomic.StoreUint32(&frontend.Queryable, uint32(0))
+					if c.GetGRPCReplicationServer() != nil {
+						c.GetGRPCReplicationServer().Stop() // gRPC stream connection doesn't close by GracefulStop()
+					}
+					log.Info("shutdown grpc Replication server...")
 
-				// Signal all background workers to stop. Workers with
-				// outbound connections (e.g. massive websocket clients)
-				// will cancel their contexts and close connections.
-				log.Info("shutting down background workers...")
-				ShutdownBgWorkers(bgWorkers)
+					// Disable query access so new requests are rejected.
+					atomic.StoreUint32(&frontend.Queryable, uint32(0))
 
-				// Close all inbound websocket subscriber connections with
-				// a proper close frame so clients see code 1000 (normal).
-				log.Info("shutting down websocket stream subscribers...")
-				stream.Shutdown()
+					// Signal all background workers to stop. Workers with
+					// outbound connections (e.g. massive websocket clients)
+					// will cancel their contexts and close connections.
+					log.Info("shutting down background workers...")
+					ShutdownBgWorkers(bgWorkers)
 
-				// Shut down the HTTP server. This stops the listener and
-				// waits up to StopGracePeriod for active connections
-				// (including upgraded websockets) to drain.
-				log.Info("shutting down HTTP server (grace period: %v)...", config.StopGracePeriod)
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), config.StopGracePeriod)
-				if err := httpServer.Shutdown(shutdownCtx); err != nil {
-					log.Error("HTTP server shutdown error: %v", err)
-				}
-				shutdownCancel()
+					// Close all inbound websocket subscriber connections with
+					// a proper close frame so clients see code 1000 (normal).
+					log.Info("shutting down websocket stream subscribers...")
+					stream.Shutdown()
 
-				// Final WAL flush.
-				c.GetInitWALFile().Shutdown()
-				log.Info("exiting...")
+					// Shut down the HTTP server. This stops the listener and
+					// waits up to StopGracePeriod for active connections
+					// (including upgraded websockets) to drain.
+					log.Info("shutting down HTTP server (grace period: %v)...", config.StopGracePeriod)
+					shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), config.StopGracePeriod)
+					if err := httpServer.Shutdown(shutdownCtx); err != nil {
+						log.Error("HTTP server shutdown error: %v", err)
+					}
+					shutdownCancel()
 
-				// httpServer.Shutdown causes ListenAndServe to return
-				// http.ErrServerClosed, which we handle below.
+					// Final WAL flush. httpServer.Shutdown() has already
+					// unblocked ListenAndServe(), so executeStart is now
+					// parked on shutdownDone waiting for this to finish.
+					log.Info("flushing WAL and draining triggers...")
+					c.GetInitWALFile().Shutdown()
+					log.Info("exiting...")
+				})
 			}
 		}
 	}()
 	signal.Notify(signalChan, syscall.SIGUSR1, syscall.SIGINT, syscall.SIGTERM)
 
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("failed to start server - error: %w", err)
+	// ListenAndServe returns http.ErrServerClosed only as a result of
+	// httpServer.Shutdown(), i.e. only when the signal handler above is
+	// partway through the graceful sequence. Any other error is a genuine
+	// serve failure and no shutdown is in flight to wait for.
+	serveErr := httpServer.ListenAndServe()
+	if !errors.Is(serveErr, http.ErrServerClosed) {
+		if serveErr != nil {
+			return fmt.Errorf("failed to start server - error: %w", serveErr)
+		}
+		return nil
 	}
 
-	return nil
+	// Park until the signal handler has finished the final WAL flush.
+	//
+	// The wait is deliberately unbounded. Cutting it short would reintroduce
+	// the truncated flush this handshake exists to prevent, and the process
+	// supervisor (systemd TimeoutStopSec, Kubernetes
+	// terminationGracePeriodSeconds) already owns the decision to escalate to
+	// SIGKILL. The ticker exists so that a wedged flush -- finishAndWait()
+	// spins until the write and trigger channels drain, with no timeout of its
+	// own -- shows up in the log instead of looking like a silent hang.
+	const shutdownStallWarnInterval = 10 * time.Second
+	stallWarn := time.NewTicker(shutdownStallWarnInterval)
+	defer stallWarn.Stop()
+	for {
+		select {
+		case <-shutdownDone:
+			return nil
+		case <-stallWarn.C:
+			log.Warn("still waiting for graceful shutdown to complete (final WAL flush); " +
+				"send SIGUSR1 to dump goroutines if this persists")
+		}
+	}
 }
 
 // replacePort replaces the port in a host:port address string, preserving the host.
