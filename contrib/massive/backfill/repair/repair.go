@@ -136,8 +136,8 @@ type Store interface {
 	FirstBar(ctx context.Context, tbk string) (t time.Time, ok bool, err error)
 }
 
-// Fetcher fetches raw bars of one symbol and writes them to the bucket.
-// It returns the number of bars written.
+// Fetcher fetches raw bars of one symbol and rewrites the stored bars that
+// differ from them. It returns the number of bars written.
 type Fetcher func(ctx context.Context, symbol, timeframe string, from, to time.Time) (int, error)
 
 // Options filter the repair.
@@ -160,8 +160,10 @@ type Failure struct {
 
 // Report is the outcome of a repair.
 type Report struct {
-	Ranges   []Range
+	Ranges []Range
+	// Repaired counts the ranges that were checked without error.
 	Repaired int
+	// Bars counts the bars rewritten.
 	Bars     int
 	Failures []Failure
 }

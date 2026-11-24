@@ -26,7 +26,6 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/repair"
-	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/rest"
 	"github.com/alpacahq/marketstore/v4/utils"
 )
 
@@ -51,6 +50,8 @@ func run() int {
 		parallelism = flag.Int("parallelism", runtime.NumCPU(), "symbols repaired at once")
 		batchSize   = flag.Int("batchSize", defaultBatchSize, "API pagination limit")
 		dryRun      = flag.Bool("dry-run", false, "print the affected buckets and ranges, write nothing")
+		tolerance   = flag.Float64("tolerance", repair.DefaultTolerance,
+			"rewrite a stored bar only if a price differs from the raw bar by more than this fraction")
 	)
 	flag.Parse()
 
@@ -132,14 +133,15 @@ func run() int {
 	defer writer.Close()
 
 	started := time.Now()
-	fetch := func(ctx context.Context, symbol, timeframe string, from, to time.Time) (int, error) {
-		return rest.BarsWindow(ctx, httpClient, symbol, timeframe, from, to, *batchSize, writer)
+	rw := &repair.Rewriter{
+		Client: httpClient, Store: repair.NewGRPCStore(conn), Writer: writer,
+		Limit: *batchSize, Tolerance: *tolerance,
 	}
-	rep := repair.Run(ctx, ranges, fetch, *parallelism)
+	rep := repair.Run(ctx, ranges, rw.Fetch, *parallelism)
 	for _, f := range rep.Failures {
 		fmt.Fprintf(os.Stderr, "FAILED %s: %v\n", f.Range.TBK, f.Err)
 	}
-	fmt.Printf("repaired %d/%d buckets, %d bars written, %d failed, in %s\n",
+	fmt.Printf("checked %d/%d buckets, %d adjusted bars rewritten, %d failed, in %s\n",
 		rep.Repaired, len(ranges), rep.Bars, len(rep.Failures), time.Since(started).Round(time.Second))
 	if len(rep.Failures) > 0 || ctx.Err() != nil {
 		return 1

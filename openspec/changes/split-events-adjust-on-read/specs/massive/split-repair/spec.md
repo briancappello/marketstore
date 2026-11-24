@@ -22,19 +22,23 @@ With `--dry-run`, the command SHALL print each affected symbol, bucket and range
 - **WHEN** the repair command runs with `--dry-run`
 - **THEN** it prints the affected buckets and ranges, and no bucket on the server changes
 
-### Requirement: Repair rewrites affected ranges with raw bars
-Without `--dry-run`, the command SHALL fetch unadjusted bars for each affected range from Massive and write them to the same bucket, through the server's write API. For one symbol, it SHALL write timeframes from finest to coarsest. Running the command again SHALL give the same stored data. The command SHALL accept a symbol filter and SHALL take the same connection and parallelism options as the REST backfill command.
+### Requirement: Repair rewrites only bars that differ from raw
+Without `--dry-run`, the command SHALL fetch unadjusted bars for each affected range from Massive and compare them with the stored bars. It SHALL rewrite a stored bar, through the server's write API, only if one of its prices differs from the raw bar by more than a tolerance (`-tolerance`, default 1%). It SHALL leave every other stored bar unchanged, and SHALL NOT add bars that are not stored. This keeps bars from higher-precision sources: Massive REST rounds prices to 4 decimals, while flat files keep 5 to 6. For one symbol, it SHALL process timeframes from finest to coarsest. Running the command again SHALL write nothing. The command SHALL accept a symbol filter and a timeframe filter.
 
 #### Scenario: Adjusted history replaced
 - **WHEN** `NVDA/1D/OHLCV` holds the adjusted close 12.10 for 2024-06-07, and the repair runs
 - **THEN** `NVDA/1D/OHLCV` holds the raw close (about 121.0) for 2024-06-07, and `adjust('split')` returns about 12.10 again
 
+#### Scenario: Higher-precision raw bar kept
+- **WHEN** a stored raw bar has the close 0.700001 (from a flat file) and Massive REST returns 0.7 for the same bar
+- **THEN** the stored bar is not rewritten
+
 #### Scenario: Re-run
 - **WHEN** the repair command runs twice in a row with no new splits in between
-- **THEN** the second run writes the same values, and the stored data does not change
+- **THEN** the second run rewrites no bars
 
 ### Requirement: Repair reports its outcome
-The command SHALL report the number of buckets repaired, bars written and failures. It SHALL exit non-zero if any bucket failed. A failed bucket SHALL NOT stop the other buckets.
+The command SHALL report the number of buckets checked, bars rewritten and failures. It SHALL exit non-zero if any bucket failed. A failed bucket SHALL NOT stop the other buckets.
 
 #### Scenario: One symbol fails
 - **WHEN** fetching bars for one affected symbol fails after retries

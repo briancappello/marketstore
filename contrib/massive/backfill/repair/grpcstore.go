@@ -60,3 +60,38 @@ func (s *GRPCStore) FirstBar(ctx context.Context, tbk string) (time.Time, bool, 
 	}
 	return time.Time{}, false, nil
 }
+
+// Bars returns the bucket's OHLCV bars that start within [from, to], keyed
+// by epoch second.
+func (s *GRPCStore) Bars(ctx context.Context, tbk string, from, to time.Time) (map[int64]Bar, error) {
+	resp, err := s.cli.Query(ctx, &pb.MultiQueryRequest{
+		Requests: []*pb.QueryRequest{{Destination: tbk, EpochStart: from.Unix(), EpochEnd: to.Unix()}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query %s: %w", tbk, err)
+	}
+	out := map[int64]Bar{}
+	for _, r := range resp.GetResponses() {
+		if r.GetResult() == nil {
+			continue
+		}
+		csm, err := frontend.ToNumpyMultiDataSet(r.GetResult()).ToColumnSeriesMap()
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", tbk, err)
+		}
+		for _, cs := range csm {
+			ep := cs.GetEpoch()
+			o, _ := cs.GetColumn("Open").([]float32)
+			h, _ := cs.GetColumn("High").([]float32)
+			l, _ := cs.GetColumn("Low").([]float32)
+			c, _ := cs.GetColumn("Close").([]float32)
+			if len(o) != len(ep) || len(h) != len(ep) || len(l) != len(ep) || len(c) != len(ep) {
+				return nil, fmt.Errorf("%s: unexpected OHLCV layout %v", tbk, cs.GetColumnNames())
+			}
+			for i, e := range ep {
+				out[e] = Bar{Open: float64(o[i]), High: float64(h[i]), Low: float64(l[i]), Close: float64(c[i])}
+			}
+		}
+	}
+	return out, nil
+}

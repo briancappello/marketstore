@@ -19,7 +19,6 @@ import (
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/repair"
-	"github.com/alpacahq/marketstore/v4/contrib/massive/backfill/rest"
 	"github.com/alpacahq/marketstore/v4/corpaction"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/frontend"
@@ -59,7 +58,7 @@ func writeDailyBars(t *testing.T, sym string, bars map[time.Time]float32) {
 	var ep []int64
 	var p []float32
 	var v []int64
-	for _, d := range []time.Time{et(2024, 6, 6, 0, 0), et(2024, 6, 7, 0, 0), et(2024, 6, 10, 0, 0)} {
+	for _, d := range []time.Time{et(2024, 6, 5, 0, 0), et(2024, 6, 6, 0, 0), et(2024, 6, 7, 0, 0), et(2024, 6, 10, 0, 0)} {
 		if c, ok := bars[d]; ok {
 			ep, p, v = append(ep, d.Unix()), append(p, c), append(v, 1000)
 		}
@@ -79,7 +78,10 @@ func writeDailyBars(t *testing.T, sym string, bars map[time.Time]float32) {
 // fakeMassive serves NVDA's 2024-06-10 1:10 split and raw daily bars.
 func fakeMassive(t *testing.T) {
 	t.Helper()
-	raw := map[time.Time]float64{et(2024, 6, 6, 0, 0): 120.0, et(2024, 6, 7, 0, 0): 121.0, et(2024, 6, 10, 0, 0): 121.8}
+	raw := map[time.Time]float64{
+		et(2024, 6, 5, 0, 0): 118.1, // stored with more decimals than REST returns
+		et(2024, 6, 6, 0, 0): 120.0, et(2024, 6, 7, 0, 0): 121.0, et(2024, 6, 10, 0, 0): 121.8,
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/stocks/v1/splits":
@@ -132,6 +134,7 @@ func TestRepairEndToEnd(t *testing.T) {
 	fakeMassive(t)
 	// Adjusted history before the split, raw bar after it.
 	writeDailyBars(t, "NVDA", map[time.Time]float32{
+		et(2024, 6, 5, 0, 0): 118.10004,
 		et(2024, 6, 6, 0, 0): 12.0, et(2024, 6, 7, 0, 0): 12.1, et(2024, 6, 10, 0, 0): 121.8,
 	})
 	split, err := corpaction.NewSplit("NVDA", corpaction.EffectiveDate(2024, 6, 10), 1, 10, corpaction.ForwardSplit)
@@ -152,24 +155,25 @@ func TestRepairEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ranges, 1, "dry run plan: only NVDA/1D/OHLCV")
 	assert.Equal(t, "NVDA/1D/OHLCV", ranges[0].TBK)
-	assert.Equal(t, []float32{12.0, 12.1, 121.8}, queryCloses(t, addr), "planning writes nothing")
+	assert.Equal(t, []float32{118.10004, 12.0, 12.1, 121.8}, queryCloses(t, addr), "planning writes nothing")
 
 	writer, err := backfill.NewRPCWriter(ctx, addr)
 	require.NoError(t, err)
 	defer writer.Close()
-	fetch := func(ctx context.Context, sym, tf string, from, to time.Time) (int, error) {
-		return rest.BarsWindow(ctx, http.DefaultClient, sym, tf, from, to, 50000, writer)
-	}
+	rw := &repair.Rewriter{Client: http.DefaultClient, Store: store, Writer: writer, Limit: 50000,
+		Tolerance: repair.DefaultTolerance}
 
-	rep := repair.Run(ctx, ranges, fetch, 2)
+	rep := repair.Run(ctx, ranges, rw.Fetch, 2)
 	require.Empty(t, rep.Failures)
 	assert.Equal(t, 1, rep.Repaired)
-	assert.Equal(t, 2, rep.Bars, "only the two pre-split bars are rewritten")
-	assert.Equal(t, []float32{120.0, 121.0, 121.8}, queryCloses(t, addr))
-	assert.Equal(t, []float32{12.0, 12.1, 121.8}, queryCloses(t, addr, "adjust('split')"))
+	assert.Equal(t, 2, rep.Bars, "only the two adjusted bars are rewritten")
+	assert.Equal(t, []float32{118.10004, 120.0, 121.0, 121.8}, queryCloses(t, addr),
+		"the higher-precision raw bar is kept")
+	assert.Equal(t, []float32{11.81, 12.0, 12.1, 121.8}, queryCloses(t, addr, "adjust('split')"))
 
 	// Running again changes nothing.
-	rep = repair.Run(ctx, ranges, fetch, 2)
+	rep = repair.Run(ctx, ranges, rw.Fetch, 2)
 	require.Empty(t, rep.Failures)
-	assert.Equal(t, []float32{120.0, 121.0, 121.8}, queryCloses(t, addr))
+	assert.Equal(t, 0, rep.Bars)
+	assert.Equal(t, []float32{118.10004, 120.0, 121.0, 121.8}, queryCloses(t, addr))
 }

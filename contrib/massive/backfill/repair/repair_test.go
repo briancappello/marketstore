@@ -135,3 +135,25 @@ func TestRunReportsFailuresAndContinues(t *testing.T) {
 	assert.Equal(t, "BAD", rep.Failures[0].Range.Symbol)
 	assert.Equal(t, []string{"1Min", "1D"}, aOrder, "a symbol's ranges run in order")
 }
+
+func TestDifferingKeepsRoundingDifferences(t *testing.T) {
+	raw := []api.AggResult{
+		{EpochMilliseconds: 1000, Open: 0.7, High: 0.7, Low: 0.7, Close: 0.7},               // REST, 4 decimals
+		{EpochMilliseconds: 2000, Open: 1208.88, High: 1216.9, Low: 1180.2, Close: 1208.88}, // raw
+		{EpochMilliseconds: 3000, Open: 0.0199, High: 0.0199, Low: 0.0199, Close: 0.0199},   // raw
+		{EpochMilliseconds: 4000, Open: 10, High: 10, Low: 10, Close: 10},                   // not stored
+		{EpochMilliseconds: 5000, Open: 10, High: 10.5, Low: 10, Close: 10},                 // only High off
+	}
+	stored := map[int64]repair.Bar{
+		1: {Open: 0.700001, High: 0.700001, Low: 0.700001, Close: 0.700001}, // flat file, 6 decimals
+		2: {Open: 120.888, High: 121.69, Low: 118.02, Close: 120.888},       // adjusted 1:10
+		3: {Open: 1.592, High: 1.592, Low: 1.592, Close: 1.592},             // adjusted 80:1 reverse
+		5: {Open: 10, High: 10, Low: 10, Close: 10},
+	}
+	got := repair.Differing(stored, raw, repair.DefaultTolerance)
+	var epochs []int64
+	for _, r := range got {
+		epochs = append(epochs, r.EpochMilliseconds/1000)
+	}
+	assert.Equal(t, []int64{2, 3, 5}, epochs)
+}

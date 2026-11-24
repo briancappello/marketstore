@@ -335,20 +335,11 @@ func BarsWindow(
 	limit int,
 	writer backfill.Writer,
 ) (int, error) {
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	default:
-	}
-	apiTimespan, multiplier, err := timeframeToAPI(timeframe)
-	if err != nil {
-		return 0, fmt.Errorf("invalid timeframe %q: %w", timeframe, err)
-	}
-	resp, err := api.GetAggregatesWindow(client, symbol, apiTimespan, multiplier, from, to, limit)
+	results, err := FetchBarsWindow(ctx, client, symbol, timeframe, from, to, limit)
 	if err != nil {
 		return 0, err
 	}
-	model, n := barsModel(symbol, timeframe, resp.Results, from, to)
+	model, n := barsModel(symbol, timeframe, results, from, to)
 	if n == 0 {
 		return 0, nil
 	}
@@ -356,6 +347,38 @@ func BarsWindow(
 		return 0, fmt.Errorf("write %s bars for %s: %w", timeframe, symbol, err)
 	}
 	return n, nil
+}
+
+// FetchBarsWindow fetches the unadjusted bars of one symbol that start within
+// [from, to], using exact millisecond bounds, without writing them.
+func FetchBarsWindow(
+	ctx context.Context,
+	client *http.Client,
+	symbol, timeframe string,
+	from, to time.Time,
+	limit int,
+) ([]api.AggResult, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	apiTimespan, multiplier, err := timeframeToAPI(timeframe)
+	if err != nil {
+		return nil, fmt.Errorf("invalid timeframe %q: %w", timeframe, err)
+	}
+	resp, err := api.GetAggregatesWindow(client, symbol, apiTimespan, multiplier, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := resp.Results[:0]
+	for _, r := range resp.Results {
+		ts := time.Unix(r.EpochMilliseconds/millisToSec, 0)
+		if !ts.Before(from) && !ts.After(to) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 // fetchAndWriteBars is a helper for single-chunk bar fetches (no parallelization).
