@@ -58,7 +58,25 @@ rotation. `TestConcurrentInlineFlushes` fails 5/5 without the fix; the same
   rounded ones, and replaced flat-file 1D volumes. Restored from the backup
   through gRPC, then reran the fixed repair (it matches split factors):
   53 bars (1Min/1D) + 2 (1Sec) rewritten, and a re-run rewrites 0.
-  Afterwards the store differs from the backup only in those bars.
+- Correction: that first restore compared floats with a 1e-6 relative
+  tolerance. Most 4-decimal rounding falls below it (6.771796 -> 6.7718), so
+  44,389 rounded rows in 756 buckets stayed rounded, and the diff checks had
+  the same blind spot. Found while comparing p1 with taichi. Restored again
+  with bit-exact comparison. A bit-exact diff now shows only VSEE's 53 bars
+  differing from the backup in history.
+
+## p1 replica sync, 2026-11-23
+
+p1 (replica, started via ./start.sh) shut down cleanly at 18:41, before the
+taichi repair, and had no SPLITS buckets. Replication would not have healed
+the old bars, because the deep pass reaches only 24h back and the replica
+rejects outside writes. With p1 stopped, `rsync --checksum` pulled from taichi
+every content-different file in the 2,860 repaired buckets, VSEE/1Sec and all
+3,088 */1D/SPLITS buckets: 2,766 bar files, with p1's old copies in
+`~/marketstore-backups/p1-pre-split-sync-20261123`. p1 was rebuilt at
+5f012889 and restarted. After its WAL replay, a second checksum pass shows 0
+content differences, and live queries (VSEE raw/adjusted, NVDA adjusted,
+SPLITS) match taichi.
 - Left in place: 13,738 historical bars that the first version added where
   the store had a gap (mostly OTC periods flat files omit). They are raw
   Massive bars, and MarketStore cannot delete single rows.
