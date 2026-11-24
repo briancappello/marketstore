@@ -31,7 +31,10 @@ func ReadStatus(filePtr *os.File,
 ) (fileStatus FileStatusEnum, replayStatus ReplayStateEnum, owningInstanceID int64, err error) {
 	var buffer [10]byte
 	buf, _, err := Read(filePtr, buffer[:])
-	return FileStatusEnum(buf[0]), ReplayStateEnum(buf[1]), io.ToInt64(buf[2:]), err
+	if err != nil {
+		return Invalid, Invalid2, 0, fmt.Errorf("read WAL status header: %w", err)
+	}
+	return FileStatusEnum(buf[0]), ReplayStateEnum(buf[1]), io.ToInt64(buf[2:]), nil
 }
 
 // Read reads the WAL file from current position.

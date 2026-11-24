@@ -46,7 +46,14 @@ type WALFileType struct {
 	// channel it guards belongs to this WALFileType, so a global flag would
 	// let one instance's writer make another instance's RequestFlush block
 	// forever on a channel nothing reads.
-	hasWriter    atomic.Bool
+	hasWriter atomic.Bool
+	// fileMu serializes every use of FilePtr by flushes, checkpoints and
+	// rotation. Flushes run inline from any writer goroutine whenever no
+	// SyncWAL loop is draining flushChannel: before the loop has started,
+	// after it has begun shutting down, or without BackgroundSync. Each flush
+	// seeks to the status header and back, so two unserialized flushes read
+	// each other's appends as the header ("Inactive WALFile", short reads).
+	fileMu       sync.Mutex
 	walWaitGroup *sync.WaitGroup
 	tpd          *TriggerPluginDispatcher
 	txnPipe      *TransactionPipe
@@ -237,6 +244,8 @@ func (wf *WALFileType) FlushToWAL() (err error) {
 	if wf.txnPipe == nil {
 		return nil
 	}
+	wf.fileMu.Lock()
+	defer wf.fileMu.Unlock()
 
 	WTCount := len(wf.txnPipe.writeChannel)
 	if WTCount == 0 {
@@ -267,6 +276,7 @@ func (wf *WALFileType) FlushToWAL() (err error) {
 	return wf.FlushCommandsToWAL(writeCommands)
 }
 
+// FlushCommandsToWAL writes one transaction group. The caller must hold fileMu.
 func (wf *WALFileType) FlushCommandsToWAL(writeCommands []*wal.WriteCommand) (err error) {
 	defer wf.tpd.DispatchRecords()
 
@@ -471,10 +481,11 @@ func (wf *WALFileType) writePrimary(keyPath string, writes []wal.OffsetIndexBuff
 }
 
 // CreateCheckpoint flushes all primary dirty pages to disk, and
-// so closes out the previous WAL state to end.  Note, this is
-// not goroutine-safe with FlushToWAL and caller should make sure
-// it is streamlined.
+// so closes out the previous WAL state to end. It is serialized with
+// FlushToWAL by fileMu.
 func (wf *WALFileType) CreateCheckpoint() error {
+	wf.fileMu.Lock()
+	defer wf.fileMu.Unlock()
 	if wf.lastCommittedTGID == 0 {
 		return nil
 	}
@@ -766,13 +777,7 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 				}
 				primaryFlushCounter++
 				if primaryFlushCounter%walRotateInterval == 0 {
-					log.Info("Truncating WAL file...")
-					if err := wf.FilePtr.Truncate(0); err != nil {
-						log.Error("failed to truncate wal file", zap.Error(err))
-					}
-					if err := wf.WriteStatus(wal.OPEN, wal.NOTREPLAYED); err != nil {
-						log.Error("failed to write NOT_REPLAYED status to wal", zap.Error(err))
-					}
+					wf.rotate()
 					primaryFlushCounter = 0
 				}
 			}
@@ -791,6 +796,19 @@ func (wf *WALFileType) SyncWAL(walRefresh, primaryRefresh time.Duration, walRota
 			wf.walWaitGroup.Done()
 			return
 		}
+	}
+}
+
+// rotate truncates the WAL file and writes a fresh header.
+func (wf *WALFileType) rotate() {
+	wf.fileMu.Lock()
+	defer wf.fileMu.Unlock()
+	log.Info("Truncating WAL file...")
+	if err := wf.FilePtr.Truncate(0); err != nil {
+		log.Error("failed to truncate wal file", zap.Error(err))
+	}
+	if err := wf.WriteStatus(wal.OPEN, wal.NOTREPLAYED); err != nil {
+		log.Error("failed to write NOT_REPLAYED status to wal", zap.Error(err))
 	}
 }
 
