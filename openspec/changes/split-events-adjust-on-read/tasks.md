@@ -44,5 +44,5 @@
 
 ## 6. End-to-end verification
 
-- [ ] 6.1 Run a local server with `mkts.example.yml`, using a test API key or an `httptest` Massive stub. Check that `NVDA/1D/SPLITS` exists after startup, that an unadjusted 1D query for 2024-06-07 returns the raw close and that `adjust('split')` returns it divided by 10. Record the commands and outputs in `notes.md`.
+- [x] 6.1 Run a local server with `mkts.example.yml`, using a test API key or an `httptest` Massive stub. Check that `NVDA/1D/SPLITS` exists after startup, that an unadjusted 1D query for 2024-06-07 returns the raw close and that `adjust('split')` returns it divided by 10. Record the commands and outputs in `notes.md`.
 - [x] 6.2 Re-run the 0.1 test set and report the new failures and the pre-existing failures as separate counts. Run `go vet` on the touched packages. Run `openspec validate split-events-adjust-on-read --strict`.
