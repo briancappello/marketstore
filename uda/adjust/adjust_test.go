@@ -1,13 +1,15 @@
 package adjust_test
 
 import (
-	"math"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/alpacahq/marketstore/v4/contrib/ice/enum"
+	"github.com/alpacahq/marketstore/v4/catalog"
+	"github.com/alpacahq/marketstore/v4/corpaction"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/internal/di"
 	"github.com/alpacahq/marketstore/v4/uda/adjust"
@@ -16,346 +18,239 @@ import (
 	"github.com/alpacahq/marketstore/v4/utils/io"
 )
 
-func setup(t *testing.T) (metadata *executor.InstanceMetadata) {
+var ny, _ = time.LoadLocation("America/New_York")
+
+func et(y int, m time.Month, d, hh, mm int) time.Time { return time.Date(y, m, d, hh, mm, 0, 0, ny) }
+
+func startInstance(t *testing.T) *catalog.Directory {
 	t.Helper()
+	prev := utils.InstanceConfig
+	t.Cleanup(func() { utils.InstanceConfig = prev })
+	adjust.ResetCache()
+	t.Cleanup(adjust.ResetCache)
 
-	rootDir := t.TempDir()
-	cfg := utils.NewDefaultConfig(rootDir)
+	cfg := utils.NewDefaultConfig(t.TempDir())
 	cfg.BackgroundSync = false
-	cfg.WALBypass = true
+	cfg.Timezone = ny
+	utils.InstanceConfig = *cfg
 	c := di.NewContainer(cfg)
-	metadata = executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
-	adjust.RounderNum = math.Pow(10, 3)
-
-	return metadata
+	walFile, err := executor.NewWALFile(c.GetAbsRootDir(), c.GetInitInstanceID(),
+		&executor.NopReplicationSender{}, false, &sync.WaitGroup{},
+		executor.StartNewTriggerPluginDispatcherWithWorkers(nil, 1), executor.NewTransactionPipe())
+	require.NoError(t, err)
+	executor.NewInstanceSetup(c.GetCatalogDir(), walFile)
+	return c.GetCatalogDir()
 }
 
-type price struct {
-	epoch int64
-	price float64
+func writeSplit(t *testing.T, sym string, y int, m time.Month, d int, from, to float64) {
+	t.Helper()
+	st := corpaction.ForwardSplit
+	if to < from {
+		st = corpaction.ReverseSplit
+	}
+	e, err := corpaction.NewSplit(sym, corpaction.EffectiveDate(y, m, d), from, to, st)
+	require.NoError(t, err)
+	csm, err := corpaction.EncodeCSM([]corpaction.Event{e})
+	require.NoError(t, err)
+	require.NoError(t, executor.WriteCSM(csm, false))
 }
 
-type AdjustTestCase struct {
-	description string
-	rateChanges []adjust.RateChange
-	input       []price
-	expected    []price
+// run applies adjust(args...) to cs as if it were a query result of tbk,
+// with the clock fixed at now.
+func run(t *testing.T, dir *catalog.Directory, tbk string, now time.Time, cs *io.ColumnSeries,
+	args ...interface{},
+) *io.ColumnSeries {
+	t.Helper()
+	proto := &adjust.Adjust{CatalogDir: dir, Now: func() time.Time { return now }}
+	am := functions.NewArgumentMap(proto.GetRequiredArgs(), proto.GetOptionalArgs()...)
+	agg, err := proto.New(am, args...)
+	require.NoError(t, err)
+	out, err := agg.Accum(*io.NewTimeBucketKeyFromString(tbk), am, cs)
+	require.NoError(t, err)
+	return out
 }
 
-func toColumnSeries(inputData []price) *io.ColumnSeries {
-	epoch := make([]int64, len(inputData))
-	price := make([]float64, len(inputData))
-	for i := range inputData {
-		epoch[i] = inputData[i].epoch
-		price[i] = inputData[i].price
+func ohlcv(epochs []time.Time, closes []float32, vols []int64) *io.ColumnSeries {
+	ep := make([]int64, len(epochs))
+	for i, e := range epochs {
+		ep[i] = e.Unix()
 	}
 	cs := io.NewColumnSeries()
-	cs.AddColumn("Epoch", epoch)
-	cs.AddColumn("Price", price)
+	cs.AddColumn("Epoch", ep)
+	cs.AddColumn("Open", append([]float32(nil), closes...))
+	cs.AddColumn("High", append([]float32(nil), closes...))
+	cs.AddColumn("Low", append([]float32(nil), closes...))
+	cs.AddColumn("Close", closes)
+	cs.AddColumn("Volume", vols)
 	return cs
 }
 
-func evalCase(t *testing.T, testCase *AdjustTestCase) {
-	t.Helper()
+var today = et(2026, 11, 23, 12, 0)
 
-	symbol := "AAPL"
-	tbkStr := symbol + "/1Min/OHLCV"
-	tbk := io.NewTimeBucketKeyFromString(tbkStr)
-	adj := adjust.Adjust{}
-	adjust.RounderNum = math.Pow(10, 3)
-	am := functions.NewArgumentMap(adj.GetRequiredArgs(), adj.GetOptionalArgs()...)
+func TestNoEventsReturnsInputUnchanged(t *testing.T) {
+	dir := startInstance(t)
+	in := ohlcv([]time.Time{et(2024, 6, 7, 9, 30)}, []float32{400}, []int64{1000})
+	out := run(t, dir, "MSFT/1Min/OHLCV", today, in, "split")
+	assert.Equal(t, []float32{400}, out.GetColumn("Close"))
+	assert.Equal(t, []int64{1000}, out.GetColumn("Volume"))
+}
 
-	adjust.RateChangeCacheMap[adjust.CacheKey{symbol, true, true}] = adjust.RateChangeCache{
-		Changes:   testCase.rateChanges,
-		Access:    0,
-		CreatedAt: time.Now(),
+func TestICEBucketIsIgnored(t *testing.T) {
+	dir := startInstance(t)
+	ice := io.NewColumnSeries()
+	ice.AddColumn("Epoch", []int64{et(2020, 8, 31, 0, 0).Unix()})
+	ice.AddColumn("Rate", []float64{4})
+	csm := io.NewColumnSeriesMap()
+	csm.AddColumnSeries(*io.NewTimeBucketKeyFromString("AAPL/1D/ACTIONS"), ice)
+	require.NoError(t, executor.WriteCSM(csm, true))
+
+	in := ohlcv([]time.Time{et(2020, 8, 28, 9, 30)}, []float32{400}, []int64{1000})
+	out := run(t, dir, "AAPL/1Min/OHLCV", today, in, "split")
+	assert.Equal(t, []float32{400}, out.GetColumn("Close"))
+}
+
+func TestFloat32OHLCVAndIntVolume(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "AAPL", 2020, 8, 31, 1, 4)
+	in := ohlcv([]time.Time{et(2020, 8, 28, 0, 0)}, []float32{400}, []int64{1000})
+	out := run(t, dir, "AAPL/1D/OHLCV", today, in, "split")
+	for _, c := range []string{"Open", "High", "Low", "Close"} {
+		assert.Equal(t, []float32{100}, out.GetColumn(c), c)
 	}
+	assert.Equal(t, []int64{4000}, out.GetColumn("Volume"))
+	assert.Equal(t, []string{"Epoch", "Open", "High", "Low", "Close", "Volume"}, out.GetColumnNames())
+}
 
-	inputCs := toColumnSeries(testCase.input)
+func TestTradeSizeIsMultiplied(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "AAPL", 2020, 8, 31, 1, 4)
+	cs := io.NewColumnSeries()
+	cs.AddColumn("Epoch", []int64{et(2020, 8, 28, 10, 0).Unix()})
+	cs.AddColumn("Nanoseconds", []int32{123})
+	cs.AddColumn("Price", []float64{400})
+	cs.AddColumn("Size", []float64{10})
+	cs.AddColumn("Exchange", []byte{7})
+	cs.AddColumn("Cond1", []byte{3})
+	out := run(t, dir, "AAPL/1Sec/TRADE", today, cs, "split")
+	assert.Equal(t, []float64{100}, out.GetColumn("Price"))
+	assert.Equal(t, []float64{40}, out.GetColumn("Size"))
+	assert.Equal(t, []byte{7}, out.GetColumn("Exchange"))
+	assert.Equal(t, []byte{3}, out.GetColumn("Cond1"))
+	assert.Equal(t, []int32{123}, out.GetColumn("Nanoseconds"))
+}
 
-	aggfunc, _ := adj.New(am)
-	outputCs, _ := aggfunc.Accum(*tbk, am, inputCs)
+func TestQuoteUint64Sizes(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "AAPL", 2020, 8, 31, 1, 4)
+	cs := io.NewColumnSeries()
+	cs.AddColumn("Epoch", []int64{et(2020, 8, 28, 10, 0).Unix()})
+	cs.AddColumn("BidPrice", []float64{399})
+	cs.AddColumn("AskPrice", []float64{401})
+	cs.AddColumn("BidSize", []uint64{100})
+	cs.AddColumn("AskSize", []uint64{200})
+	out := run(t, dir, "AAPL/1Sec/QUOTE", today, cs, "split")
+	assert.Equal(t, []float64{99.75}, out.GetColumn("BidPrice"))
+	assert.Equal(t, []float64{100.25}, out.GetColumn("AskPrice"))
+	assert.Equal(t, []uint64{400}, out.GetColumn("BidSize"))
+	assert.Equal(t, []uint64{800}, out.GetColumn("AskSize"))
+}
 
-	outEpochs, ok := outputCs.GetColumn("Epoch").([]int64)
-	assert.True(t, ok)
-	outPrice, ok := outputCs.GetColumn("Price").([]float64)
-	assert.True(t, ok)
+func TestReverseSplitRoundsSizes(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "XYZ", 2024, 3, 1, 10, 1)
+	in := ohlcv([]time.Time{et(2024, 2, 29, 0, 0)}, []float32{1.5}, []int64{1005})
+	out := run(t, dir, "XYZ/1D/OHLCV", today, in, "split")
+	assert.Equal(t, []int64{101}, out.GetColumn("Volume"))
+	assert.Equal(t, []float32{15}, out.GetColumn("Close"))
+}
 
-	assert.Equal(t, inputCs.Len(), outputCs.Len())
+func TestBoundaryAtExecutionDate(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "NVDA", 2024, 6, 10, 1, 4)
+	in := ohlcv([]time.Time{et(2024, 6, 7, 19, 59), et(2024, 6, 10, 4, 0)},
+		[]float32{400, 100}, []int64{10, 40})
+	out := run(t, dir, "NVDA/1Min/OHLCV", today, in, "split")
+	assert.Equal(t, []float32{100, 100}, out.GetColumn("Close"))
+	assert.Equal(t, []int64{40, 40}, out.GetColumn("Volume"))
+}
 
-	for i := range outPrice {
-		assert.Equal(t, outEpochs[i], testCase.expected[i].epoch, testCase.description,
-			time.Unix(outEpochs[i], 0).
-				Format("2006-01-02"))
-		assert.Equal(t, outPrice[i], testCase.expected[i].price, testCase.description,
-			time.Unix(outEpochs[i], 0).
-				Format("2006-01-02"))
+func TestTwoSplitsCompound(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "XYZ", 2020, 1, 2, 1, 2)
+	writeSplit(t, "XYZ", 2022, 1, 3, 1, 3)
+	in := ohlcv([]time.Time{et(2019, 6, 3, 0, 0), et(2021, 6, 1, 0, 0), et(2022, 6, 1, 0, 0)},
+		[]float32{60, 30, 10}, []int64{1, 1, 1})
+	out := run(t, dir, "XYZ/1D/OHLCV", today, in, "split")
+	assert.Equal(t, []float32{10, 10, 10}, out.GetColumn("Close"))
+	assert.Equal(t, []int64{6, 3, 1}, out.GetColumn("Volume"))
+}
+
+func TestAnnouncedSplitDoesNotApplyYet(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "XYZ", 2026, 12, 1, 1, 2)
+	in := ohlcv([]time.Time{et(2026, 11, 20, 0, 0)}, []float32{50}, []int64{100})
+	out := run(t, dir, "XYZ/1D/OHLCV", today, in, "split")
+	assert.Equal(t, []float32{50}, out.GetColumn("Close"))
+
+	// Once the effective date has started, it applies.
+	out = run(t, dir, "XYZ/1D/OHLCV", et(2026, 12, 1, 4, 0),
+		ohlcv([]time.Time{et(2026, 11, 20, 0, 0)}, []float32{50}, []int64{100}), "split")
+	assert.Equal(t, []float32{25}, out.GetColumn("Close"))
+}
+
+func TestArgumentsSelectKinds(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "AAPL", 2020, 8, 31, 1, 4)
+	mk := func() *io.ColumnSeries {
+		return ohlcv([]time.Time{et(2020, 8, 28, 0, 0)}, []float32{400}, []int64{1000})
 	}
+	assert.Equal(t, []float32{400}, run(t, dir, "AAPL/1D/OHLCV", today, mk(), "dividend").GetColumn("Close"))
+	assert.Equal(t, []float32{100}, run(t, dir, "AAPL/1D/OHLCV", today, mk(), "SPLIT").GetColumn("Close"))
+	assert.Equal(t, []float32{100}, run(t, dir, "AAPL/1D/OHLCV", today, mk()).GetColumn("Close"))
+	assert.Equal(t, []float32{100},
+		run(t, dir, "AAPL/1D/OHLCV", today, mk(), []string{"split", "dividend"}).GetColumn("Close"))
 }
 
-var testDifferentEvents = []AdjustTestCase{
-	{
-		description: `Price should be adjusted prior to the StockSplit event. Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2020, time.January, 4), enum.StockSplit, 2},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 1.0},
-			{unixDate(2020, time.January, 2), 1.0},
-			{unixDate(2020, time.January, 3), 1.0},
-			{unixDate(2020, time.January, 4), 0.5},
-			{unixDate(2020, time.January, 5), 0.5},
-			{unixDate(2020, time.January, 6), 0.5},
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 0.5},
-			{unixDate(2020, time.January, 2), 0.5},
-			{unixDate(2020, time.January, 3), 0.5},
-			{unixDate(2020, time.January, 4), 0.5},
-			{unixDate(2020, time.January, 5), 0.5},
-			{unixDate(2020, time.January, 6), 0.5},
-		},
-	},
-	{
-		description: `Price should be adjusted prior to a ReverseStockSplit event. Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2020, time.January, 4), enum.ReverseStockSplit, 0.5},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 1.0},
-			{unixDate(2020, time.January, 2), 1.0},
-			{unixDate(2020, time.January, 3), 1.0},
-			{unixDate(2020, time.January, 4), 2.0},
-			{unixDate(2020, time.January, 5), 2.0},
-			{unixDate(2020, time.January, 6), 2.0},
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 2.0},
-			{unixDate(2020, time.January, 2), 2.0},
-			{unixDate(2020, time.January, 3), 2.0},
-			{unixDate(2020, time.January, 4), 2.0},
-			{unixDate(2020, time.January, 5), 2.0},
-			{unixDate(2020, time.January, 6), 2.0},
-		},
-	},
-	{
-		description: `Price should be adjusted prior to a ReverseStockSplit event. Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2020, time.January, 4), enum.StockDividend, 1.1},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 1.0},
-			{unixDate(2020, time.January, 2), 1.0},
-			{unixDate(2020, time.January, 3), 1.0},
-			{unixDate(2020, time.January, 4), 0.909},
-			{unixDate(2020, time.January, 5), 0.909},
-			{unixDate(2020, time.January, 6), 0.909},
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 0.909},
-			{unixDate(2020, time.January, 2), 0.909},
-			{unixDate(2020, time.January, 3), 0.909},
-			{unixDate(2020, time.January, 4), 0.909},
-			{unixDate(2020, time.January, 5), 0.909},
-			{unixDate(2020, time.January, 6), 0.909},
-		},
-	},
+func TestFloatPricesRoundToFourDecimals(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "XYZ", 2024, 3, 1, 1, 3)
+	cs := io.NewColumnSeries()
+	cs.AddColumn("Epoch", []int64{et(2024, 2, 29, 10, 0).Unix()})
+	cs.AddColumn("Price", []float64{10})
+	out := run(t, dir, "XYZ/1Sec/TRADE", today, cs, "split")
+	assert.Equal(t, []float64{3.3333}, out.GetColumn("Price"))
 }
 
-func TestCase1(t *testing.T) {
-	setup(t)
+func TestNewEventVisibleAfterTTL(t *testing.T) {
+	dir := startInstance(t)
+	prevTTL := adjust.CacheTTL
+	adjust.CacheTTL = 50 * time.Millisecond
+	t.Cleanup(func() { adjust.CacheTTL = prevTTL })
 
-	for _, testCase := range testDifferentEvents {
-		testCase := testCase
-		evalCase(t, &testCase)
+	mk := func() *io.ColumnSeries {
+		return ohlcv([]time.Time{et(2020, 8, 28, 0, 0)}, []float32{400}, []int64{1000})
 	}
+	assert.Equal(t, []float32{400}, run(t, dir, "AAPL/1D/OHLCV", today, mk(), "split").GetColumn("Close"))
+	writeSplit(t, "AAPL", 2020, 8, 31, 1, 4)
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, []float32{100}, run(t, dir, "AAPL/1D/OHLCV", today, mk(), "split").GetColumn("Close"))
 }
 
-var testDifferentDates = []AdjustTestCase{
-	{
-		description: `When an event occurs after the requested price range, every price should be adjusted. ` +
-			`Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2020, time.January, 20), enum.StockSplit, 2},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 1.0},
-			{unixDate(2020, time.January, 2), 1.0},
-			{unixDate(2020, time.January, 3), 1.0},
-			{unixDate(2020, time.January, 4), 1.0},
-			{unixDate(2020, time.January, 5), 1.0},
-			{unixDate(2020, time.January, 6), 1.0},
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 0.5},
-			{unixDate(2020, time.January, 2), 0.5},
-			{unixDate(2020, time.January, 3), 0.5},
-			{unixDate(2020, time.January, 4), 0.5},
-			{unixDate(2020, time.January, 5), 0.5},
-			{unixDate(2020, time.January, 6), 0.5},
-		},
-	},
-
-	{
-		description: `When an event occurs before the price range, no price should be adjusted. Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2019, time.December, 20), enum.StockSplit, 2},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 1.0},
-			{unixDate(2020, time.January, 2), 1.0},
-			{unixDate(2020, time.January, 3), 1.0},
-			{unixDate(2020, time.January, 4), 1.0},
-			{unixDate(2020, time.January, 5), 1.0},
-			{unixDate(2020, time.January, 6), 1.0},
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 1.0},
-			{unixDate(2020, time.January, 2), 1.0},
-			{unixDate(2020, time.January, 3), 1.0},
-			{unixDate(2020, time.January, 4), 1.0},
-			{unixDate(2020, time.January, 5), 1.0},
-			{unixDate(2020, time.January, 6), 1.0},
-		},
-	},
-}
-
-func TestCase2(t *testing.T) {
-	setup(t)
-
-	for _, testCase := range testDifferentDates {
-		testCase := testCase
-		evalCase(t, &testCase)
+func TestConcurrentAccum(t *testing.T) {
+	dir := startInstance(t)
+	writeSplit(t, "AAPL", 2020, 8, 31, 1, 4)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				adjust.ResetCache()
+				out := run(t, dir, "AAPL/1D/OHLCV", today,
+					ohlcv([]time.Time{et(2020, 8, 28, 0, 0)}, []float32{400}, []int64{1000}), "split")
+				assert.Equal(t, []float32{100}, out.GetColumn("Close"))
+			}
+		}()
 	}
-}
-
-var testMultipleEventsOnDifferentDates = []AdjustTestCase{
-	{
-		description: `Multiple events, one happened after the price range. Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2020, time.January, 3), enum.StockSplit, 2},
-			{1, unixDate(2020, time.January, 6), enum.StockSplit, 2},
-			{1, unixDate(2020, time.January, 20), enum.StockSplit, 2},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 8.0},
-			{unixDate(2020, time.January, 2), 8.0},
-			{unixDate(2020, time.January, 3), 4.0},
-			{unixDate(2020, time.January, 4), 4.0},
-			{unixDate(2020, time.January, 5), 4.0},
-			{unixDate(2020, time.January, 6), 2.0},
-			{unixDate(2020, time.January, 7), 2.0},
-			{unixDate(2020, time.January, 8), 2.0},
-			// on Jan 20 another Split brings down the price to 1.0
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 1.0},
-			{unixDate(2020, time.January, 2), 1.0},
-			{unixDate(2020, time.January, 3), 1.0},
-			{unixDate(2020, time.January, 4), 1.0},
-			{unixDate(2020, time.January, 5), 1.0},
-			{unixDate(2020, time.January, 6), 1.0},
-			{unixDate(2020, time.January, 7), 1.0},
-			{unixDate(2020, time.January, 8), 1.0},
-		},
-	},
-
-	{
-		description: `Multiple events, two happen after the price range. Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2020, time.January, 3), enum.StockSplit, 2},
-			{1, unixDate(2020, time.January, 6), enum.StockSplit, 2},
-			{1, unixDate(2020, time.January, 20), enum.StockSplit, 2},
-			{1, unixDate(2020, time.February, 10), enum.StockSplit, 2},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 8.0},
-			{unixDate(2020, time.January, 2), 8.0},
-			{unixDate(2020, time.January, 3), 4.0},
-			{unixDate(2020, time.January, 4), 4.0},
-			{unixDate(2020, time.January, 5), 4.0},
-			{unixDate(2020, time.January, 6), 2.0},
-			{unixDate(2020, time.January, 7), 2.0},
-			{unixDate(2020, time.January, 8), 2.0},
-			// on Jan 20 another Split brings down the price to 1.0
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 0.5},
-			{unixDate(2020, time.January, 2), 0.5},
-			{unixDate(2020, time.January, 3), 0.5},
-			{unixDate(2020, time.January, 4), 0.5},
-			{unixDate(2020, time.January, 5), 0.5},
-			{unixDate(2020, time.January, 6), 0.5},
-			{unixDate(2020, time.January, 7), 0.5},
-			{unixDate(2020, time.January, 8), 0.5},
-		},
-	},
-
-	{
-		description: `Multiple events, one happens after, one before and one in the duration of the price range. ` +
-			`Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2019, time.December, 30), enum.StockSplit, 2},
-			{1, unixDate(2020, time.January, 6), enum.StockSplit, 2},
-			{1, unixDate(2020, time.January, 20), enum.StockSplit, 2},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 4.0},
-			{unixDate(2020, time.January, 2), 4.0},
-			{unixDate(2020, time.January, 3), 4.0},
-			{unixDate(2020, time.January, 4), 4.0},
-			{unixDate(2020, time.January, 5), 4.0},
-			{unixDate(2020, time.January, 6), 2.0},
-			{unixDate(2020, time.January, 7), 2.0},
-			{unixDate(2020, time.January, 8), 2.0},
-			// on Jan 20 another Split brings down the price to 1.0
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 1.0},
-			{unixDate(2020, time.January, 2), 1.0},
-			{unixDate(2020, time.January, 3), 1.0},
-			{unixDate(2020, time.January, 4), 1.0},
-			{unixDate(2020, time.January, 5), 1.0},
-			{unixDate(2020, time.January, 6), 1.0},
-			{unixDate(2020, time.January, 7), 1.0},
-			{unixDate(2020, time.January, 8), 1.0},
-		},
-	},
-
-	{
-		description: `Multiple events, split and reverse split testing. Assertion error at %s`,
-		rateChanges: []adjust.RateChange{
-			{1, unixDate(2020, time.January, 3), enum.StockSplit, 2},
-			{1, unixDate(2020, time.January, 6), enum.ReverseStockSplit, 0.2},
-		},
-		input: []price{
-			{unixDate(2020, time.January, 1), 4.0},
-			{unixDate(2020, time.January, 2), 4.0},
-			{unixDate(2020, time.January, 3), 2.0},
-			{unixDate(2020, time.January, 4), 2.0},
-			{unixDate(2020, time.January, 5), 2.0},
-			{unixDate(2020, time.January, 6), 10.0},
-			{unixDate(2020, time.January, 7), 10.0},
-			{unixDate(2020, time.January, 8), 10.0},
-		},
-		expected: []price{
-			{unixDate(2020, time.January, 1), 10.0},
-			{unixDate(2020, time.January, 2), 10.0},
-			{unixDate(2020, time.January, 3), 10.0},
-			{unixDate(2020, time.January, 4), 10.0},
-			{unixDate(2020, time.January, 5), 10.0},
-			{unixDate(2020, time.January, 6), 10.0},
-			{unixDate(2020, time.January, 7), 10.0},
-			{unixDate(2020, time.January, 8), 10.0},
-		},
-	},
-}
-
-func TestMultipleEventsOnDifferentDates(t *testing.T) {
-	setup(t)
-
-	for _, testCase := range testMultipleEventsOnDifferentDates {
-		testCase := testCase
-		evalCase(t, &testCase)
-	}
+	wg.Wait()
 }

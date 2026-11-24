@@ -15,6 +15,9 @@ import (
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
+// CARows, Actions and RateChange read the ICE reorg <SYMBOL>/1D/ACTIONS
+// bucket. They are kept only for the contrib/ice "reorg show" command:
+// Adjust reads events from the corpaction store instead.
 type CARows struct {
 	EntryDates               []int64
 	TextNumbers              []int64
@@ -64,48 +67,6 @@ type Actions struct {
 	Symbol string
 	Tbk    *io.TimeBucketKey
 	Rows   *CARows
-}
-
-type RateChangeCache struct {
-	Changes   []RateChange
-	Access    int64
-	CreatedAt time.Time
-}
-
-type CacheKey struct {
-	Symbol    string
-	Splits    bool
-	Dividends bool
-}
-
-type RateChangeGetter func(string, bool, bool) []RateChange
-
-const CacheLifetime = 24 * time.Hour
-
-var RateChangeCacheMap = map[CacheKey]RateChangeCache{}
-
-func GetRateChanges(symbol string, includeSplits, includeDividends bool,
-	catalogDir *catalog.Directory,
-) []RateChange {
-	key := CacheKey{Symbol: symbol, Splits: includeSplits, Dividends: includeDividends}
-	rateCache, present := RateChangeCacheMap[key]
-	if present && time.Since(rateCache.CreatedAt) > CacheLifetime {
-		present = false
-	}
-	if !present {
-		ca := NewCorporateActions(symbol)
-		err := ca.Load(catalogDir)
-		if err != nil {
-			log.Error("load corporate actions from catalog: %v", err)
-		}
-		rateCache = RateChangeCache{
-			Changes:   ca.RateChangeEvents(includeSplits, includeDividends),
-			Access:    0,
-			CreatedAt: time.Now(),
-		}
-		RateChangeCacheMap[key] = rateCache
-	}
-	return rateCache.Changes
 }
 
 func NewCorporateActions(symbol string) *Actions {

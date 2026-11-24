@@ -3,9 +3,12 @@ package adjust
 import (
 	"errors"
 	"math"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/alpacahq/marketstore/v4/catalog"
+	"github.com/alpacahq/marketstore/v4/corpaction"
 	"github.com/alpacahq/marketstore/v4/uda"
 	"github.com/alpacahq/marketstore/v4/utils/functions"
 	"github.com/alpacahq/marketstore/v4/utils/io"
@@ -25,20 +28,35 @@ var (
 
 	initArgs []io.DataShape
 
+	// RounderNum sets the precision of adjusted float prices (4 decimals).
 	RounderNum = math.Pow(decimal, roundToDecimals)
 )
 
+// priceColumns are divided by the cumulative price factor.
+var priceColumns = map[string]struct{}{
+	"Open": {}, "High": {}, "Low": {}, "Close": {}, "VWAP": {},
+	"Price": {}, "BidPrice": {}, "AskPrice": {},
+}
+
+// sizeColumns are multiplied by the cumulative volume factor.
+var sizeColumns = map[string]struct{}{
+	"Volume": {}, "Size": {}, "BidSize": {}, "AskSize": {},
+}
+
+// Adjust puts unadjusted stored data on the current share basis, using the
+// events in the corporate-event store (see package corpaction).
 type Adjust struct {
 	uda.AggInterface
 
 	AdjustDividend bool
 	AdjustSplit    bool
 
-	epochs         []int64
-	output         map[io.DataShape]interface{}
-	skippedColumns map[string]interface{}
-
 	CatalogDir *catalog.Directory
+	// Now returns the query time. Events effective after it are ignored.
+	// Defaults to time.Now.
+	Now func() time.Time
+
+	output *io.ColumnSeries
 }
 
 func (adj *Adjust) GetRequiredArgs() []io.DataShape {
@@ -55,9 +73,8 @@ func (adj *Adjust) GetInitArgs() []io.DataShape {
 
 func (adj *Adjust) New(_ *functions.ArgumentMap, args ...interface{}) (uda.AggInterface, error) {
 	rn := &Adjust{
-		output:         map[io.DataShape]interface{}{},
-		skippedColumns: map[string]interface{}{},
-		CatalogDir:     adj.CatalogDir,
+		CatalogDir: adj.CatalogDir,
+		Now:        adj.Now,
 	}
 
 	err := rn.init(args...)
@@ -77,23 +94,32 @@ func (adj *Adjust) init(args ...interface{}) error {
 		switch _arg := arg.(type) {
 		case []string:
 			for _, p := range _arg {
-				switch strings.ToLower(p) {
-				case calcSplit:
-					adj.AdjustSplit = true
-				case calcDividend:
-					adj.AdjustDividend = true
-				}
+				adj.setArg(p)
 			}
 		case string:
-			switch strings.ToLower(_arg) {
-			case calcSplit:
-				adj.AdjustSplit = true
-			case calcDividend:
-				adj.AdjustDividend = true
-			}
+			adj.setArg(_arg)
 		}
 	}
 	return nil
+}
+
+func (adj *Adjust) setArg(p string) {
+	switch strings.ToLower(p) {
+	case calcSplit:
+		adj.AdjustSplit = true
+	case calcDividend:
+		adj.AdjustDividend = true
+	}
+}
+
+// kinds returns the event kinds the arguments select. Dividends have no
+// event kind yet, so they select nothing.
+func (adj *Adjust) kinds() []corpaction.Kind {
+	var kinds []corpaction.Kind
+	if adj.AdjustSplit {
+		kinds = append(kinds, corpaction.Splits)
+	}
+	return kinds
 }
 
 func (adj *Adjust) Accum(tbk io.TimeBucketKey, _ *functions.ArgumentMap, cols io.ColumnInterface,
@@ -102,64 +128,134 @@ func (adj *Adjust) Accum(tbk io.TimeBucketKey, _ *functions.ArgumentMap, cols io
 	if !ok {
 		return nil, errors.New("adjust: Input data must have an Epoch column")
 	}
-	adj.epochs = epochs
-	for _, ds := range cols.GetDataShapes() {
-		if ds.Name == "Epoch" || ds.Name == "Nanoseconds" {
-			continue
-		}
-		// hacky, hacky...
-		if ds.Type == io.FLOAT64 || ds.Name == "Volume" {
-			adj.output[ds] = cols.GetColumn(ds.Name)
-		} else {
-			adj.skippedColumns[ds.Name] = cols.GetColumn(ds.Name)
-		}
-	}
 
-	symbol := tbk.GetItemInCategory("Symbol")
-	rateChanges := GetRateChanges(symbol, adj.AdjustSplit, adj.AdjustDividend,
-		adj.CatalogDir,
-	)
-	if len(rateChanges) == 0 {
-		return adj.Output(), nil
-	}
+	shapes := cols.GetDataShapes()
+	out := io.NewColumnSeries()
+	adj.output = out
 
-	// always append a default no-op rate change to help avoid handling edge cases below
-	rateChanges = append(rateChanges, RateChange{Epoch: math.MaxInt64, Rate: 1, Textnumber: 0, Type: 0})
-
-	// start with the default no-op rate 1.0
-	ri := len(rateChanges) - 1
-	rate := rateChanges[ri].Rate
-
-	// start from the end of the buffer and iterate backwards toward the beginning,
-	// applying rate changes as they occur in time
-	for i := len(epochs) - 1; i >= 0; i-- {
-		// check if the current epoch is before the next rate change action, and if it is, then accumulate their rate changes
-		// 	- mainly for taking care of events occurred after the last epoch in the current dataseet
-		// 	- also handles a highly unlikely case when multiple rate change events occurs
-		//	    at the same time (e.g. split and dividend)
-		for ; ri > 0 && (epochs[i] < rateChanges[ri-1].Epoch); ri-- {
-			rate *= rateChanges[ri-1].Rate
-		}
-		for _, col := range adj.output {
-			switch c := col.(type) {
-			case []float64:
-				c[i] = math.Round((c[i]/rate)*RounderNum) / RounderNum
-			case []int64:
-				c[i] = int64(float64(c[i]) * rate)
-			}
+	var events []corpaction.Event
+	if kinds := adj.kinds(); len(kinds) > 0 && adj.CatalogDir != nil {
+		var err error
+		events, err = cachedEvents(adj.CatalogDir, tbk.GetItemInCategory("Symbol"), kinds)
+		if err != nil {
+			return nil, err
 		}
 	}
-	return adj.Output(), nil
+	events = effectiveBy(events, adj.now())
+
+	if len(events) == 0 {
+		for _, ds := range shapes {
+			out.AddColumn(ds.Name, cols.GetColumn(ds.Name))
+		}
+		return out, nil
+	}
+
+	priceFactors, volumeFactors := rowFactors(epochs, events)
+	for _, ds := range shapes {
+		col := cols.GetColumn(ds.Name)
+		if _, isPrice := priceColumns[ds.Name]; isPrice {
+			col = scale(col, priceFactors, true)
+		} else if _, isSize := sizeColumns[ds.Name]; isSize {
+			col = scale(col, volumeFactors, false)
+		}
+		out.AddColumn(ds.Name, col)
+	}
+	return out, nil
 }
 
 func (adj *Adjust) Output() *io.ColumnSeries {
-	cs := io.NewColumnSeries()
-	cs.AddColumn("Epoch", adj.epochs)
-	for ds, column := range adj.output {
-		cs.AddColumn(ds.Name, column)
+	if adj.output == nil {
+		return io.NewColumnSeries()
 	}
-	for name, column := range adj.skippedColumns {
-		cs.AddColumn(name, column)
+	return adj.output
+}
+
+func (adj *Adjust) now() time.Time {
+	if adj.Now != nil {
+		return adj.Now()
 	}
-	return cs
+	return time.Now()
+}
+
+// effectiveBy drops events that have not taken effect at now.
+func effectiveBy(events []corpaction.Event, now time.Time) []corpaction.Event {
+	out := make([]corpaction.Event, 0, len(events))
+	for _, e := range events {
+		if !e.Effective.After(now) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// rowFactors returns, for each row, the product of the factors of every event
+// that takes effect after the row's timestamp. events must be sorted by
+// effective time.
+func rowFactors(epochs []int64, events []corpaction.Event) (price, volume []float64) {
+	n := len(events)
+	pSuffix := make([]float64, n+1)
+	vSuffix := make([]float64, n+1)
+	pSuffix[n], vSuffix[n] = 1, 1
+	for i := n - 1; i >= 0; i-- {
+		pSuffix[i] = pSuffix[i+1] * events[i].PriceFactor
+		vSuffix[i] = vSuffix[i+1] * events[i].VolumeFactor
+	}
+	price = make([]float64, len(epochs))
+	volume = make([]float64, len(epochs))
+	for r, epoch := range epochs {
+		idx := sort.Search(n, func(i int) bool { return events[i].Effective.Unix() > epoch })
+		price[r], volume[r] = pSuffix[idx], vSuffix[idx]
+	}
+	return price, volume
+}
+
+// scale returns a copy of col with each value divided (prices) or multiplied
+// (sizes) by its row factor. Unsupported column types are returned unchanged.
+func scale(col interface{}, factors []float64, divide bool) interface{} {
+	apply := func(v float64, f float64) float64 {
+		if divide {
+			return v / f
+		}
+		return v * f
+	}
+	switch c := col.(type) {
+	case []float32:
+		out := make([]float32, len(c))
+		for i, v := range c {
+			x := apply(float64(v), factors[i])
+			if divide {
+				x = roundPrice(x)
+			}
+			out[i] = float32(x)
+		}
+		return out
+	case []float64:
+		out := make([]float64, len(c))
+		for i, v := range c {
+			x := apply(v, factors[i])
+			if divide {
+				x = roundPrice(x)
+			}
+			out[i] = x
+		}
+		return out
+	case []int64:
+		out := make([]int64, len(c))
+		for i, v := range c {
+			out[i] = int64(math.Round(apply(float64(v), factors[i])))
+		}
+		return out
+	case []uint64:
+		out := make([]uint64, len(c))
+		for i, v := range c {
+			out[i] = uint64(math.Round(apply(float64(v), factors[i])))
+		}
+		return out
+	default:
+		return col
+	}
+}
+
+func roundPrice(x float64) float64 {
+	return math.Round(x*RounderNum) / RounderNum
 }

@@ -244,7 +244,6 @@ var filteringFixtures = []struct {
 }
 
 func TestRateChangeEventsFiltering(t *testing.T) {
-	setup(t)
 
 	for _, tt := range filteringFixtures {
 		ca := defineCorporateActions(t, tt.in...)
@@ -376,7 +375,6 @@ var statusHandlingFixtures = []struct {
 }
 
 func TestRateChangeEventsAnnouncementStatusHandling(t *testing.T) {
-	setup(t)
 
 	for _, tt := range statusHandlingFixtures {
 		ca := defineCorporateActions(t, tt.in...)
@@ -432,34 +430,10 @@ var sortingFixtures = []struct {
 }
 
 func TestRateChangeEventsProperSorting(t *testing.T) {
-	setup(t)
 
 	for _, tt := range sortingFixtures {
 		ca := defineCorporateActions(t, tt.in...)
 		events := ca.RateChangeEvents(tt.params.splits, tt.params.dividends)
 		assert.Equal(t, events, tt.out, "FAILED: %s, %+v\n", tt.description, tt.params)
 	}
-}
-
-func TestCache(t *testing.T) {
-	metadata := setup(t)
-
-	// GetRateChange should create a separate cache entry for each parameter combination
-	adjust.RateChangeCacheMap = map[adjust.CacheKey]adjust.RateChangeCache{}
-
-	adjust.GetRateChanges("AAPL", true, true, metadata.CatalogDir)
-	adjust.GetRateChanges("AAPL", false, true, metadata.CatalogDir)
-	adjust.GetRateChanges("AAPL", true, false, metadata.CatalogDir)
-	adjust.GetRateChanges("AAPL", false, false, metadata.CatalogDir)
-
-	assert.Len(t, adjust.RateChangeCacheMap, 4)
-
-	// repeated calls with the same signature should not increase the number of cache entries
-	adjust.RateChangeCacheMap = map[adjust.CacheKey]adjust.RateChangeCache{}
-
-	adjust.GetRateChanges("AAPL", true, true, metadata.CatalogDir)
-	adjust.GetRateChanges("AAPL", true, true, metadata.CatalogDir)
-	adjust.GetRateChanges("AAPL", true, true, metadata.CatalogDir)
-
-	assert.Len(t, adjust.RateChangeCacheMap, 1)
 }

@@ -12,11 +12,11 @@
 
 ## 2. Adjust on read (`uda/adjust`)
 
-- [ ] 2.1 Write failing tests first, one per scenario in `specs/corporate-actions/adjust-on-read`: float32 OHLCV, trade size multiplied, reverse-split rounding, unknown columns, execution-date boundary, compounding, announced future split, no events, ICE bucket ignored, dividend-only. Confirm they fail on the current code.
-- [ ] 2.2 Rewrite `Accum` to use `corpaction.Load`, the factor and role math (D4) and an injected clock. Remove `CARows`, `Actions`, `RateChange*` and the `contrib/ice/enum` import. Verify that the 2.1 tests pass and that `go vet ./uda/... ./sqlparser/...` is clean.
-- [ ] 2.3 Replace the global cache with the locked 30s TTL cache (D5). Verify with a test that runs concurrent `Accum` calls under `go test -race ./uda/adjust/...`, and a test where an event written after a load becomes visible once the TTL expires (spec: New events become visible promptly).
-- [ ] 2.4 Delete or rewrite `uda/adjust/caloader_test.go` and any ICE-shaped fixtures in `adjust_test.go`. Verify that `go test ./uda/... ./sqlparser/... ./frontend/...` matches the baseline, plus the new tests.
-- [ ] 2.5 Commit: `fix(adjust): read corporate events from corpaction and adjust by column role`.
+- [x] 2.1 Write failing tests first, one per scenario in `specs/corporate-actions/adjust-on-read`: float32 OHLCV, trade size multiplied, reverse-split rounding, unknown columns, execution-date boundary, compounding, announced future split, no events, ICE bucket ignored, dividend-only. Confirm they fail on the current code.
+- [x] 2.2 Rewrite `Accum` to use `corpaction.Load`, the factor and role math (D4) and an injected clock. Remove `CARows`, `Actions`, `RateChange*` and the `contrib/ice/enum` import. Verify that the 2.1 tests pass and that `go vet ./uda/... ./sqlparser/...` is clean.
+- [x] 2.3 Replace the global cache with the locked 30s TTL cache (D5). Verify with a test that runs concurrent `Accum` calls under `go test -race ./uda/adjust/...`, and a test where an event written after a load becomes visible once the TTL expires (spec: New events become visible promptly).
+- [x] 2.4 Delete or rewrite `uda/adjust/caloader_test.go` and any ICE-shaped fixtures in `adjust_test.go`. Verify that `go test ./uda/... ./sqlparser/... ./frontend/...` matches the baseline, plus the new tests.
+- [x] 2.5 Commit: `fix(adjust): read corporate events from corpaction and adjust by column role`.
 
 ## 3. Massive: raw bars only
 
