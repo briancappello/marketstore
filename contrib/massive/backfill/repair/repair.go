@@ -14,6 +14,7 @@ import (
 
 	"github.com/alpacahq/marketstore/v4/contrib/massive/api"
 	"github.com/alpacahq/marketstore/v4/contrib/massive/splitsync"
+	"github.com/alpacahq/marketstore/v4/corpaction"
 	"github.com/alpacahq/marketstore/v4/utils"
 )
 
@@ -54,6 +55,24 @@ func SplitDates(results []api.Split) map[string][]time.Time {
 			continue
 		}
 		out[e.Symbol] = append(out[e.Symbol], e.Effective)
+	}
+	return out
+}
+
+// SplitEvents maps Massive split results to the splits of each symbol that
+// have taken effect by now, sorted by date. Results that cannot be mapped are
+// skipped.
+func SplitEvents(results []api.Split, now time.Time) map[string][]corpaction.Event {
+	out := map[string][]corpaction.Event{}
+	for _, s := range results {
+		e, err := splitsync.ToEvent(s)
+		if err != nil || e.Effective.After(now) {
+			continue
+		}
+		out[e.Symbol] = append(out[e.Symbol], e)
+	}
+	for _, evs := range out {
+		sort.SliceStable(evs, func(i, j int) bool { return evs[i].Effective.Before(evs[j].Effective) })
 	}
 	return out
 }

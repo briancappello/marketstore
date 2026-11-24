@@ -161,7 +161,7 @@ func TestRepairEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	defer writer.Close()
 	rw := &repair.Rewriter{Client: http.DefaultClient, Store: store, Writer: writer, Limit: 50000,
-		Tolerance: repair.DefaultTolerance}
+		Tolerance: repair.DefaultTolerance, Splits: repair.SplitEvents(splits, now)}
 
 	rep := repair.Run(ctx, ranges, rw.Fetch, 2)
 	require.Empty(t, rep.Failures)

@@ -51,7 +51,7 @@ func run() int {
 		batchSize   = flag.Int("batchSize", defaultBatchSize, "API pagination limit")
 		dryRun      = flag.Bool("dry-run", false, "print the affected buckets and ranges, write nothing")
 		tolerance   = flag.Float64("tolerance", repair.DefaultTolerance,
-			"rewrite a stored bar only if a price differs from the raw bar by more than this fraction")
+			"relative error allowed when matching a stored bar against a split-adjusted raw bar")
 	)
 	flag.Parse()
 
@@ -135,7 +135,7 @@ func run() int {
 	started := time.Now()
 	rw := &repair.Rewriter{
 		Client: httpClient, Store: repair.NewGRPCStore(conn), Writer: writer,
-		Limit: *batchSize, Tolerance: *tolerance,
+		Limit: *batchSize, Tolerance: *tolerance, Splits: repair.SplitEvents(splits, opts.Now),
 	}
 	rep := repair.Run(ctx, ranges, rw.Fetch, *parallelism)
 	for _, f := range rep.Failures {

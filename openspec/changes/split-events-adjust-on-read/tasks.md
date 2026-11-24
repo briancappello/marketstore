@@ -40,7 +40,7 @@
 - [x] 5.2 Add `contrib/massive/backfill/repair/cmd` with these flags: gRPC address, API key, symbols filter, parallelism, `--dry-run`. It finds buckets and first bars over gRPC, reads splits through `api.ListSplits`, writes through `RPCWriter` from finest to coarsest timeframe, reports totals and exits non-zero if any bucket failed. Verify with a test against an in-process gRPC server and an `httptest` Massive: dry run writes nothing; a real run writes raw bars; a second run changes nothing; one failing symbol does not stop the others.
 - [x] 5.3 Document the repair procedure in `contrib/massive/README.md`: when to run it, dry run first, expected output. Verify by reading it back.
 - [x] 5.4 Commit: `feat(massive): add split repair command for adjusted history`.
-- [x] 5.5 Rewrite only bars that differ from raw by more than `-tolerance` (default 1%), so flat-file precision is kept. Verify with `TestDifferingKeepsRoundingDifferences` and the e2e test: a 5-decimal raw bar is kept and a re-run rewrites 0 bars.
+- [x] 5.5 Rewrite only bars that are split-adjusted copies of raw (stored ≈ raw / cumulative later-split factor), so flat-file precision and non-split vendor differences are kept. Verify with `TestAdjustedOnlyMatchesSplitFactors` and the e2e test: a 5-decimal raw bar is kept and a re-run rewrites 0 bars.
 
 ## 6. End-to-end verification
 

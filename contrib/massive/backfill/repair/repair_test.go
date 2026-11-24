@@ -136,24 +136,60 @@ func TestRunReportsFailuresAndContinues(t *testing.T) {
 	assert.Equal(t, []string{"1Min", "1D"}, aOrder, "a symbol's ranges run in order")
 }
 
-func TestDifferingKeepsRoundingDifferences(t *testing.T) {
+func mustSplit(t *testing.T, sym string, y int, m time.Month, d int, from, to float64) corpaction.Event {
+	t.Helper()
+	st := corpaction.ForwardSplit
+	if to < from {
+		st = corpaction.ReverseSplit
+	}
+	e, err := corpaction.NewSplit(sym, corpaction.EffectiveDate(y, m, d), from, to, st)
+	require.NoError(t, err)
+	return e
+}
+
+func bar(ts time.Time, o, c float64) api.AggResult {
+	return api.AggResult{EpochMilliseconds: ts.Unix() * 1000, Open: o, High: o, Low: c, Close: c}
+}
+
+func TestAdjustedOnlyMatchesSplitFactors(t *testing.T) {
+	splits := []corpaction.Event{
+		mustSplit(t, "X", 2024, 1, 2, 1, 1.05), // 5% stock dividend
+		mustSplit(t, "X", 2024, 6, 10, 1, 10),
+		mustSplit(t, "X", 2026, 9, 24, 80, 1), // 1:80 reverse
+	}
+	d := func(y int, m time.Month, dd int) time.Time { return et(y, m, dd, 0, 0) }
 	raw := []api.AggResult{
-		{EpochMilliseconds: 1000, Open: 0.7, High: 0.7, Low: 0.7, Close: 0.7},               // REST, 4 decimals
-		{EpochMilliseconds: 2000, Open: 1208.88, High: 1216.9, Low: 1180.2, Close: 1208.88}, // raw
-		{EpochMilliseconds: 3000, Open: 0.0199, High: 0.0199, Low: 0.0199, Close: 0.0199},   // raw
-		{EpochMilliseconds: 4000, Open: 10, High: 10, Low: 10, Close: 10},                   // not stored
-		{EpochMilliseconds: 5000, Open: 10, High: 10.5, Low: 10, Close: 10},                 // only High off
+		bar(d(2023, 12, 1), 10.5, 10.5),       // stored adjusted for all three splits
+		bar(d(2023, 12, 4), 10.5, 10.5),       // stored adjusted for the first split only
+		bar(d(2024, 6, 7), 1208.9, 1208.88),   // stored adjusted 1:10, the only split after it
+		bar(d(2024, 6, 6), 0.700001, 0.70001), // stored raw with more decimals
+		bar(d(2023, 3, 23), 3.49, 4.52),       // vendor disagreement: not a split factor
+		bar(d(2026, 9, 23), 0.0199, 0.0199),   // stored adjusted for the reverse split
+		bar(d(2026, 9, 25), 1.6, 1.6),         // after every split: never adjusted
+		bar(d(2026, 9, 28), 1.6, 1.6),         // not stored
 	}
+	all := 1.05 * 10 / 80
 	stored := map[int64]repair.Bar{
-		1: {Open: 0.700001, High: 0.700001, Low: 0.700001, Close: 0.700001}, // flat file, 6 decimals
-		2: {Open: 120.888, High: 121.69, Low: 118.02, Close: 120.888},       // adjusted 1:10
-		3: {Open: 1.592, High: 1.592, Low: 1.592, Close: 1.592},             // adjusted 80:1 reverse
-		5: {Open: 10, High: 10, Low: 10, Close: 10},
+		d(2023, 12, 1).Unix(): {Open: 10.5 / all, Close: 10.5 / all},
+		d(2023, 12, 4).Unix(): {Open: 10.5 / 1.05, Close: 10.5 / 1.05},
+		d(2024, 6, 7).Unix():  {Open: 120.89, Close: 120.888},
+		d(2024, 6, 6).Unix():  {Open: 0.7, Close: 0.7},
+		d(2023, 3, 23).Unix(): {Open: 3.49, Close: 4.0},
+		d(2026, 9, 23).Unix(): {Open: 1.592, Close: 1.592},
+		d(2026, 9, 25).Unix(): {Open: 1.5, Close: 1.5},
 	}
-	got := repair.Differing(stored, raw, repair.DefaultTolerance)
-	var epochs []int64
+	got := repair.Adjusted(stored, raw, splits, repair.DefaultTolerance)
+	var dates []string
 	for _, r := range got {
-		epochs = append(epochs, r.EpochMilliseconds/1000)
+		dates = append(dates, time.Unix(r.EpochMilliseconds/1000, 0).In(ny).Format("2006-01-02"))
 	}
-	assert.Equal(t, []int64{2, 3, 5}, epochs)
+	assert.Equal(t, []string{"2023-12-01", "2023-12-04", "2024-06-07", "2026-09-23"}, dates)
+}
+
+func TestSplitEventsDropsFutureSplits(t *testing.T) {
+	got := repair.SplitEvents([]api.Split{
+		fwd("X", "2026-12-01", 2), fwd("X", "2024-06-10", 10), fwd("X", "2021-07-20", 4),
+	}, now)
+	require.Len(t, got["X"], 2)
+	assert.Equal(t, corpaction.EffectiveDate(2021, 7, 20), got["X"][0].Effective)
 }

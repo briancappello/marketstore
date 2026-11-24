@@ -221,10 +221,11 @@ Those bars are wrong for every symbol that split after they were fetched.
 The repair command fixes them. For each `{symbol}/{timeframe}/OHLCV` bucket, it
 finds the latest split after the bucket's first bar. It then fetches raw bars
 from that first bar up to the split and compares them with the stored bars. It
-rewrites, through the running server's gRPC API, only the stored bars whose
-prices differ from raw by more than `-tolerance` (default 1%). Bars that are
-already raw are kept as stored: flat-file bars have more price decimals than
-REST bars, which are rounded to 4. Trade and quote buckets are never touched,
+rewrites, through the running server's gRPC API, only the stored bars that are
+split-adjusted copies of the raw bar: the raw prices divided by the combined
+factor of later splits, within `-tolerance` (default 1%). Every other bar is
+kept as stored, including raw flat-file bars, which have more price decimals
+than REST bars (REST rounds to 4). Trade and quote buckets are never touched,
 because Massive never adjusts them. Running it again rewrites nothing.
 
 ```bash
