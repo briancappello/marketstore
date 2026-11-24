@@ -107,3 +107,18 @@ func TestBuildSkipsUnchanged(t *testing.T) {
 	require.Len(t, plan.Events, 1)
 	assert.Equal(t, 10.0, plan.Events[0].PriceFactor)
 }
+
+func TestBuildMergesSameDayBeforeComparing(t *testing.T) {
+	results := []api.Split{
+		{Ticker: "BTX", ExecutionDate: "2016-06-17", SplitFrom: 100, SplitTo: 1, AdjustmentType: "reverse_split"},
+		{Ticker: "BTX", ExecutionDate: "2016-06-17", SplitFrom: 1, SplitTo: 2, AdjustmentType: "forward_split"},
+	}
+	plan := splitsync.Build(results, set("BTX"), false, nil)
+	require.Len(t, plan.Events, 1, "one merged row per day")
+	assert.InDelta(t, 0.02, plan.Events[0].PriceFactor, 1e-12)
+
+	// Once stored, the merged row is recognized as unchanged.
+	plan = splitsync.Build(results, set("BTX"), false, map[string][]corpaction.Event{"BTX": plan.Events})
+	assert.Empty(t, plan.Events)
+	assert.Equal(t, 1, plan.Unchanged)
+}

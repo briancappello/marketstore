@@ -161,3 +161,13 @@ func TestLoadMissingBucket(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Empty(t, got)
 }
+
+func TestMergeSameDayIsOrderIndependent(t *testing.T) {
+	a := split(t, "BTX", 2016, 6, 17, 100, 1, corpaction.ReverseSplit)
+	b := split(t, "BTX", 2016, 6, 17, 1, 2, corpaction.ForwardSplit)
+	ab := corpaction.MergeSameDay([]corpaction.Event{a, b})
+	ba := corpaction.MergeSameDay([]corpaction.Event{b, a})
+	require.Len(t, ab, 1)
+	assert.Equal(t, ab, ba)
+	assert.InDelta(t, 0.02, ab[0].PriceFactor, 1e-12)
+}

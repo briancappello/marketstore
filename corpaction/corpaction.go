@@ -203,9 +203,33 @@ func EncodeCSM(events []Event) (io.ColumnSeriesMap, error) {
 	return csm, nil
 }
 
-// merge combines two events with the same effective date. The factors
-// multiply; the published ratio and subtype of the first event are kept
-// unless it was neutral.
+// MergeSameDay returns events with every group of the same symbol, kind and
+// effective date merged into one event (see EncodeCSM), in input order of
+// each group's first event.
+func MergeSameDay(events []Event) []Event {
+	type key struct {
+		id  bucketID
+		day int64
+	}
+	index := map[key]int{}
+	var out []Event
+	for _, e := range events {
+		y, m, d := e.Effective.In(EffectiveLocation).Date()
+		e.Effective = EffectiveDate(y, m, d)
+		k := key{bucketID{e.Symbol, e.Kind}, e.Effective.Unix()}
+		if i, ok := index[k]; ok {
+			out[i] = merge(out[i], e)
+			continue
+		}
+		index[k] = len(out)
+		out = append(out, e)
+	}
+	return out
+}
+
+// merge combines two events with the same effective date. The factors and
+// ratios multiply. The subtype is the lower of the two, so the result does not
+// depend on input order.
 func merge(a, b Event) Event {
 	if a.IsNeutral() {
 		return b
@@ -218,6 +242,9 @@ func merge(a, b Event) Event {
 	out.VolumeFactor = a.VolumeFactor * b.VolumeFactor
 	out.SplitFrom = a.SplitFrom * b.SplitFrom
 	out.SplitTo = a.SplitTo * b.SplitTo
+	if b.Subtype < out.Subtype {
+		out.Subtype = b.Subtype
+	}
 	return out
 }
 

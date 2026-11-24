@@ -80,6 +80,10 @@ func Build(results []api.Split, tracked func(string) bool, wildcard bool,
 		}
 		fresh[e.Symbol] = append(fresh[e.Symbol], e)
 	}
+	// Same-day events are stored as one merged row; compare like with like.
+	for sym, evs := range fresh {
+		fresh[sym] = corpaction.MergeSameDay(evs)
+	}
 
 	symbols := map[string]struct{}{}
 	for sym := range fresh {
