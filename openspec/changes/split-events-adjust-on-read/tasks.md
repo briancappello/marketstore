@@ -1,14 +1,14 @@
 ## 0. Baseline
 
-- [ ] 0.1 Record the pre-change test baseline: `go test ./uda/... ./sqlparser/... ./frontend/... ./executor/... ./contrib/massive/...`. Save the pass/fail counts in `notes.md`, so that failures that already existed are not blamed on this change.
+- [x] 0.1 Record the pre-change test baseline: `go test ./uda/... ./sqlparser/... ./frontend/... ./executor/... ./contrib/massive/...`. Save the pass/fail counts in `notes.md`, so that failures that already existed are not blamed on this change.
 
 ## 1. Corporate-event store (`corpaction/`)
 
-- [ ] 1.1 Create `corpaction/` with `Kind` (`Splits` → `SPLITS`), the `Subtype` constants, `Event` and `NewSplit(symbol, date, from, to, subtype)`. `NewSplit` rejects `from`/`to` values that are not positive and sets both factors to `to/from`. Verify with table tests for forward, reverse and stock-dividend splits and for invalid ratios (spec: Common event columns).
-- [ ] 1.2 Add `EncodeCSM(events)`. It produces one fixed-length `<SYM>/1D/SPLITS` series per symbol with columns `Epoch, PriceFactor, VolumeFactor, SplitFrom, SplitTo, Subtype`, sorted by epoch, with same-day duplicates merged by multiplying the factors. Verify with unit tests, including the "Two events on the same date" scenario.
-- [ ] 1.3 Add `Load(catalogDir, symbol, kinds...)`. It returns events sorted by epoch, skips rows where both factors are 1.0, and returns empty with no error when the bucket is missing. Verify with a write-then-load round-trip test under `America/New_York` that checks the stored `Epoch` is exactly 00:00 ET of the effective date. Also verify the overwrite-on-rewrite and the re-sync no-op scenarios.
-- [ ] 1.4 Add `Neutralize(stored, fresh)`. Verify the "Provider deletes a split" scenario end to end: write, neutralize, then `Load` no longer returns the event.
-- [ ] 1.5 Commit: `feat(corpaction): add provider-neutral corporate event store`.
+- [x] 1.1 Create `corpaction/` with `Kind` (`Splits` → `SPLITS`), the `Subtype` constants, `Event` and `NewSplit(symbol, date, from, to, subtype)`. `NewSplit` rejects `from`/`to` values that are not positive and sets both factors to `to/from`. Verify with table tests for forward, reverse and stock-dividend splits and for invalid ratios (spec: Common event columns).
+- [x] 1.2 Add `EncodeCSM(events)`. It produces one fixed-length `<SYM>/1D/SPLITS` series per symbol with columns `Epoch, PriceFactor, VolumeFactor, SplitFrom, SplitTo, Subtype`, sorted by epoch, with same-day duplicates merged by multiplying the factors. Verify with unit tests, including the "Two events on the same date" scenario.
+- [x] 1.3 Add `Load(catalogDir, symbol, kinds...)`. It returns events sorted by epoch, skips rows where both factors are 1.0, and returns empty with no error when the bucket is missing. Verify with a write-then-load round-trip test under `America/New_York` that checks the stored `Epoch` is exactly 00:00 ET of the effective date. Also verify the overwrite-on-rewrite and the re-sync no-op scenarios.
+- [x] 1.4 Add `Neutralize(stored, fresh)`. Verify the "Provider deletes a split" scenario end to end: write, neutralize, then `Load` no longer returns the event.
+- [x] 1.5 Commit: `feat(corpaction): add provider-neutral corporate event store`.
 
 ## 2. Adjust on read (`uda/adjust`)
 
