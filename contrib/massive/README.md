@@ -214,6 +214,31 @@ Prices (`Open`, `High`, `Low`, `Close`, `VWAP`, `Price`, `BidPrice`,
 execution date. Splits that have been announced but have not started yet are
 ignored.
 
+### Repairing bars stored adjusted
+
+Before this change, REST backfill stored split-adjusted bars by default.
+Those bars are wrong for every symbol that split after they were fetched.
+The repair command fixes them. For each `{symbol}/{timeframe}/OHLCV` bucket, it
+finds the latest split after the bucket's first bar. It then re-fetches raw
+bars from that first bar up to the split, and writes them through the running
+server's gRPC API. Trade and quote buckets are never touched, because Massive
+never adjusts them. Running it again gives the same data.
+
+```bash
+go build -o repair ./contrib/massive/backfill/repair/cmd
+
+# 1. Review the plan: every affected bucket and range, nothing is written.
+./repair -grpc localhost:5995 -config mkts.yml -dry-run
+
+# 2. Repair. -timeframes and -symbols narrow the run.
+./repair -grpc localhost:5995 -config mkts.yml -timeframes 1Min,1D
+```
+
+The last line reports the number of buckets repaired, the number of bars
+written and the failures. The exit code is non-zero if any bucket failed;
+re-run it to retry. The API key comes from `-apiKey`, `MASSIVE_API_KEY`,
+`POLYGON_API_KEY`, or the massive bgworker's `api_key` in `-config`.
+
 ## Data Types
 
 ### Bars (`AM`)

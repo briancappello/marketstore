@@ -36,10 +36,10 @@
 
 ## 5. Massive: split repair command
 
-- [ ] 5.1 Add a pure `repair.PlanRanges(buckets, firstBars, splits, today)` that returns the affected `(bucket, from, to)` ranges, ignoring TRADE and QUOTE buckets. Verify with table tests for "split inside stored range", "split before stored range", the future split and multiple splits (the latest one wins).
-- [ ] 5.2 Add `contrib/massive/backfill/repair/cmd` with these flags: gRPC address, API key, symbols filter, parallelism, `--dry-run`. It finds buckets and first bars over gRPC, reads splits through `api.ListSplits`, writes through `RPCWriter` from finest to coarsest timeframe, reports totals and exits non-zero if any bucket failed. Verify with a test against an in-process gRPC server and an `httptest` Massive: dry run writes nothing; a real run writes raw bars; a second run changes nothing; one failing symbol does not stop the others.
-- [ ] 5.3 Document the repair procedure in `contrib/massive/README.md`: when to run it, dry run first, expected output. Verify by reading it back.
-- [ ] 5.4 Commit: `feat(massive): add split repair command for adjusted history`.
+- [x] 5.1 Add a pure `repair.PlanRanges(buckets, firstBars, splits, today)` that returns the affected `(bucket, from, to)` ranges, ignoring TRADE and QUOTE buckets. Verify with table tests for "split inside stored range", "split before stored range", the future split and multiple splits (the latest one wins).
+- [x] 5.2 Add `contrib/massive/backfill/repair/cmd` with these flags: gRPC address, API key, symbols filter, parallelism, `--dry-run`. It finds buckets and first bars over gRPC, reads splits through `api.ListSplits`, writes through `RPCWriter` from finest to coarsest timeframe, reports totals and exits non-zero if any bucket failed. Verify with a test against an in-process gRPC server and an `httptest` Massive: dry run writes nothing; a real run writes raw bars; a second run changes nothing; one failing symbol does not stop the others.
+- [x] 5.3 Document the repair procedure in `contrib/massive/README.md`: when to run it, dry run first, expected output. Verify by reading it back.
+- [x] 5.4 Commit: `feat(massive): add split repair command for adjusted history`.
 
 ## 6. End-to-end verification
 
