@@ -20,7 +20,12 @@ Under parallel load, `go test ./executor/` sometimes panics in
 write to WAL". This change does not touch `executor/`. On the baseline commit
 0d0c2a9d, 6 parallel copies of the executor test binary x 5 rounds failed 12/30
 with the same panic. Serial runs pass 10/10 on both baseline and HEAD.
-Tier 4: needs its own investigation (WAL status read racing a truncated file).
+Fixed afterwards (separate commit): flushes run inline from writer
+goroutines whenever no SyncWAL loop drains flushChannel (before it starts,
+during shutdown, or without BackgroundSync), and concurrent flushes raced on
+the shared WAL file offset. A mutex now serializes flush, checkpoint and
+rotation. `TestConcurrentInlineFlushes` fails 5/5 without the fix; the same
+6x5 parallel stress now fails 0/30.
 
 ## Verification (task 6.2)
 
