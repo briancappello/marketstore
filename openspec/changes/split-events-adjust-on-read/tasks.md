@@ -20,11 +20,11 @@
 
 ## 3. Massive: raw bars only
 
-- [ ] 3.1 Remove the `adjusted` parameter from `api.GetHistoricAggregates`, `GetAggregatesWindow` and `getAggregates`, and always send `adjusted=false`. Make `paginateAggregates` fail when a page has `adjusted: true`. Verify with `httptest` tests for the query parameter and for the rejection.
-- [ ] 3.2 Remove `adjusted` from every caller in `backfill/rest`, `massive.go` and `gapfill.go`, and from the REST command (drop the `-adjusted` flag). Verify that `go build ./contrib/massive/...` passes and that `grep -rn adjusted contrib/massive --include=*.go` shows only the API guard and the config validation.
-- [ ] 3.3 In `ValidateConfig`, make `backfill_adjusted: true` an error and `false` a warning. Verify with tests for all three spec scenarios (true, false, missing).
-- [ ] 3.4 Update `contrib/massive/README.md` and `mkts.example.yml`: remove the key and flag, and add an "Adjusted prices" section that points to `adjust('split')`. Verify by reading it back. The docs mention no adjusted backfill.
-- [ ] 3.5 Commit: `feat(massive)!: always store unadjusted bars`.
+- [x] 3.1 Remove the `adjusted` parameter from `api.GetHistoricAggregates`, `GetAggregatesWindow` and `getAggregates`, and always send `adjusted=false`. Make `paginateAggregates` fail when a page has `adjusted: true`. Verify with `httptest` tests for the query parameter and for the rejection.
+- [x] 3.2 Remove `adjusted` from every caller in `backfill/rest`, `massive.go` and `gapfill.go`, and from the REST command (drop the `-adjusted` flag). Verify that `go build ./contrib/massive/...` passes and that `grep -rn adjusted contrib/massive --include=*.go` shows only the API guard and the config validation.
+- [x] 3.3 In `ValidateConfig`, make `backfill_adjusted: true` an error and `false` a warning. Verify with tests for all three spec scenarios (true, false, missing).
+- [x] 3.4 Update `contrib/massive/README.md` and `mkts.example.yml`: remove the key and flag, and add an "Adjusted prices" section that points to `adjust('split')`. Verify by reading it back. The docs mention no adjusted backfill.
+- [x] 3.5 Commit: `feat(massive)!: always store unadjusted bars`.
 
 ## 4. Massive: split ingestion
 

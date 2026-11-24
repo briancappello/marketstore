@@ -81,8 +81,9 @@ type FetcherConfig struct {
 	// BackfillBatchSize is the pagination limit for REST API backfill requests.
 	// Defaults to 50000 if not set.
 	BackfillBatchSize int `json:"backfill_batch_size"`
-	// BackfillAdjusted controls whether backfilled bars are split-adjusted.
-	// Defaults to true.
+	// BackfillAdjusted is removed: bars are always stored unadjusted, and
+	// adjust('split') adjusts them on read. It is still parsed so that
+	// ValidateConfig can reject true and warn about false.
 	BackfillAdjusted *bool `json:"backfill_adjusted"`
 	// SymbolsDSN is the PostgreSQL connection string for fetching symbols and
 	// storing sync timestamps. When set, symbols are queried from the database
@@ -142,6 +143,14 @@ var ValidWSDataTypes = map[string]bool{
 // ValidateConfig checks that the configuration is internally consistent.
 // It returns an error if required fields are missing or mismatched.
 func ValidateConfig(config *FetcherConfig) error {
+	if config.BackfillAdjusted != nil {
+		if *config.BackfillAdjusted {
+			return fmt.Errorf("backfill_adjusted is removed: bars are always stored unadjusted; " +
+				"delete the key from the config and query with adjust('split') for split-adjusted data")
+		}
+		log.Warn("[massive] backfill_adjusted is deprecated and has no effect: bars are always stored unadjusted; delete the key")
+	}
+
 	if config.SymbolsDSN != "" {
 		if config.SymbolsQuery == "" {
 			return fmt.Errorf("symbols_query is required when symbols_dsn is set")

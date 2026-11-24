@@ -318,3 +318,17 @@ func TestOrderedBackfillKeysIsDeterministic(t *testing.T) {
 	}
 	assert.Less(t, iMin, iDay, "1Min must be written before 1D")
 }
+
+func TestValidateConfigBackfillAdjusted(t *testing.T) {
+	t.Parallel()
+
+	yes, no := true, false
+
+	err := ValidateConfig(&FetcherConfig{BackfillAdjusted: &yes})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "backfill_adjusted is removed")
+	assert.Contains(t, err.Error(), "adjust('split')")
+
+	assert.NoError(t, ValidateConfig(&FetcherConfig{BackfillAdjusted: &no}))
+	assert.NoError(t, ValidateConfig(&FetcherConfig{}))
+}

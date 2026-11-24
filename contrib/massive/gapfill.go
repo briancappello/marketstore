@@ -184,11 +184,6 @@ func (mf *MassiveFetcher) fillOutage(o outage) {
 	if len(tfs) == 0 || !o.to.After(o.from) {
 		return
 	}
-
-	adjusted := true
-	if mf.config.BackfillAdjusted != nil {
-		adjusted = *mf.config.BackfillAdjusted
-	}
 	limit := mf.config.BackfillBatchSize
 	if limit <= 0 {
 		limit = defaultBackfillBatchSize
@@ -217,7 +212,7 @@ func (mf *MassiveFetcher) fillOutage(o outage) {
 		if !wp.Do(func() {
 			got := false
 			for _, tf := range tfs {
-				n, err := fetchBarsWindow(mf.ctx, mf.httpClient, sym, tf, o.from, o.to, limit, adjusted, nil)
+				n, err := fetchBarsWindow(mf.ctx, mf.httpClient, sym, tf, o.from, o.to, limit, nil)
 				if err != nil {
 					if errors.Is(err, context.Canceled) {
 						return

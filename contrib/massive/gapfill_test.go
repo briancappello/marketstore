@@ -146,7 +146,7 @@ func stubFetchBars(t *testing.T, fn func(c barsCall) (int, error)) *[]barsCall {
 	)
 	orig := fetchBarsWindow
 	fetchBarsWindow = func(_ context.Context, _ *http.Client, sym, tf string, from, to time.Time,
-		_ int, _ bool, _ backfill.Writer,
+		_ int, _ backfill.Writer,
 	) (int, error) {
 		c := barsCall{sym, tf, from, to}
 		mu.Lock()

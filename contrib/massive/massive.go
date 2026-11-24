@@ -991,11 +991,6 @@ func (mf *MassiveFetcher) runBackfill() error {
 		batchSize = defaultBackfillBatchSize
 	}
 
-	adjusted := true
-	if mf.config.BackfillAdjusted != nil {
-		adjusted = *mf.config.BackfillAdjusted
-	}
-
 	// Reuse the long-lived httpClient (constructed in NewBgWorker) across
 	// every backfill cycle so the underlying http.Transport's connection
 	// pool persists across reconnect-triggered gap-fills.
@@ -1046,7 +1041,7 @@ func (mf *MassiveFetcher) runBackfill() error {
 	phase1.Add(1)
 	go func() {
 		defer phase1.Done()
-		mf.restBackfillCurrentDay(httpClient, endRegular, endExtended, now, batchSize, adjusted, parallelism)
+		mf.restBackfillCurrentDay(httpClient, endRegular, endExtended, now, batchSize, parallelism)
 	}()
 
 	phase1.Wait()
@@ -1116,10 +1111,10 @@ func (mf *MassiveFetcher) runBackfill() error {
 				}
 
 				// --- Forward gap: new market data since last sync ---
-				mf.backfillForward(httpClient, pgPool, writerWP, currentSymInfo, key, effectiveStart, end, sw, syncQueries, batchSize, adjusted)
+				mf.backfillForward(httpClient, pgPool, writerWP, currentSymInfo, key, effectiveStart, end, sw, syncQueries, batchSize)
 
 				// --- Backward gap: query_start moved earlier than oldest sync ---
-				mf.backfillBackward(httpClient, pgPool, writerWP, currentSymInfo, key, effectiveStart, sw, syncQueries, batchSize, adjusted)
+				mf.backfillBackward(httpClient, pgPool, writerWP, currentSymInfo, key, effectiveStart, sw, syncQueries, batchSize)
 			}
 		})
 	}
@@ -1337,7 +1332,6 @@ func (mf *MassiveFetcher) restBackfillCurrentDay(
 	httpClient *http.Client,
 	endRegular, endExtended, now time.Time,
 	batchSize int,
-	adjusted bool,
 	parallelism int,
 ) {
 	restStart := flatFileAvailableThrough(now).AddDate(0, 0, 1)
@@ -1404,7 +1398,7 @@ func (mf *MassiveFetcher) restBackfillCurrentDay(
 			currentKey := key
 			apiWP.Do(func() {
 				if err := rest.Bars(mf.ctx, httpClient, currentSym, currentKey,
-					apiFrom, apiTo, batchSize, adjusted, writerWP, nil); err != nil {
+					apiFrom, apiTo, batchSize, writerWP, nil); err != nil {
 					if err == context.Canceled {
 						return
 					}
@@ -1443,7 +1437,6 @@ func (mf *MassiveFetcher) backfillForward(
 	sw massiveconfig.SyncWindow,
 	syncQueries massiveconfig.SyncQuerySet,
 	batchSize int,
-	adjusted bool,
 ) {
 	symbol := symInfo.Symbol
 
@@ -1477,7 +1470,7 @@ func (mf *MassiveFetcher) backfillForward(
 	log.Info("[massive] %s backfilling %s from %s to %s",
 		symbol, dataType, forwardStart.Format(time.RFC3339), end.Format(time.RFC3339))
 
-	err := mf.executeBackfill(httpClient, writerWP, symbol, dataType, forwardStart, end, batchSize, adjusted)
+	err := mf.executeBackfill(httpClient, writerWP, symbol, dataType, forwardStart, end, batchSize)
 	if err != nil {
 		if err == context.Canceled {
 			return
@@ -1526,7 +1519,6 @@ func (mf *MassiveFetcher) backfillBackward(
 	sw massiveconfig.SyncWindow,
 	syncQueries massiveconfig.SyncQuerySet,
 	batchSize int,
-	adjusted bool,
 ) {
 	symbol := symInfo.Symbol
 
@@ -1541,7 +1533,7 @@ func (mf *MassiveFetcher) backfillBackward(
 	log.Info("[massive] %s backfilling %s backward from %s to %s",
 		symbol, dataType, effectiveStart.Format(time.RFC3339), backwardEnd.Format(time.RFC3339))
 
-	err := mf.executeBackfill(httpClient, writerWP, symbol, dataType, effectiveStart, backwardEnd, batchSize, adjusted)
+	err := mf.executeBackfill(httpClient, writerWP, symbol, dataType, effectiveStart, backwardEnd, batchSize)
 	if err != nil {
 		if err == context.Canceled {
 			return
@@ -1571,7 +1563,6 @@ func (mf *MassiveFetcher) executeBackfill(
 	symbol, dataType string,
 	start, end time.Time,
 	batchSize int,
-	adjusted bool,
 ) error {
 	switch dataType {
 	case "trades":
@@ -1579,7 +1570,7 @@ func (mf *MassiveFetcher) executeBackfill(
 	case "quotes":
 		return rest.Quotes(mf.ctx, httpClient, symbol, start, end, batchSize, writerWP, nil)
 	default:
-		return rest.Bars(mf.ctx, httpClient, symbol, dataType, start, end, batchSize, adjusted, writerWP, nil)
+		return rest.Bars(mf.ctx, httpClient, symbol, dataType, start, end, batchSize, writerWP, nil)
 	}
 }
 

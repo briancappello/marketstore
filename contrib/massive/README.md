@@ -25,7 +25,8 @@ configuration file under `bgworkers`.
 | `symbols_query`       | string            | (none)                     | SQL query returning a single column of symbols (required when `symbols_dsn` is set)       |
 | `query_start`         | map[string]string | (none)                     | Start dates per frequency for backfill. Keys are timeframes (e.g., `1Min`, `1D`) or `trades`/`quotes`. |
 | `backfill_batch_size` | int               | `50000`                    | Pagination limit for REST API backfill                                                    |
-| `backfill_adjusted`   | bool              | `true`                     | Whether backfilled bars are split-adjusted                                                |
+| `splits_sync`         | bool              | `true`                     | Sync split events from Massive into `{symbol}/1D/SPLITS` (see [Adjusted prices](#adjusted-prices)) |
+| `splits_sync_time`    | string            | `03:30`                    | Daily split sync time, `HH:MM` America/New_York                                           |
 
 ### Example
 
@@ -183,9 +184,35 @@ massive_backfiller \
 | `-symbols`        | `*`                       | Glob pattern for symbols                        |
 | `-parallelism`    | NumCPU                    | Number of parallel API workers                  |
 | `-batchSize`      | 50000                     | API pagination limit                            |
-| `-adjusted`       | true                      | Request split-adjusted bars                     |
 | `-config`         | `/etc/mkts.yml`           | Path to MarketStore config                      |
 | `-dir`            | (from config)             | Override mktsdb data directory                  |
+
+## Adjusted prices
+
+Every bar this plugin writes is **unadjusted** (raw), from every source: the
+WebSocket stream, flat files, REST backfill and reconnect gap-fill. REST
+requests always send `adjusted=false`, and a response that reports
+`adjusted: true` is rejected. The `backfill_adjusted` option is removed:
+`true` stops the plugin at startup, `false` only logs a deprecation warning.
+
+The plugin also syncs split events (forward splits, reverse splits and stock
+dividends) from `GET /stocks/v1/splits` into the corporate-event store, in the
+bucket `{symbol}/1D/SPLITS`. It syncs at startup and daily at
+`splits_sync_time`. Every tracked symbol is covered: the configured symbols
+plus every symbol that already has data in this instance.
+
+To get split-adjusted data, apply the `adjust` function when you query:
+
+```python
+import pymarketstore as pymkts
+p = pymkts.Params('NVDA', '1D', 'OHLCV', functions=["adjust('split')"])
+```
+
+Prices (`Open`, `High`, `Low`, `Close`, `VWAP`, `Price`, `BidPrice`,
+`AskPrice`) are divided by the split factor, and sizes (`Volume`, `Size`,
+`BidSize`, `AskSize`) are multiplied by it, for every row before the split's
+execution date. Splits that have been announced but have not started yet are
+ignored.
 
 ## Data Types
 

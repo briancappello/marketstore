@@ -103,7 +103,6 @@ var (
 	apiKey         string
 	baseURL        string
 	batchSize      int
-	adjusted       bool
 	configFilePath string
 	grpcAddress    string
 	noRPC          bool
@@ -131,8 +130,6 @@ func init() {
 	flag.StringVar(&apiKey, "apiKey", "", "Massive API key (from flag, POLYGON_API_KEY, MASSIVE_API_KEY env, or config)")
 	flag.StringVar(&baseURL, "baseURL", "",
 		"override Massive API base URL (default from config or https://api.massive.com)")
-	flag.BoolVar(&adjusted, "adjusted", true,
-		"request split-adjusted price data")
 	flag.StringVar(&configFilePath, "config", "mkts.yml",
 		"path to the mkts.yml config file (default: mkts.yml in current directory)")
 	flag.StringVar(&grpcAddress, "grpc", "localhost:5995",
@@ -299,7 +296,7 @@ func main() {
 			// Assume it's a bar timeframe (e.g., "1Min", "5Min", "1H", "1D").
 			timeframe := key
 			runBackfill(ctx, timeframe+" bars", symbolInfos, configStart, end, func(symInfo massiveconfig.SymbolInfo, effectiveStart time.Time, writerWP *worker.Pool) {
-				if err := rest.Bars(ctx, client, symInfo.Symbol, timeframe, effectiveStart, end, batchSize, adjusted, writerWP, writer); err != nil {
+				if err := rest.Bars(ctx, client, symInfo.Symbol, timeframe, effectiveStart, end, batchSize, writerWP, writer); err != nil {
 					if err == context.Canceled {
 						return
 					}

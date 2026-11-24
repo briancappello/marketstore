@@ -165,7 +165,6 @@ func Bars(
 	timeframe string,
 	from, to time.Time,
 	limit int,
-	adjusted bool,
 	writerWP *worker.Pool,
 	writer backfill.Writer,
 ) error {
@@ -195,7 +194,7 @@ func Bars(
 	if len(chunks) == 1 {
 		// Single chunk: fetch directly without parallelization overhead.
 		return fetchAndWriteBars(ctx, client, symbol, timeframe, apiTimespan, multiplier,
-			from, to, limit, adjusted, writerWP, writer)
+			from, to, limit, writerWP, writer)
 	}
 
 	// Fetch chunks in parallel.
@@ -236,7 +235,7 @@ func Bars(
 			}
 
 			resp, err := api.GetHistoricAggregates(client, symbol, apiTimespan, multiplier,
-				dr.from, dr.to, limit, adjusted)
+				dr.from, dr.to, limit)
 			if err != nil {
 				results <- chunkResult{idx: idx, err: err}
 				return
@@ -334,7 +333,6 @@ func BarsWindow(
 	symbol, timeframe string,
 	from, to time.Time,
 	limit int,
-	adjusted bool,
 	writer backfill.Writer,
 ) (int, error) {
 	select {
@@ -346,7 +344,7 @@ func BarsWindow(
 	if err != nil {
 		return 0, fmt.Errorf("invalid timeframe %q: %w", timeframe, err)
 	}
-	resp, err := api.GetAggregatesWindow(client, symbol, apiTimespan, multiplier, from, to, limit, adjusted)
+	resp, err := api.GetAggregatesWindow(client, symbol, apiTimespan, multiplier, from, to, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -368,7 +366,6 @@ func fetchAndWriteBars(
 	multiplier int,
 	from, to time.Time,
 	limit int,
-	adjusted bool,
 	writerWP *worker.Pool,
 	writer backfill.Writer,
 ) error {
@@ -379,7 +376,7 @@ func fetchAndWriteBars(
 	default:
 	}
 
-	resp, err := api.GetHistoricAggregates(client, symbol, apiTimespan, multiplier, from, to, limit, adjusted)
+	resp, err := api.GetHistoricAggregates(client, symbol, apiTimespan, multiplier, from, to, limit)
 	if err != nil {
 		return err
 	}

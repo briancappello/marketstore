@@ -104,4 +104,7 @@ bgworkers:
         1D: "2020-01-01"
         trades: "2024-06-01"
       backfill_batch_size: 50000
-      backfill_adjusted: true
+      # Bars are always stored unadjusted. Split events are synced to
+      # <SYM>/1D/SPLITS; query with adjust('split') for adjusted prices.
+      # splits_sync: true
+      # splits_sync_time: "03:30"   # America/New_York

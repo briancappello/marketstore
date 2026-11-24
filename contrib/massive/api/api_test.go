@@ -305,12 +305,40 @@ func TestGetAggregatesWindowUsesMillisecondBounds(t *testing.T) {
 
 	from := time.Date(2026, 9, 24, 15, 37, 0, 0, time.UTC)
 	to := from.Add(2 * time.Minute)
-	_, err := GetAggregatesWindow(srv.Client(), "AAPL", "second", 1, from, to, 50000, true)
+	_, err := GetAggregatesWindow(srv.Client(), "AAPL", "second", 1, from, to, 50000)
 	assert.NoError(t, err)
 	assert.Equal(t, "/v2/aggs/ticker/AAPL/range/1/second/1790264220000/1790264340000", gotPath)
 
 	// The date-bounded variant is unchanged.
-	_, err = GetHistoricAggregates(srv.Client(), "AAPL", "minute", 1, from, to, 50000, true)
+	_, err = GetHistoricAggregates(srv.Client(), "AAPL", "minute", 1, from, to, 50000)
 	assert.NoError(t, err)
 	assert.Equal(t, "/v2/aggs/ticker/AAPL/range/1/minute/2026-09-24/2026-09-24", gotPath)
+}
+
+// Bars are always requested unadjusted, and an adjusted response is never
+// accepted. Not parallel: it points the package-level baseURL at a test server.
+func TestAggregatesAreAlwaysUnadjusted(t *testing.T) {
+	var gotAdjusted []string
+	respond := `{"ticker":"AAPL","status":"OK","adjusted":false,"results":[{"o":1,"h":1,"l":1,"c":1,"v":1,"t":1}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAdjusted = append(gotAdjusted, r.URL.Query().Get("adjusted"))
+		_, _ = w.Write([]byte(respond))
+	}))
+	defer srv.Close()
+	orig := baseURL
+	SetBaseURL(srv.URL)
+	defer SetBaseURL(orig)
+
+	from := time.Date(2026, 9, 24, 15, 37, 0, 0, time.UTC)
+	_, err := GetHistoricAggregates(srv.Client(), "AAPL", "minute", 1, from, from, 50000)
+	assert.NoError(t, err)
+	_, err = GetAggregatesWindow(srv.Client(), "AAPL", "second", 1, from, from, 50000)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"false", "false"}, gotAdjusted)
+
+	respond = `{"ticker":"AAPL","status":"OK","adjusted":true,"results":[{"o":1,"h":1,"l":1,"c":1,"v":1,"t":1}]}`
+	agg, err := GetHistoricAggregates(srv.Client(), "AAPL", "minute", 1, from, from, 50000)
+	assert.ErrorIs(t, err, ErrAdjustedResponse)
+	assert.Contains(t, err.Error(), "AAPL")
+	assert.Nil(t, agg)
 }

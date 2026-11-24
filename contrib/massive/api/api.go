@@ -34,6 +34,10 @@ const (
 // retryable and should cause the backfill to stop.
 var ErrAuthFailed = errors.New("API authentication failed")
 
+// ErrAdjustedResponse is returned when an aggregates response is split-adjusted
+// even though adjusted=false was requested. Such bars must not be stored.
+var ErrAdjustedResponse = errors.New("aggregates response is split-adjusted")
+
 var (
 	baseURL = "https://api.massive.com"
 	apiKey  string
@@ -73,7 +77,7 @@ type AggResult struct {
 	NumberOfItems     int     `json:"n"`
 }
 
-// GetHistoricAggregates fetches aggregated OHLCV bars from the Massive REST API.
+// GetHistoricAggregates fetches unadjusted OHLCV bars from the Massive REST API.
 // It automatically paginates through all results via next_url when the result
 // set exceeds the limit.
 func GetHistoricAggregates(
@@ -82,10 +86,9 @@ func GetHistoricAggregates(
 	multiplier int,
 	from, to time.Time,
 	limit int,
-	adjusted bool,
 ) (*HistoricAggregates, error) {
 	return getAggregates(client, ticker, timespan, multiplier,
-		from.Format(dateFormat), to.Format(dateFormat), limit, adjusted)
+		from.Format(dateFormat), to.Format(dateFormat), limit)
 }
 
 // GetAggregatesWindow is GetHistoricAggregates with the window sent as Unix
@@ -99,10 +102,9 @@ func GetAggregatesWindow(
 	multiplier int,
 	from, to time.Time,
 	limit int,
-	adjusted bool,
 ) (*HistoricAggregates, error) {
 	return getAggregates(client, ticker, timespan, multiplier,
-		strconv.FormatInt(from.UnixMilli(), 10), strconv.FormatInt(to.UnixMilli(), 10), limit, adjusted)
+		strconv.FormatInt(from.UnixMilli(), 10), strconv.FormatInt(to.UnixMilli(), 10), limit)
 }
 
 func getAggregates(
@@ -111,7 +113,6 @@ func getAggregates(
 	multiplier int,
 	from, to string,
 	limit int,
-	adjusted bool,
 ) (*HistoricAggregates, error) {
 	u, err := url.Parse(fmt.Sprintf(aggsURL, baseURL, ticker, multiplier, timespan, from, to))
 	if err != nil {
@@ -120,7 +121,8 @@ func getAggregates(
 
 	q := u.Query()
 	q.Set("apiKey", apiKey)
-	q.Set("adjusted", strconv.FormatBool(adjusted))
+	// Bars are always stored unadjusted; adjust('split') adjusts on read.
+	q.Set("adjusted", "false")
 	q.Set("sort", "asc")
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
@@ -134,7 +136,6 @@ func paginateAggregates(client *http.Client, startURL string) (*HistoricAggregat
 	var allResults []AggResult
 	currentURL := startURL
 	var ticker string
-	var adjusted bool
 
 	for currentURL != "" {
 		body, err := download(client, currentURL)
@@ -147,10 +148,13 @@ func paginateAggregates(client *http.Client, startURL string) (*HistoricAggregat
 			return nil, fmt.Errorf("unmarshal aggs response: %w", err)
 		}
 
+		if page.Adjusted {
+			return nil, fmt.Errorf("%w: %s", ErrAdjustedResponse, page.Ticker)
+		}
+
 		// Capture metadata from the first page.
 		if ticker == "" {
 			ticker = page.Ticker
-			adjusted = page.Adjusted
 		}
 
 		allResults = append(allResults, page.Results...)
@@ -161,7 +165,6 @@ func paginateAggregates(client *http.Client, startURL string) (*HistoricAggregat
 	return &HistoricAggregates{
 		Ticker:      ticker,
 		Status:      "OK",
-		Adjusted:    adjusted,
 		ResultCount: len(allResults),
 		Results:     allResults,
 	}, nil
