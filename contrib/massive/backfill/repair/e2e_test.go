@@ -72,7 +72,7 @@ func writeDailyBars(t *testing.T, sym string, bars map[time.Time]float32) {
 	cs.AddColumn("Close", append([]float32(nil), p...))
 	cs.AddColumn("Volume", v)
 	csm := io.NewColumnSeriesMap()
-	csm.AddColumnSeries(*io.NewTimeBucketKeyFromString(sym+"/1D/OHLCV"), cs)
+	csm.AddColumnSeries(*io.NewTimeBucketKeyFromString(sym + "/1D/OHLCV"), cs)
 	require.NoError(t, executor.WriteCSM(csm, false))
 }
 
