@@ -315,6 +315,15 @@ func (mf *MassiveFetcher) Run() {
 	// Start WebSocket streaming immediately to avoid missing real-time data.
 	mf.startStreaming()
 
+	// Split events run on their own schedule: never behind a long backfill,
+	// and not turned off by --no-backfill.
+	if mf.config.SplitsSyncEnabled() {
+		mf.wg.Add(1)
+		go mf.runSplitSyncLoop(time.Now, time.After)
+	} else {
+		log.Info("[massive] split sync disabled via splits_sync: false")
+	}
+
 	// Backfill concurrently with streaming. Any overlap with streaming data
 	// is harmless - duplicate writes are idempotent.
 	mf.backfills.submit(startup)

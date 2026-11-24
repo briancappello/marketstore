@@ -342,3 +342,48 @@ func TestAggregatesAreAlwaysUnadjusted(t *testing.T) {
 	assert.Contains(t, err.Error(), "AAPL")
 	assert.Nil(t, agg)
 }
+
+// Not parallel: it points the package-level baseURL at a test server.
+func TestListSplitsFollowsNextURL(t *testing.T) {
+	var srv *httptest.Server
+	var queries []string
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/stocks/v1/splits", r.URL.Path)
+		queries = append(queries, r.URL.RawQuery)
+		if r.URL.Query().Get("cursor") == "" {
+			_, _ = w.Write([]byte(`{"status":"OK","next_url":"` + srv.URL + `/stocks/v1/splits?cursor=p2","results":[
+				{"id":"a","ticker":"AAPL","execution_date":"2020-08-31","adjustment_type":"forward_split","split_from":1,"split_to":4}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"OK","results":[
+			{"id":"b","ticker":"NVDA","execution_date":"2024-06-10","adjustment_type":"forward_split","split_from":1,"split_to":10}]}`))
+	}))
+	defer srv.Close()
+	orig := baseURL
+	SetBaseURL(srv.URL)
+	defer SetBaseURL(orig)
+	SetAPIKey("k")
+
+	got, err := ListSplits(srv.Client(), SplitsQuery{})
+	assert.NoError(t, err)
+	assert.Len(t, got, 2)
+	assert.Equal(t, "NVDA", got[1].Ticker)
+	assert.Equal(t, 10.0, got[1].SplitTo)
+	assert.Contains(t, queries[0], "limit=5000")
+	assert.Contains(t, queries[0], "sort=execution_date.asc")
+	assert.Contains(t, queries[1], "apiKey=k")
+}
+
+// Not parallel: it points the package-level baseURL at a test server.
+func TestListSplitsAuthFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	orig := baseURL
+	SetBaseURL(srv.URL)
+	defer SetBaseURL(orig)
+
+	_, err := ListSplits(srv.Client(), SplitsQuery{})
+	assert.ErrorIs(t, err, ErrAuthFailed)
+}

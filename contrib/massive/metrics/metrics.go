@@ -17,3 +17,13 @@ var MassiveStreamLastUpdate = promauto.NewGaugeVec(
 		"type",
 	},
 )
+
+// MassiveSplitsLastSync stores the Unix time of the last successful split sync.
+var MassiveSplitsLastSync = promauto.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "alpaca",
+		Subsystem: "marketstore",
+		Name:      "massive_splits_last_sync_time",
+		Help:      "Last time split events were synced from Massive",
+	},
+)

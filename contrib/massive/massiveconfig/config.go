@@ -85,6 +85,11 @@ type FetcherConfig struct {
 	// adjust('split') adjusts them on read. It is still parsed so that
 	// ValidateConfig can reject true and warn about false.
 	BackfillAdjusted *bool `json:"backfill_adjusted"`
+	// SplitsSync turns the split-event sync on or off. Defaults to true.
+	SplitsSync *bool `json:"splits_sync"`
+	// SplitsSyncTime is the daily split-sync time, "HH:MM" America/New_York.
+	// Defaults to DefaultSplitsSyncTime.
+	SplitsSyncTime string `json:"splits_sync_time"`
 	// SymbolsDSN is the PostgreSQL connection string for fetching symbols and
 	// storing sync timestamps. When set, symbols are queried from the database
 	// and the static Symbols field is ignored.
@@ -128,6 +133,29 @@ type FetcherConfig struct {
 	SymbolInfos []SymbolInfo `json:"-"`
 }
 
+// DefaultSplitsSyncTime is the default daily split-sync time (America/New_York).
+// It is before the 04:00 pre-market open, so a split executing that day is
+// stored before its first bar.
+const DefaultSplitsSyncTime = "03:30"
+
+// SplitsSyncEnabled reports whether the split-event sync runs.
+func (c *FetcherConfig) SplitsSyncEnabled() bool {
+	return c.SplitsSync == nil || *c.SplitsSync
+}
+
+// SplitsSyncClock returns the daily split-sync hour and minute.
+func (c *FetcherConfig) SplitsSyncClock() (hour, minute int, err error) {
+	v := c.SplitsSyncTime
+	if v == "" {
+		v = DefaultSplitsSyncTime
+	}
+	t, err := time.Parse("15:04", v)
+	if err != nil {
+		return 0, 0, fmt.Errorf("splits_sync_time %q: must be HH:MM: %w", v, err)
+	}
+	return t.Hour(), t.Minute(), nil
+}
+
 // DefaultMaxDynamicSymbols is the per-DataType subscription cap applied when
 // MaxDynamicSymbols is not set (or <= 0) and DynamicTicks is enabled.
 const DefaultMaxDynamicSymbols = 500
@@ -149,6 +177,9 @@ func ValidateConfig(config *FetcherConfig) error {
 				"delete the key from the config and query with adjust('split') for split-adjusted data")
 		}
 		log.Warn("[massive] backfill_adjusted is deprecated and has no effect: bars are always stored unadjusted; delete the key")
+	}
+	if _, _, err := config.SplitsSyncClock(); err != nil {
+		return err
 	}
 
 	if config.SymbolsDSN != "" {

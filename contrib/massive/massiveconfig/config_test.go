@@ -332,3 +332,25 @@ func TestValidateConfigBackfillAdjusted(t *testing.T) {
 	assert.NoError(t, ValidateConfig(&FetcherConfig{BackfillAdjusted: &no}))
 	assert.NoError(t, ValidateConfig(&FetcherConfig{}))
 }
+
+func TestSplitsSyncConfig(t *testing.T) {
+	t.Parallel()
+
+	c := FetcherConfig{}
+	assert.True(t, c.SplitsSyncEnabled())
+	h, m, err := c.SplitsSyncClock()
+	require.NoError(t, err)
+	assert.Equal(t, []int{3, 30}, []int{h, m})
+
+	off := false
+	c = FetcherConfig{SplitsSync: &off, SplitsSyncTime: "05:15"}
+	assert.False(t, c.SplitsSyncEnabled())
+	h, m, err = c.SplitsSyncClock()
+	require.NoError(t, err)
+	assert.Equal(t, []int{5, 15}, []int{h, m})
+
+	err = ValidateConfig(&FetcherConfig{SplitsSyncTime: "25:00"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "splits_sync_time")
+	assert.Error(t, ValidateConfig(&FetcherConfig{SplitsSyncTime: "3pm"}))
+}

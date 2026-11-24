@@ -23,6 +23,7 @@ const (
 	tickersURL   = "%s/v3/reference/tickers"
 	exchangesURL = "%s/v3/reference/exchanges"
 	overviewURL  = "%s/v3/reference/tickers/%s"
+	splitsURL    = "%s/stocks/v1/splits"
 
 	retryCount     = 10
 	defaultTimeout = 10 * time.Second
@@ -479,6 +480,67 @@ func GetTickerRoundLot(client *http.Client, ticker string) (int, error) {
 	}
 
 	return resp.Results.RoundLot, nil
+}
+
+// --- Splits ---
+
+// ListSplitsResponse is the response from GET /stocks/v1/splits.
+type ListSplitsResponse struct {
+	Results   []Split `json:"results"`
+	Status    string  `json:"status"`
+	RequestID string  `json:"request_id"`
+	NextURL   string  `json:"next_url"`
+}
+
+// Split is one share-change event from the splits endpoint.
+type Split struct {
+	ID                         string  `json:"id"`
+	Ticker                     string  `json:"ticker"`
+	ExecutionDate              string  `json:"execution_date"`
+	AdjustmentType             string  `json:"adjustment_type"`
+	SplitFrom                  float64 `json:"split_from"`
+	SplitTo                    float64 `json:"split_to"`
+	HistoricalAdjustmentFactor float64 `json:"historical_adjustment_factor"`
+}
+
+// SplitsQuery filters a ListSplits request. Zero values are omitted.
+type SplitsQuery struct {
+	// Tickers limits the result to these tickers (ticker.any_of).
+	Tickers []string
+}
+
+// ListSplits fetches every split event matching q, oldest first, following
+// next_url through every page.
+func ListSplits(client *http.Client, q SplitsQuery) ([]Split, error) {
+	u, err := url.Parse(fmt.Sprintf(splitsURL, baseURL))
+	if err != nil {
+		return nil, fmt.Errorf("parse splits URL: %w", err)
+	}
+
+	params := u.Query()
+	params.Set("apiKey", apiKey)
+	params.Set("limit", "5000")
+	params.Set("sort", "execution_date.asc")
+	if len(q.Tickers) > 0 {
+		params.Set("ticker.any_of", strings.Join(q.Tickers, ","))
+	}
+	u.RawQuery = params.Encode()
+
+	var all []Split
+	currentURL := u.String()
+	for currentURL != "" {
+		body, err := download(client, currentURL)
+		if err != nil {
+			return nil, err
+		}
+		page := &ListSplitsResponse{}
+		if err := json.Unmarshal(body, page); err != nil {
+			return nil, fmt.Errorf("unmarshal splits: %w", err)
+		}
+		all = append(all, page.Results...)
+		currentURL = addAPIKey(page.NextURL)
+	}
+	return all, nil
 }
 
 // --- helpers ---

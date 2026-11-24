@@ -28,11 +28,11 @@
 
 ## 4. Massive: split ingestion
 
-- [ ] 4.1 Add `api.ListSplits` (all pages, `limit=5000`, ascending `execution_date`) and the `Split` response type. Verify with an `httptest` test for paging through `next_url`, and that 403 returns `ErrAuthFailed`.
-- [ ] 4.2 Add a pure `splitsync.Plan(results, tracked, wildcard, stored)` that returns the events to write and the skipped results. It maps fields, skips malformed results with a reason, and adds neutralized rows. Verify with table tests for the mapping, malformed, untracked, wildcard and withdrawn scenarios.
-- [ ] 4.3 Add `splits_sync` (default true) and `splits_sync_time` (default `03:30` ET) to `FetcherConfig` and validate them. Verify with config tests for an invalid time.
-- [ ] 4.4 Wire the sync loop into `MassiveFetcher.Run`: startup sync plus daily sync on its own goroutine (D6), with the tracked set from config plus catalog symbols, writes through `executor.WriteCSM` in batches of 500, the count log line, and the last-success metric. `--no-backfill` does not turn it off. Verify with a test using a fake clock and an `httptest` server: a startup run happens; a 500 error is retried at the next schedule while streaming is not blocked; a 403 stops the run.
-- [ ] 4.5 Commit: `feat(massive): sync split events into the corporate event store`.
+- [x] 4.1 Add `api.ListSplits` (all pages, `limit=5000`, ascending `execution_date`) and the `Split` response type. Verify with an `httptest` test for paging through `next_url`, and that 403 returns `ErrAuthFailed`.
+- [x] 4.2 Add a pure `splitsync.Plan(results, tracked, wildcard, stored)` that returns the events to write and the skipped results. It maps fields, skips malformed results with a reason, and adds neutralized rows. Verify with table tests for the mapping, malformed, untracked, wildcard and withdrawn scenarios.
+- [x] 4.3 Add `splits_sync` (default true) and `splits_sync_time` (default `03:30` ET) to `FetcherConfig` and validate them. Verify with config tests for an invalid time.
+- [x] 4.4 Wire the sync loop into `MassiveFetcher.Run`: startup sync plus daily sync on its own goroutine (D6), with the tracked set from config plus catalog symbols, writes through `executor.WriteCSM` in batches of 500, the count log line, and the last-success metric. `--no-backfill` does not turn it off. Verify with a test using a fake clock and an `httptest` server: a startup run happens; a 500 error is retried at the next schedule while streaming is not blocked; a 403 stops the run.
+- [x] 4.5 Commit: `feat(massive): sync split events into the corporate event store`.
 
 ## 5. Massive: split repair command
 
