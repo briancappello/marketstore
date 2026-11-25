@@ -98,7 +98,7 @@ So if a slot's `Offset` is at or past the file's size from before a transaction 
 
 **Recording the pre-write size.**
 - `FlushCommandsToWAL` records each variable file's size (`preEOF`) before it writes the WAL.
-  - It opens each variable file once and seeks to the end, and it reuses that handle for the primary write. The cost is one `lseek` per file per flush.
+  - It `stat`s each distinct variable file once per flush. That is one syscall per file, next to the open that the primary write already does.
   - Nothing else writes primary files between the WAL write and the primary write, because `fileMu` is held for the whole call.
 - The sizes travel in a **trailer** appended to `tgSerialized`, after the last write command: `preEOF int64` for each variable command in command order, then `count int64`, then an 8-byte magic.
   - The WAL checksum covers the trailer.

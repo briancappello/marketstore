@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	goio "io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -292,7 +293,12 @@ func (wf *WALFileType) FlushCommandsToWAL(writeCommands []*wal.WriteCommand) (er
 		}
 	}
 
-	tgSerialized, writesPerFile := serializeTG(wf.txnPipe.tgID, writeCommands)
+	// Replay checks each variable write against its file's size from before
+	// this group's primary writes, so merge same-slot writes first: the check
+	// is exact only when a slot gets at most one write per group.
+	writeCommands = mergeVariableCommands(writeCommands)
+	preEOF := variablePreEOF(filepath.Dir(wf.FilePtr.Name()), writeCommands)
+	tgSerialized, writesPerFile := serializeTG(wf.txnPipe.tgID, writeCommands, preEOF)
 
 	if !wf.WALBypass {
 		// Serialize the size of the buffer into another buffer
@@ -356,7 +362,155 @@ func (wf *WALFileType) FlushCommandsToWAL(writeCommands []*wal.WriteCommand) (er
 	return nil
 }
 
-func serializeTG(tgID int64, commands []*wal.WriteCommand,
+// varTrailerMagic ends the trailer that serializeTG appends to a transaction
+// group carrying variable-length writes. The trailer is
+//
+//	preEOF int64 (one per variable command, in command order) | count int64 | magic [8]byte
+//
+// Parsers read exactly WTCount commands and ignore what follows, so binaries
+// that predate the trailer parse these groups unchanged.
+var varTrailerMagic = [8]byte{'M', 'K', 'T', 'S', 'V', 'E', 'O', 'F'}
+
+const varTrailerFixedLen = 16 // count + magic
+
+// noPreEOF means "size unknown": replay applies the write unconditionally.
+const noPreEOF int64 = math.MaxInt64
+
+// mergeVariableCommands folds variable-length commands addressed to the same
+// file and slot into the first of them, concatenating payloads in order. The
+// result equals applying them one at a time: a variable block is the old block
+// plus each payload, stably sorted by interval ticks, and a stable sort of an
+// already stably sorted prefix plus more rows is the stable sort of it all.
+// Commands that are not merged keep their position and identity.
+func mergeVariableCommands(cmds []*wal.WriteCommand) []*wal.WriteCommand {
+	type slotKey struct {
+		path   string
+		offset int64
+	}
+	var first map[slotKey]int
+	var out []*wal.WriteCommand
+	for i, c := range cmds {
+		if c.RecordType != io.VARIABLE {
+			if out != nil {
+				out = append(out, c)
+			}
+			continue
+		}
+		if first == nil {
+			first = make(map[slotKey]int)
+		}
+		k := slotKey{c.WALKeyPath, c.Offset}
+		j, seen := first[k]
+		if !seen {
+			if out != nil {
+				first[k] = len(out)
+				out = append(out, c)
+			} else {
+				first[k] = i
+			}
+			continue
+		}
+		if out == nil {
+			out = append(make([]*wal.WriteCommand, 0, len(cmds)), cmds[:i]...)
+		}
+		merged := *out[j]
+		merged.Data = append(append(make([]byte, 0, len(merged.Data)+len(c.Data)), merged.Data...), c.Data...)
+		out[j] = &merged
+	}
+	if out == nil {
+		return cmds
+	}
+	return out
+}
+
+// variablePreEOF returns, per command, the size of a variable command's file
+// before any primary write of this group (noPreEOF for fixed commands and for
+// files that cannot be stat'ed). It must run before the primary writes.
+func variablePreEOF(rootDir string, cmds []*wal.WriteCommand) []int64 {
+	var sizes map[string]int64
+	preEOF := make([]int64, len(cmds))
+	for i, c := range cmds {
+		preEOF[i] = noPreEOF
+		if c.RecordType != io.VARIABLE {
+			continue
+		}
+		if sizes == nil {
+			sizes = make(map[string]int64)
+		}
+		size, ok := sizes[c.WALKeyPath]
+		if !ok {
+			size = noPreEOF
+			if fi, err := os.Stat(walKeyToFullPath(rootDir, c.WALKeyPath)); err == nil {
+				size = fi.Size()
+			}
+			sizes[c.WALKeyPath] = size
+		}
+		preEOF[i] = size
+	}
+	return preEOF
+}
+
+// appendVarTrailer appends the replay trailer for the variable commands, if
+// any. It is skipped when a command has no data shapes: an empty shape vector
+// serializes to zero bytes, so a parser would read the trailer as shapes.
+func appendVarTrailer(tgSerialized []byte, commands []*wal.WriteCommand, preEOF []int64) []byte {
+	if preEOF == nil {
+		return tgSerialized
+	}
+	var count int64
+	for _, c := range commands {
+		if len(c.DataShapes) == 0 {
+			return tgSerialized
+		}
+		if c.RecordType == io.VARIABLE {
+			count++
+		}
+	}
+	if count == 0 {
+		return tgSerialized
+	}
+	for i, c := range commands {
+		if c.RecordType == io.VARIABLE {
+			tgSerialized, _ = io.Serialize(tgSerialized, preEOF[i])
+		}
+	}
+	tgSerialized, _ = io.Serialize(tgSerialized, count)
+	return append(tgSerialized, varTrailerMagic[:]...)
+}
+
+// parseVarTrailer returns the pre-write file size of each write set (noPreEOF
+// for fixed sets, and for every set when the trailer is absent or does not
+// match the group).
+func parseVarTrailer(trailer []byte, wtSets []wal.WTSet) []int64 {
+	preEOF := make([]int64, len(wtSets))
+	for i := range preEOF {
+		preEOF[i] = noPreEOF
+	}
+	n := len(trailer)
+	if n < varTrailerFixedLen || !bytes.Equal(trailer[n-8:], varTrailerMagic[:]) {
+		return preEOF
+	}
+	count := io.ToInt64(trailer[n-16 : n-8])
+	var variable int64
+	for i := range wtSets {
+		if wtSets[i].RecordType == io.VARIABLE {
+			variable++
+		}
+	}
+	if count != variable || int64(n) != varTrailerFixedLen+8*count {
+		return preEOF
+	}
+	k := 0
+	for i := range wtSets {
+		if wtSets[i].RecordType == io.VARIABLE {
+			preEOF[i] = io.ToInt64(trailer[8*k : 8*k+8])
+			k++
+		}
+	}
+	return preEOF
+}
+
+func serializeTG(tgID int64, commands []*wal.WriteCommand, preEOF []int64,
 ) (tgSerialized2 []byte, writesPerFile map[string][]wal.OffsetIndexBuffer) {
 	WTCount := len(commands)
 
@@ -391,7 +545,7 @@ func serializeTG(tgID int64, commands []*wal.WriteCommand,
 			tgSerialized[oStart:oStart+bufferSize])
 	}
 
-	return tgSerialized, writesPerFile
+	return appendVarTrailer(tgSerialized, commands, preEOF), writesPerFile
 }
 
 func writeFixedBuffer(writes []wal.OffsetIndexBuffer, fullPath string) error {
@@ -596,6 +750,13 @@ func validateCheckSum(tgLenSerialized, tgSerialized, checkBuf []byte) error {
 }
 
 func ParseTGData(tgSerialized []byte, rootPath string) (tgID int64, wtSets []wal.WTSet) {
+	tgID, wtSets, _ = parseTGData(tgSerialized, rootPath)
+	return tgID, wtSets
+}
+
+// parseTGData is ParseTGData plus, per write set, the size its variable file
+// had before the group's primary writes (noPreEOF when not recorded).
+func parseTGData(tgSerialized []byte, rootPath string) (tgID int64, wtSets []wal.WTSet, preEOF []int64) {
 	// see /docs/design/durable_writes_design.txt for the details of the transaction group format
 	const (
 		tgIDLenBytes      = 8
@@ -641,7 +802,7 @@ func ParseTGData(tgSerialized []byte, rootPath string) (tgID int64, wtSets []wal
 		)
 	}
 
-	return tgID, wtSets
+	return tgID, wtSets, parseVarTrailer(tgSerialized[cursor:], wtSets)
 }
 
 func (wf *WALFileType) IsOpen() bool {

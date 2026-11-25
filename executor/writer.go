@@ -161,6 +161,18 @@ const indexOffsetLengthBytes = 24
 
 func WriteBufferToFileIndirect(fp stdio.ReadWriteSeeker, buffer wal.OffsetIndexBuffer, varRecLen int,
 ) (err error) {
+	_, err = writeBufferToFileIndirect(fp, buffer, varRecLen, noPreEOF)
+	return err
+}
+
+// writeBufferToFileIndirect appends buffer to its variable block unless the
+// block's index slot already points at or past preEOF, the file's size before
+// the transaction group carrying buffer began its primary writes. Blocks are
+// only ever written at end-of-file, before their slot, so such a slot already
+// holds this write: WAL replay uses this to avoid appending it twice.
+func writeBufferToFileIndirect(fp stdio.ReadWriteSeeker, buffer wal.OffsetIndexBuffer, varRecLen int,
+	preEOF int64,
+) (skipped bool, err error) {
 	/*
 		Here we write the data payload of the buffer to the end of the data file
 		Prior to writing the new data, we fetch any previously written data and
@@ -175,35 +187,38 @@ func WriteBufferToFileIndirect(fp stdio.ReadWriteSeeker, buffer wal.OffsetIndexB
 		First we read the file at the index location to see if this is an incremental write
 	*/
 	if _, err = fp.Seek(primaryOffset, stdio.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek primaryOffset:%w", err)
+		return false, fmt.Errorf("failed to seek primaryOffset:%w", err)
 	}
 	idBuf := make([]byte, indexOffsetLengthBytes) // {Index, Offset, Len}
 	if _, err = fp.Read(idBuf); err != nil {
-		return err
+		return false, err
 	}
 	currentRecInfoI, err := io.SwapSliceByte(idBuf, IndirectRecordInfo{})
 	if err != nil {
-		return err
+		return false, err
 	}
 	currentRecInfo, ok := currentRecInfoI.([]IndirectRecordInfo)
 	if !ok {
-		return errors.New("failed to cast record to IndirectRecordInfo slice")
+		return false, errors.New("failed to cast record to IndirectRecordInfo slice")
+	}
+	if currentRecInfo[0].Index != 0 && currentRecInfo[0].Offset >= preEOF {
+		return true, nil
 	}
 	/*
 		Read the data from the previously written location, if it exists
 	*/
 	if currentRecInfo[0].Index != 0 {
 		if _, err = fp.Seek(currentRecInfo[0].Offset, stdio.SeekStart); err != nil {
-			return err
+			return false, err
 		}
 		oldData := make([]byte, currentRecInfo[0].Len)
 		if _, err2 := fp.Read(oldData); err2 != nil {
-			return err2
+			return false, err2
 		}
 		if !utils.InstanceConfig.DisableVariableCompression {
 			oldData, err = snappy.Decode(nil, oldData)
 			if err != nil {
-				return err
+				return false, err
 			}
 		}
 		dataToBeWritten = append(oldData, dataToBeWritten...)
@@ -239,11 +254,11 @@ func WriteBufferToFileIndirect(fp stdio.ReadWriteSeeker, buffer wal.OffsetIndexB
 	if !utils.InstanceConfig.DisableVariableCompression {
 		comp := snappy.Encode(nil, dataToBeWritten)
 		if _, err = fp.Write(comp); err != nil {
-			return err
+			return false, err
 		}
 		dataLen = int64(len(comp))
 	} else if _, err = fp.Write(dataToBeWritten); err != nil {
-		return err
+		return false, err
 	}
 
 	// log.Info("LAL end_off:%d, len:%d, data:%v", endOfFileOffset, dataLen, dataToBeWritten)
@@ -255,14 +270,14 @@ func WriteBufferToFileIndirect(fp stdio.ReadWriteSeeker, buffer wal.OffsetIndexB
 	odata := []int64{targetRecInfo.Index, targetRecInfo.Offset, targetRecInfo.Len}
 	obuf, ok := io.SwapSliceData(odata, byte(0)).([]byte)
 	if !ok {
-		return fmt.Errorf("failed to cast OffsetIndexBuffer of the target record to bytes:%v", targetRecInfo)
+		return false, fmt.Errorf("failed to cast OffsetIndexBuffer of the target record to bytes:%v", targetRecInfo)
 	}
 
 	if _, err = fp.Seek(primaryOffset, stdio.SeekStart); err != nil {
 		log.Error("failed to seek offset to write primary record", err.Error())
 	}
 	_, err = fp.Write(obuf)
-	return err
+	return false, err
 }
 
 // WriteCSM has the same logic as the executor.WriteCSM function.

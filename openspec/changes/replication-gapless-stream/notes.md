@@ -52,3 +52,15 @@ A 300-TG run agreed: 31.6 / 359.6 / 2,756.9 / 3,643.8 TG/s, so 115.5× at 1000.
 - Today's replica pays one WAL fsync per write *set*, not per transaction group as the design's Context said. That is about 16 fsyncs per TG.
 - A flush per TG alone would give 14.7×. That is not enough margin, though: taichi's live rate is about 80–130 TG/s (see 1.2), and backfill bursts are larger.
 - taichi produced about 121k TGs in one WAL rotation window (≤25 min), which is roughly 80+ TG/s during trading. Today's 24 TG/s replica path is slower than that even outside backfills, which fits the measured drops.
+
+## 1.3 Idempotent variable replay (2026-11-25)
+
+- **Tests.** `executor/walreplay_variable_test.go` simulates a crash by snapshotting the WAL and the data files, at three points: before, in the middle of, and after a transaction group's primary writes. The group continues existing tick blocks, starts new ones, and carries two writes to the same slot.
+  - With the fix, all three leave each tick once.
+  - With the slot check disabled (replay passes `noPreEOF`), "mid primary" and "after primary" fail: rows are duplicated. "before primary" passes either way. That is the pre-existing bug, reproduced.
+- **Format.** `executor/wal_trailer_test.go` covers four cases:
+  - a trailer-carrying group parses into the same write sets as the old format;
+  - an old-format group carries no pre-write sizes;
+  - fixed-only groups stay byte-identical to the old format;
+  - a mismatched trailer is ignored, and same-slot merging leaves fixed writes and the caller's commands alone.
+- **Suites.** The full 0.1 suite passes: 13/13 packages. `go test -race ./replication/... ./executor/` passes.

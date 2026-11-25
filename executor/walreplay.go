@@ -149,8 +149,8 @@ func (wf *WALFileType) Replay(dryRun bool) error {
 
 		// Note that only TG data that did not have a COMMITCOMPLETE record are replayed
 		rootDir := filepath.Dir(wf.FilePtr.Name())
-		tgID, wtSets := ParseTGData(tgSerialized, rootDir)
-		if err := wf.replayTGData(tgID, wtSets); err != nil {
+		tgID, wtSets, preEOF := parseTGData(tgSerialized, rootDir)
+		if err := wf.replayTGData(tgID, wtSets, preEOF); err != nil {
 			return fmt.Errorf("replay transaction group data. tgID=%d, "+
 				"write transaction size=%d:%w", tgID, len(wtSets), err)
 		}
@@ -173,7 +173,12 @@ func (wf *WALFileType) Replay(dryRun bool) error {
 	return nil
 }
 
-func (wf *WALFileType) replayTGData(tgID int64, wtSets []wal.WTSet) (err error) {
+// replayTGData writes one transaction group to primary storage. preEOF holds,
+// per write set, its variable file's size before the group's original primary
+// writes; a variable write whose slot already points at or past it reached
+// primary before the crash and is skipped, since re-appending it would
+// duplicate its rows. Fixed writes overwrite in place and are always replayed.
+func (wf *WALFileType) replayTGData(tgID int64, wtSets []wal.WTSet, preEOF []int64) (err error) {
 	if len(wtSets) == 0 {
 		return nil
 	}
@@ -186,7 +191,8 @@ func (wf *WALFileType) replayTGData(tgID int64, wtSets []wal.WTSet) (err error) 
 		}
 	}()
 
-	for _, wtSet := range wtSets {
+	skipped := 0
+	for i, wtSet := range wtSets {
 		fp, err2 := cfp.GetFP(wtSet.FilePath)
 		if err2 != nil {
 			// A bucket file that no longer exists is not a corrupt WAL: an
@@ -217,11 +223,12 @@ func (wf *WALFileType) replayTGData(tgID int64, wtSets []wal.WTSet) (err error) 
 			}
 		case io.VARIABLE:
 			// Find the record length - we need it to use the time column as a sort key later
-			if err = WriteBufferToFileIndirect(fp,
-				wtSet.Buffer,
-				wtSet.VarRecLen,
-			); err != nil {
+			done, err := writeBufferToFileIndirect(fp, wtSet.Buffer, wtSet.VarRecLen, preEOF[i])
+			if err != nil {
 				return err
+			}
+			if done {
+				skipped++
 			}
 		default:
 			return fmt.Errorf("record Type is incorrect from WALFile, may be invalid/outdated WAL file")
@@ -237,6 +244,9 @@ func (wf *WALFileType) replayTGData(tgID int64, wtSets []wal.WTSet) (err error) 
 	// discarded anyway. Durability is instead guaranteed by a single
 	// io.Syncfs() at the end of Replay(), before the file is marked
 	// REPLAYED and deleted.
+	if skipped > 0 {
+		log.Info("WAL replay: tgID=%d skipped %d variable writes already in primary storage", tgID, skipped)
+	}
 	wf.lastCommittedTGID = tgID
 
 	return nil
