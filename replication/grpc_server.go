@@ -80,7 +80,9 @@ func (rs *GRPCReplicationServer) GetWALStream(_ *pb.GetWALStreamRequest, stream 
 			break
 		}
 
-		err := stream.Send(&pb.GetWALStreamResponse{TransactionGroup: transactionGroup})
+		err := stream.Send(&pb.GetWALStreamResponse{
+			Body: &pb.GetWALStreamResponse_TransactionGroup{TransactionGroup: transactionGroup},
+		})
 		if err != nil {
 			log.Error(fmt.Sprintf("an error occurred while sending replication message:%s", err))
 			break

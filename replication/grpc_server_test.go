@@ -60,8 +60,8 @@ func TestGRPCReplicationServer_GetWALStream_success(t *testing.T) {
 	stream := &mock.WALStreamServer{
 		SendFunc: func(resp *proto.GetWALStreamResponse) error {
 			// test message should be sent
-			if !cmp.Equal(resp.TransactionGroup, testTGMessage) {
-				t.Errorf("got: %v, want: %v", resp.TransactionGroup, testTGMessage)
+			if !cmp.Equal(resp.GetTransactionGroup(), testTGMessage) {
+				t.Errorf("got: %v, want: %v", resp.GetTransactionGroup(), testTGMessage)
 			}
 			return nil
 		},

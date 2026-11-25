@@ -48,5 +48,5 @@ func (rc *GRPCReplicationClient) Recv() ([]byte, error) {
 	if resp == nil {
 		return nil, errors.New("nil message received from gRPC stream")
 	}
-	return resp.TransactionGroup, nil
+	return resp.GetTransactionGroup(), nil
 }

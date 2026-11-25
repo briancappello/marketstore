@@ -118,12 +118,69 @@ message WriteAheadLog {
 //}
 
 message GetWALStreamRequest {
+    // First sequence to stream. 0 asks for the current tail (live entries
+    // only), which is also what replicas built before sequencing send.
+    uint64 start_seq = 1;
+}
+
+// Gap tells a replica that the sequences it asked for are not in the master's
+// replication log, and where the log resumes.
+message Gap {
+    enum Reason {
+        REASON_UNSPECIFIED = 0;
+        // Deleted by log retention.
+        RETENTION = 1;
+        // Never logged: appends failed (for example, the disk was full).
+        LOG_BROKEN = 2;
+    }
+    uint64 requested = 1;
+    uint64 first_available = 2;
+    Reason reason = 3;
 }
 
 message GetWALStreamResponse {
-    bytes transaction_group = 1;
+    oneof body {
+        // A serialized transaction group (the WAL TG format).
+        bytes transaction_group = 1;
+        Gap gap = 3;
+    }
+    // The transaction group's sequence in the master's replication log. 0
+    // from masters built before sequencing.
+    uint64 seq = 2;
+}
+
+message ChangesSinceRequest {
+    // Report changes logged after this sequence.
+    uint64 since_seq = 1;
+}
+
+// EpochRange is an inclusive range of epochs (unix seconds) written.
+message EpochRange {
+    int64 epoch_from = 1;
+    int64 epoch_to = 2;
+}
+
+message BucketChanges {
+    // Time bucket key, e.g. "AAPL/1Min/OHLCV".
+    string tbk = 1;
+    // Variable-length (tick) bucket: re-pulling a range would duplicate rows.
+    bool variable = 2;
+    repeated EpochRange ranges = 3;
+}
+
+// ChangesSinceResponse is streamed in chunks; every chunk repeats the header
+// fields.
+message ChangesSinceResponse {
+    // The change ledger does not reach back to since_seq: changes before
+    // history_start_seq are unknown, and a full resync is required.
+    bool history_incomplete = 1;
+    uint64 history_start_seq = 2;
+    // The newest sequence the answer covers.
+    uint64 as_of_seq = 3;
+    repeated BucketChanges buckets = 4;
 }
 
 service Replication {
     rpc GetWALStream (GetWALStreamRequest) returns (stream GetWALStreamResponse);
+    rpc ChangesSince (ChangesSinceRequest) returns (stream ChangesSinceResponse);
 }

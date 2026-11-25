@@ -17,3 +17,8 @@ func (rc ReplicationClient) GetWALStream(_ context.Context, in *pb.GetWALStreamR
 ) (pb.Replication_GetWALStreamClient, error) {
 	return rc.StreamClient, rc.Error
 }
+
+func (rc ReplicationClient) ChangesSince(_ context.Context, _ *pb.ChangesSinceRequest, _ ...grpc.CallOption,
+) (pb.Replication_ChangesSinceClient, error) {
+	return nil, rc.Error
+}

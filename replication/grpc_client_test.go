@@ -61,7 +61,7 @@ func TestGRPCReplicationClient_Recv(t *testing.T) {
 		{
 			name: "success",
 			mockStreamClient: &mock.WALStreamClient{
-				Response: &pb.GetWALStreamResponse{TransactionGroup: []byte{1, 2, 3}},
+				Response: &pb.GetWALStreamResponse{Body: &pb.GetWALStreamResponse_TransactionGroup{TransactionGroup: []byte{1, 2, 3}}},
 				Error:    nil,
 			},
 			want:    []byte{1, 2, 3},
@@ -70,7 +70,7 @@ func TestGRPCReplicationClient_Recv(t *testing.T) {
 		{
 			name: "error/received io.EOF",
 			mockStreamClient: &mock.WALStreamClient{
-				Response: &pb.GetWALStreamResponse{TransactionGroup: nil},
+				Response: &pb.GetWALStreamResponse{Body: &pb.GetWALStreamResponse_TransactionGroup{TransactionGroup: nil}},
 				Error:    io.EOF,
 			},
 			want:    nil,
@@ -79,7 +79,7 @@ func TestGRPCReplicationClient_Recv(t *testing.T) {
 		{
 			name: "error/received an error",
 			mockStreamClient: &mock.WALStreamClient{
-				Response: &pb.GetWALStreamResponse{TransactionGroup: nil},
+				Response: &pb.GetWALStreamResponse{Body: &pb.GetWALStreamResponse_TransactionGroup{TransactionGroup: nil}},
 				Error:    errors.New("some error"),
 			},
 			want:    nil,
