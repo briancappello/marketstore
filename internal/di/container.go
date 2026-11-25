@@ -13,6 +13,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/frontend"
 	"github.com/alpacahq/marketstore/v4/replication"
 	"github.com/alpacahq/marketstore/v4/replication/backfill"
+	"github.com/alpacahq/marketstore/v4/replication/replog"
 	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 	"google.golang.org/grpc"
@@ -39,6 +40,7 @@ type Container struct {
 	replicationServer     *replication.GRPCReplicationServer
 	grpcReplicationServer *grpc.Server
 	replicationBackfill   *backfill.Driver
+	replicationLog        *replog.Log
 }
 
 func NewContainer(cfg *utils.MktsConfig) *Container {

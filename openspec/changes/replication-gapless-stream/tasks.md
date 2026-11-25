@@ -13,7 +13,7 @@
 
 - [x] 2.1 Add `replication/replog` (not `replication/log`: that would clash with `utils/log` in every importer) with segments, the entry format, a CRC, the startup scan, next-sequence recovery and size/age retention. Verify with unit tests: consecutive sequences, restart continuation, a corrupt tail entry truncated on open, deletion by size and by age.
 - [x] 2.2 Add the byte-capped hot-tail ring and the append broadcast. Verify with tests: readers inside the tail never touch disk (counting reader), readers behind it get every entry in order.
-- [ ] 2.3 Wire the append into `FlushCommandsToWAL` (after the WAL fsync, while holding `fileMu`), with the 100 ms group-commit fsync, and handle append failure as "log broken". Verify with tests: empty flushes consume no sequence; a disk-full fake marks the log broken while WAL writes still succeed.
+- [x] 2.3 Wire the append into `FlushCommandsToWAL` (after the WAL fsync, while holding `fileMu`), with the 100 ms group-commit fsync, and handle append failure as "log broken". Verify with tests: empty flushes consume no sequence; a disk-full fake marks the log broken while WAL writes still succeed.
 - [ ] 2.4 WAL replay appends replayed transaction groups with `tgID` greater than the log's last `tgID`. Verify with a crash test: commit to WAL, kill before the log fsync, restart, and the log holds the transaction group once.
 - [ ] 2.5 Metrics: first/last sequence, bytes, oldest-entry age, log-broken flag. Verify that they appear at `/metrics` in a test server.
 

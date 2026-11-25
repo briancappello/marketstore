@@ -35,6 +35,12 @@ See proposal.md (Why). Current mechanics this design replaces or builds on:
 - **Crash consistency.** If the master crashes after the WAL commit but before the log is durable, WAL replay at startup re-applies the transaction group to primary. Replay also appends every replayed transaction group whose `tgID` is greater than the log's last `tgID`. The log therefore never ends up missing a transaction group that primary has.
   - This relies on two facts. First, `tgID` is seeded from wall-clock nanoseconds at process start, so a restarted master's IDs are greater than the previous run's (unless the clock steps back). Second, the log lives on the same filesystem as the data, so a checkpoint's `syncfs` also makes the log durable: a transaction group older than the last checkpoint is never missing from the log.
   - The log must therefore be opened before WAL replay runs in `GetInitWALFile`.
+- **Appends are plain `WriteAt`s, one per entry, with no user-space buffer.** A checkpoint's `syncfs` therefore covers every appended entry. Sealed segments are renamed `<first>-<last>.seg`, so startup scans only unsealed segments, and sealed ones are indexed on their first read.
+- **Broken log.**
+  - A failed append consumes its sequence and marks the log broken from it. The first lost sequence is written in place to a 16-byte, pre-allocated `STATE` file. On ext4 (taichi), an in-place overwrite needs no free space.
+  - While the log is broken, readers at or past the break wait. They get no gap notice, because the hole's end is unknown, so no replica's cursor can move past a sequence that isn't on disk.
+  - The next successful append starts a new segment. That leaves a durable hole, and readers in it get a `log_broken` gap notice. `STATE` is cleared only after the new segment is fsynced.
+  - A master restarted while broken starts at the recorded break + 1 at least, so no sequence is ever reused.
 - *Alternatives:*
   - Reusing the WAL means fighting its 25-minute truncation and checkpoint semantics. A longer rotation would also slow startup replay.
   - An embedded KV store (bbolt or badger) is a new dependency for an append-only workload.

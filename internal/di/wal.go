@@ -1,6 +1,7 @@
 package di
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/executor/wal"
+	"github.com/alpacahq/marketstore/v4/replication"
+	"github.com/alpacahq/marketstore/v4/replication/replog"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
@@ -32,6 +35,10 @@ func (c *Container) GetInitWALFile() *executor.WALFileType {
 	if err != nil {
 		log.Error("Unable to create WAL. err=" + err.Error())
 		panic(fmt.Sprintf("unable to create WAL: %v", err))
+	}
+
+	if rl := c.GetReplicationLog(); rl != nil && !walfile.WALBypass {
+		walfile.SetReplicationLog(replication.NewMasterLog(rl))
 	}
 
 	if !walfile.WALBypass {
@@ -72,4 +79,45 @@ func (c *Container) GetInitWALFile() *executor.WALFileType {
 
 	c.wal = walfile
 	return c.wal
+}
+
+const (
+	replicationLogSyncInterval   = 100 * time.Millisecond
+	replicationLogRetainInterval = 10 * time.Second
+	defaultReplicationLogMaxSize = 20 << 30
+	defaultReplicationLogMaxAge  = 48 * time.Hour
+)
+
+// GetReplicationLog opens the master's replication log, or returns nil when
+// this instance is not a replication master. The log is opened before WAL
+// replay so replayed transaction groups can be logged too.
+func (c *Container) GetReplicationLog() *replog.Log {
+	if !c.mktsConfig.Replication.Enabled {
+		return nil
+	}
+	if c.replicationLog != nil {
+		return c.replicationLog
+	}
+	l, err := replog.Open(filepath.Join(c.GetAbsRootDir(), "replication_log"), replog.Options{
+		MaxBytes: defaultReplicationLogMaxSize,
+		MaxAge:   defaultReplicationLogMaxAge,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("unable to open the replication log: %v", err))
+	}
+	log.Info("replication log: sequences %d-%d, %d bytes", l.FirstSeq(), l.LastSeq(), l.Bytes())
+	go l.Run(context.Background(), replicationLogSyncInterval, replicationLogRetainInterval)
+	c.replicationLog = l
+	return l
+}
+
+// CloseReplicationLog makes the replication log durable and closes it. Call it
+// after the final WAL flush.
+func (c *Container) CloseReplicationLog() {
+	if c.replicationLog == nil {
+		return
+	}
+	if err := c.replicationLog.Close(); err != nil {
+		log.Error("closing the replication log: %v", err)
+	}
 }

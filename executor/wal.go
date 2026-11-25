@@ -58,11 +58,29 @@ type WALFileType struct {
 	walWaitGroup *sync.WaitGroup
 	tpd          *TriggerPluginDispatcher
 	txnPipe      *TransactionPipe
+	// replicationLog, when set, receives every committed transaction group.
+	// Set it before the SyncWAL loop starts.
+	replicationLog ReplicationLog
 }
 
 type ReplicationSender interface {
 	Run(ctx context.Context)
 	Send(transactionGroup []byte)
+}
+
+// ReplicationLog receives each committed transaction group in commit order:
+// right after its WAL fsync, before its primary writes, under the WAL file
+// lock. It must not block on anything but the local disk, and has no error to
+// return: a failing log must never fail or stall the write path.
+type ReplicationLog interface {
+	LogTransactionGroup(tgID int64, tgSerialized []byte)
+}
+
+// SetReplicationLog installs the replication log. Call it before writes start.
+func (wf *WALFileType) SetReplicationLog(rl ReplicationLog) {
+	wf.fileMu.Lock()
+	defer wf.fileMu.Unlock()
+	wf.replicationLog = rl
 }
 
 type NopReplicationSender struct{}
@@ -335,6 +353,10 @@ func (wf *WALFileType) FlushCommandsToWAL(writeCommands []*wal.WriteCommand) (er
 
 		if err := wf.FilePtr.Sync(); err != nil { // Flush the OS buffer
 			return fmt.Errorf("failed to flush wal data: %w", err)
+		}
+
+		if wf.replicationLog != nil {
+			wf.replicationLog.LogTransactionGroup(TGID, tgSerialized)
 		}
 
 		// send transaction to replicas

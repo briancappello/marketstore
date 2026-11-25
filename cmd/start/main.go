@@ -330,6 +330,7 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 					// parked on shutdownDone waiting for this to finish.
 					log.Info("flushing WAL and draining triggers...")
 					c.GetInitWALFile().Shutdown()
+					c.CloseReplicationLog()
 					log.Info("exiting...")
 				})
 			}

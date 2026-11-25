@@ -18,6 +18,7 @@
 package replog
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -31,6 +32,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
 const (
@@ -67,6 +70,9 @@ type Options struct {
 	// HotTailBytes caps the in-memory tail of newest entries.
 	HotTailBytes int64
 	Now          func() time.Time
+	// WriteAt writes entry bytes to a segment; nil means (*os.File).WriteAt.
+	// Tests use it to simulate a full disk.
+	WriteAt func(f *os.File, b []byte, off int64) (int, error)
 }
 
 // GapReason says why a sequence cannot be served.
@@ -138,6 +144,16 @@ type Log struct {
 
 	tail      *hotTail
 	diskReads atomic.Int64
+
+	// broken is set when an append failed: brokenFrom is the first sequence
+	// that was not written. Sequences keep advancing while broken, but
+	// readers at or past brokenFrom wait instead of being told about a gap,
+	// so no replica can move its cursor past a sequence that is not on disk.
+	// The next successful append starts a new segment, leaving a durable hole
+	// that readers are then told about.
+	broken     bool
+	brokenFrom uint64
+	state      *os.File
 }
 
 // Open opens or creates the log in dir.
@@ -148,6 +164,9 @@ func Open(dir string, opts Options) (*Log, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.WriteAt == nil {
+		opts.WriteAt = (*os.File).WriteAt
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create replication log dir: %w", err)
 	}
@@ -156,7 +175,66 @@ func Open(dir string, opts Options) (*Log, error) {
 		l.closeFiles()
 		return nil, err
 	}
+	if err := l.openState(); err != nil {
+		l.closeFiles()
+		return nil, err
+	}
 	return l, nil
+}
+
+const (
+	stateFile = "STATE"
+	stateLen  = 16 // brokenFrom u64 | reserved
+)
+
+// openState opens (creating and allocating) the state file that records a
+// broken log across restarts. It is written in place, so recording a failed
+// append does not need free space on filesystems that update in place.
+func (l *Log) openState() error {
+	f, err := os.OpenFile(filepath.Join(l.dir, stateFile), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open replication log state: %w", err)
+	}
+	l.state = f
+	var b [stateLen]byte
+	n, err := f.ReadAt(b[:], 0)
+	if err != nil && !errors.Is(err, goio.EOF) {
+		return fmt.Errorf("read replication log state: %w", err)
+	}
+	if n < stateLen {
+		b = [stateLen]byte{}
+		if _, err := f.WriteAt(b[:], 0); err != nil {
+			return fmt.Errorf("write replication log state: %w", err)
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("sync replication log state: %w", err)
+		}
+	}
+	if from := binary.LittleEndian.Uint64(b[:8]); from != 0 {
+		// The previous run broke at from and never recovered on disk. Entries
+		// from there on may have been assigned and lost, so never reuse them.
+		l.broken, l.brokenFrom = true, from
+		if l.nextSeq <= from {
+			l.nextSeq = from + 1
+		}
+	}
+	return nil
+}
+
+func (l *Log) writeState(brokenFrom uint64) error {
+	var b [stateLen]byte
+	binary.LittleEndian.PutUint64(b[:8], brokenFrom)
+	if _, err := l.state.WriteAt(b[:], 0); err != nil {
+		return err
+	}
+	return l.state.Sync()
+}
+
+// Broken reports whether appends are failing, and the first sequence lost.
+func (l *Log) Broken() (bool, uint64) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.broken, l.brokenFrom
 }
 
 func (l *Log) load() error {
@@ -367,9 +445,32 @@ func (l *Log) Append(tgID int64, data []byte) (uint64, error) {
 	e := Entry{Seq: l.nextSeq, TGID: tgID, Wallclock: l.opts.Now().UnixNano(), Data: data}
 	s, err := l.activeFor(e.Size())
 	if err == nil {
-		err = writeEntry(s, e)
+		err = writeEntry(s, e, l.opts.WriteAt)
+	}
+	if err == nil && l.broken {
+		// Recovered: make the new segment durable before forgetting where the
+		// log broke, or a crash could reuse the lost sequences.
+		if err = s.f.Sync(); err == nil {
+			err = l.writeState(0)
+		}
+		if err != nil {
+			_ = s.f.Truncate(s.size) // not durable: do not keep it
+		} else {
+			log.Info("replication log recovered: sequences %d-%d were not logged", l.brokenFrom, e.Seq-1)
+			l.broken, l.brokenFrom = false, 0
+		}
 	}
 	if err != nil {
+		if !l.broken {
+			l.broken, l.brokenFrom = true, e.Seq
+			if serr := l.writeState(e.Seq); serr != nil {
+				log.Error("replication log: cannot record broken state: %v", serr)
+			}
+			log.Error("replication log broken at sequence %d: %v", e.Seq, err)
+		}
+		// The sequence is consumed: it may have been partly written, and a
+		// recovered log must leave a hole where entries were lost.
+		l.nextSeq++
 		return 0, err
 	}
 	if s.last == 0 {
@@ -394,7 +495,7 @@ func (l *Log) activeFor(entrySize int64) (*segment, error) {
 	n := len(l.segments)
 	if n > 0 {
 		s := l.segments[n-1]
-		if !s.sealed && s.first == l.nextSeq-uint64(countOf(s)) &&
+		if !s.sealed && !l.broken && s.first == l.nextSeq-uint64(countOf(s)) &&
 			(s.last == 0 || s.size+entrySize <= l.opts.SegmentBytes) {
 			return s, nil
 		}
@@ -429,7 +530,7 @@ func countOf(s *segment) int {
 	return int(s.last - s.first + 1)
 }
 
-func writeEntry(s *segment, e Entry) error {
+func writeEntry(s *segment, e Entry, writeAt func(*os.File, []byte, int64) (int, error)) error {
 	buf := make([]byte, headerLen+len(e.Data))
 	binary.LittleEndian.PutUint64(buf[0:], e.Seq)
 	binary.LittleEndian.PutUint64(buf[8:], uint64(e.TGID))
@@ -440,7 +541,7 @@ func writeEntry(s *segment, e Entry) error {
 	binary.LittleEndian.PutUint32(buf[28:], crc)
 	// One write per entry and no user-space buffer, so a checkpoint's syncfs
 	// makes every entry appended before it durable.
-	if _, err := s.f.WriteAt(buf, s.size); err != nil {
+	if _, err := writeAt(s.f, buf, s.size); err != nil {
 		// Drop whatever part of the entry reached the file.
 		_ = s.f.Truncate(s.size)
 		return fmt.Errorf("append to replication log: %w", err)
@@ -541,6 +642,28 @@ func removeSealedName(dir string, s *segment) error {
 	return nil
 }
 
+// Run makes appends durable every syncEvery (group commit) and enforces
+// retention every retainEvery, until ctx is done. It never blocks Append for
+// longer than the bookkeeping under the log's lock.
+func (l *Log) Run(ctx context.Context, syncEvery, retainEvery time.Duration) {
+	syncT := time.NewTicker(syncEvery)
+	defer syncT.Stop()
+	retainT := time.NewTicker(retainEvery)
+	defer retainT.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-syncT.C:
+			if err := l.Sync(); err != nil {
+				log.Error("%v", err)
+			}
+		case <-retainT.C:
+			l.EnforceRetention()
+		}
+	}
+}
+
 // Close syncs and closes the log.
 func (l *Log) Close() error {
 	err := l.Sync()
@@ -555,6 +678,10 @@ func (l *Log) closeFiles() {
 		_ = s.f.Close()
 	}
 	l.segments = nil
+	if l.state != nil {
+		_ = l.state.Close()
+		l.state = nil
+	}
 }
 
 // Read returns up to maxEntries entries (and about maxBytes, but always at
@@ -603,8 +730,10 @@ func (l *Log) readDisk(from uint64, maxEntries int, maxBytes int64, fn func(Entr
 		}
 	}
 	if s == nil && gap == nil {
-		// Past every segment but below nextSeq: those appends failed.
-		gap = &GapError{Requested: from, Next: l.nextSeq, Reason: GapBroken}
+		// Past every segment but below nextSeq: those appends failed and the
+		// log has not recovered yet. Wait: the hole's end is not known.
+		l.mu.RUnlock()
+		return nil
 	}
 	var index []int64
 	if s != nil && !s.sealed {
