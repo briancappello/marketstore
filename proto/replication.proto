@@ -152,6 +152,8 @@ message GetWALStreamResponse {
     // The transaction group's sequence in the master's replication log. 0
     // from masters built before sequencing.
     uint64 seq = 2;
+    // When the master logged it, in unix nanoseconds (0 from older masters).
+    int64 wallclock = 4;
 }
 
 message ChangesSinceRequest {

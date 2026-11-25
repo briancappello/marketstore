@@ -34,7 +34,8 @@ func (a *fakeApplier) Cursor() (uint64, bool, error) {
 	return a.cursor, a.ok, nil
 }
 
-func (a *fakeApplier) Apply(_ context.Context, seq uint64, tg []byte) error {
+func (a *fakeApplier) Apply(_ context.Context, e replication.Received) error {
+	seq, tg := e.Seq, e.TG
 	if a.delay > 0 {
 		time.Sleep(a.delay)
 	}
@@ -272,6 +273,6 @@ func TestReceiverStopsOnApplyError(t *testing.T) {
 
 type failingApplier struct{}
 
-func (failingApplier) Cursor() (uint64, bool, error)               { return 0, true, nil }
-func (failingApplier) Apply(context.Context, uint64, []byte) error { return errors.New("boom") }
-func (failingApplier) SetCursor(context.Context, uint64) error     { return nil }
+func (failingApplier) Cursor() (uint64, bool, error)                     { return 0, true, nil }
+func (failingApplier) Apply(context.Context, replication.Received) error { return errors.New("boom") }
+func (failingApplier) SetCursor(context.Context, uint64) error           { return nil }

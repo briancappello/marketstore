@@ -28,12 +28,21 @@ type GRPCClient interface {
 type Applier interface {
 	// Cursor is the durable cursor, with ok=false when there is none yet.
 	Cursor() (seq uint64, ok bool, err error)
-	// Apply applies the transaction group with sequence seq. seq 0 comes from
-	// a master that does not sequence its stream and moves no cursor.
-	Apply(ctx context.Context, seq uint64, tg []byte) error
+	// Apply applies one received transaction group.
+	Apply(ctx context.Context, e Received) error
 	// SetCursor records that everything up to seq is accounted for, without
 	// data: the gap below it was healed some other way.
 	SetCursor(ctx context.Context, seq uint64) error
+}
+
+// Received is one transaction group from the master's stream.
+type Received struct {
+	// Seq is its sequence in the master's log; 0 from a master that does not
+	// sequence its stream, and such an entry moves no cursor.
+	Seq uint64
+	// Wallclock is when the master logged it (unix ns); 0 when unknown.
+	Wallclock int64
+	TG        []byte
 }
 
 // GapHealer fills in what a replica missed when the master can no longer
@@ -113,7 +122,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 					" are unavailable until it is upgraded")
 			})
 			r.legacyStreamed = true
-			if err := r.applier.Apply(ctx, 0, tg); err != nil {
+			if err := r.applier.Apply(ctx, Received{TG: tg}); err != nil {
 				return applyError(err)
 			}
 			progress = true
@@ -124,7 +133,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 			log.Warn("replication stream jumped from %d to %d; reconnecting at %d", r.next-1, seq, r.next)
 			return retry(fmt.Errorf("sequence %d received, %d expected", seq, r.next))
 		}
-		if err := r.applier.Apply(ctx, seq, tg); err != nil {
+		if err := r.applier.Apply(ctx, Received{Seq: seq, Wallclock: resp.GetWallclock(), TG: tg}); err != nil {
 			return applyError(err)
 		}
 		r.next = seq + 1

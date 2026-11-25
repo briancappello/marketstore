@@ -155,6 +155,9 @@ func (c *Container) GetReplicationClientWithRetry() ReplicationClient {
 		panic(errors.Wrap(err, "failed to initialize the replication applier"))
 	}
 	c.replicaApplier = applier
+	if err := applier.RegisterMetrics(prometheus.DefaultRegisterer, nil); err != nil {
+		log.Error("replication replay metrics: %v", err)
+	}
 	c.replicaApplierDone = make(chan struct{})
 	replicationReceiver := replication.NewReceiver(cli, applier, replication.UnhealedGaps{})
 

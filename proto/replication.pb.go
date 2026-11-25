@@ -237,7 +237,9 @@ type GetWALStreamResponse struct {
 	Body isGetWALStreamResponse_Body `protobuf_oneof:"body"`
 	// The transaction group's sequence in the master's replication log. 0
 	// from masters built before sequencing.
-	Seq           uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	Seq uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	// When the master logged it, in unix nanoseconds (0 from older masters).
+	Wallclock     int64 `protobuf:"varint,4,opt,name=wallclock,proto3" json:"wallclock,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -300,6 +302,13 @@ func (x *GetWALStreamResponse) GetGap() *Gap {
 func (x *GetWALStreamResponse) GetSeq() uint64 {
 	if x != nil {
 		return x.Seq
+	}
+	return 0
+}
+
+func (x *GetWALStreamResponse) GetWallclock() int64 {
+	if x != nil {
+		return x.Wallclock
 	}
 	return 0
 }
@@ -571,12 +580,13 @@ const file_replication_proto_rawDesc = "" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tRETENTION\x10\x01\x12\x0e\n" +
 	"\n" +
-	"LOG_BROKEN\x10\x02\"\x7f\n" +
+	"LOG_BROKEN\x10\x02\"\x9d\x01\n" +
 	"\x14GetWALStreamResponse\x12-\n" +
 	"\x11transaction_group\x18\x01 \x01(\fH\x00R\x10transactionGroup\x12\x1e\n" +
 	"\x03gap\x18\x03 \x01(\v2\n" +
 	".proto.GapH\x00R\x03gap\x12\x10\n" +
-	"\x03seq\x18\x02 \x01(\x04R\x03seqB\x06\n" +
+	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1c\n" +
+	"\twallclock\x18\x04 \x01(\x03R\twallclockB\x06\n" +
 	"\x04body\"2\n" +
 	"\x13ChangesSinceRequest\x12\x1b\n" +
 	"\tsince_seq\x18\x01 \x01(\x04R\bsinceSeq\"F\n" +

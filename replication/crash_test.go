@@ -56,7 +56,7 @@ func reference(t *testing.T, entries []replog.Entry) *replica {
 	require.NoError(t, err)
 	a := replication.NewReplayApplier(replication.NewReplayer(executor.ParseTGData, w.WriteCSM, r.root))
 	for _, e := range entries {
-		require.NoError(t, a.Apply(context.Background(), e.Seq, e.Data))
+		require.NoError(t, a.Apply(context.Background(), replication.Received{Seq: e.Seq, Wallclock: e.Wallclock, TG: e.Data}))
 	}
 	return r
 }
@@ -64,7 +64,7 @@ func reference(t *testing.T, entries []replog.Entry) *replica {
 func applyAll(t *testing.T, a *replication.BatchApplier, entries []replog.Entry) {
 	t.Helper()
 	for _, e := range entries {
-		require.NoError(t, a.Apply(context.Background(), e.Seq, e.Data))
+		require.NoError(t, a.Apply(context.Background(), replication.Received{Seq: e.Seq, Wallclock: e.Wallclock, TG: e.Data}))
 	}
 }
 

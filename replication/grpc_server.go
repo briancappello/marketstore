@@ -159,8 +159,9 @@ func (rs *GRPCReplicationServer) GetWALStream(req *pb.GetWALStreamRequest, strea
 
 		for _, e := range entries {
 			if err := stream.Send(&pb.GetWALStreamResponse{
-				Seq:  e.Seq,
-				Body: &pb.GetWALStreamResponse_TransactionGroup{TransactionGroup: e.Data},
+				Seq:       e.Seq,
+				Wallclock: e.Wallclock,
+				Body:      &pb.GetWALStreamResponse_TransactionGroup{TransactionGroup: e.Data},
 			}); err != nil {
 				log.Info("replica %s: send failed: %v", addr, err)
 				return err

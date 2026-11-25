@@ -2,11 +2,14 @@ package replication_test
 
 import (
 	"context"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/alpacahq/marketstore/v4/catalog"
@@ -134,13 +137,13 @@ func TestBatchedReplayMatchesPerEntryReplay(t *testing.T) {
 	require.NoError(t, err)
 	pa := replication.NewReplayApplier(replication.NewReplayer(executor.ParseTGData, w.WriteCSM, perEntry.root))
 	for _, e := range burst {
-		require.NoError(t, pa.Apply(context.Background(), e.Seq, e.Data))
+		require.NoError(t, pa.Apply(context.Background(), replication.Received{Seq: e.Seq, Wallclock: e.Wallclock, TG: e.Data}))
 	}
 
 	batched := newReplica(t)
 	ba, cancel, done := runBatchApplier(t, batched, replication.BatchOptions{MaxEntries: 64})
 	for _, e := range burst {
-		require.NoError(t, ba.Apply(context.Background(), e.Seq, e.Data))
+		require.NoError(t, ba.Apply(context.Background(), replication.Received{Seq: e.Seq, Wallclock: e.Wallclock, TG: e.Data}))
 	}
 	waitCursor(t, ba, 300)
 	cancel()
@@ -162,7 +165,7 @@ func TestBurstIsDrainedInFullBatches(t *testing.T) {
 	a, cancel, done := runBatchApplier(t, r, replication.BatchOptions{})
 	defer func() { cancel(); <-done }()
 	for _, e := range burst {
-		require.NoError(t, a.Apply(context.Background(), e.Seq, e.Data))
+		require.NoError(t, a.Apply(context.Background(), replication.Received{Seq: e.Seq, Wallclock: e.Wallclock, TG: e.Data}))
 	}
 	waitCursor(t, a, 5000)
 	st := a.Stats()
@@ -178,11 +181,11 @@ func TestLoneEntryIsAppliedWithinTheWait(t *testing.T) {
 	a, cancel, done := runBatchApplier(t, r, replication.BatchOptions{Wait: wait})
 	defer func() { cancel(); <-done }()
 
-	require.NoError(t, a.Apply(context.Background(), 1, burst[0].Data))
+	require.NoError(t, a.Apply(context.Background(), replication.Received{Seq: 1, TG: burst[0].Data}))
 	waitCursor(t, a, 1) // warm up: bucket creation is not the case under test
 
 	start := time.Now()
-	require.NoError(t, a.Apply(context.Background(), 2, burst[1].Data))
+	require.NoError(t, a.Apply(context.Background(), replication.Received{Seq: 2, TG: burst[1].Data}))
 	waitCursor(t, a, 2)
 	took := time.Since(start)
 	t.Logf("lone entry applied after %v", took)
@@ -212,4 +215,38 @@ func TestReplicaConvergesThroughStreamAndBatches(t *testing.T) {
 	}
 	waitCursor(t, a, f.log.LastSeq())
 	require.Equal(t, dump(t, f.metadata.CatalogDir), dump(t, r.md.CatalogDir))
+	t.Logf("master last seq %d, first %d, tail first %d", f.log.LastSeq(), f.log.FirstSeq(), f.log.HotTailFirstSeq())
+	last, err := f.log.Read(f.log.LastSeq(), 1, 0)
+	require.NoError(t, err)
+	require.Len(t, last, 1)
+	require.Equal(t, last[0].Wallclock, a.Stats().NewestWallclock, "the master's log time reaches the replica")
+}
+
+func TestReplayMetricsShowDrainAndLag(t *testing.T) {
+	burst := recordBurst(t, 300)
+	r := newReplica(t)
+	a, err := replication.NewBatchApplier(r.md.CatalogDir, r.md.WALFile, r.root, replication.BatchOptions{MaxEntries: 100})
+	require.NoError(t, err)
+	reg := prometheus.NewRegistry()
+	clock := time.Unix(0, burst[len(burst)-1].Wallclock).Add(2 * time.Second)
+	require.NoError(t, a.RegisterMetrics(reg, func() time.Time { return clock }))
+	srv := httptest.NewServer(promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	for _, e := range burst {
+		require.NoError(t, a.Apply(context.Background(), replication.Received{Seq: e.Seq, Wallclock: e.Wallclock, TG: e.Data}))
+	}
+	waitCursor(t, a, 300)
+
+	body := scrape(t, srv.URL)
+	require.Equal(t, "300", metricValue(t, body, "replication_replay_applied_total"))
+	require.Equal(t, "3", metricValue(t, body, "replication_replay_batches_total"))
+	require.Equal(t, "3", metricValue(t, body, "replication_replay_batch_entries_count"))
+	require.Equal(t, "300", metricValue(t, body, "replication_replay_batch_entries_sum"))
+	require.Equal(t, "300", metricValue(t, body, "replication_replica_cursor"))
+	require.Equal(t, "2", metricValue(t, body, "replication_replay_newest_applied_age_seconds"))
 }

@@ -45,12 +45,12 @@ func (a *ReplayApplier) Cursor() (uint64, bool, error) {
 	return a.cursor, a.ok, nil
 }
 
-func (a *ReplayApplier) Apply(_ context.Context, seq uint64, tg []byte) error {
-	if err := a.replayer.Replay(tg); err != nil {
+func (a *ReplayApplier) Apply(_ context.Context, e Received) error {
+	if err := a.replayer.Replay(e.TG); err != nil {
 		return err
 	}
-	if seq != 0 {
-		return a.SetCursor(context.Background(), seq)
+	if e.Seq != 0 {
+		return a.SetCursor(context.Background(), e.Seq)
 	}
 	return nil
 }

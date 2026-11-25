@@ -31,7 +31,7 @@
 - [x] 4.2 The batcher (max entries/bytes/commands/wait) applies each batch plus the cursor in one transaction group. Verify that it gives the same result as per-entry apply on a recorded burst, and that the latency of a single trickled entry stays within 50 ms plus a flush.
 - [x] 4.3 Crash tests on the replica: kill after a batch flush or before it, restart, and check that the cursor is exact and tick buckets have no duplicate and no missing rows (relies on 1.3).
 - [x] 4.4 Hide `__`-prefixed symbols from `ListSymbols`, the watchlist universe and the backfill driver's enumeration. Verify with tests.
-- [ ] 4.5 Replay metrics (applied/s, batch sizes, newest applied age). Verify with a test.
+- [x] 4.5 Replay metrics (applied/s, batch sizes, newest applied age). Verify with a test.
 
 ## 5. Change ledger
 

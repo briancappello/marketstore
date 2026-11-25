@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/alpacahq/marketstore/v4/catalog"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/utils/io"
@@ -47,6 +49,7 @@ func (o BatchOptions) withDefaults() BatchOptions {
 
 type batchItem struct {
 	seq        uint64
+	wallclock  int64
 	tg         []byte
 	cursorOnly bool // SetCursor: seq is the new cursor, possibly 0
 }
@@ -72,6 +75,7 @@ type BatchApplier struct {
 	failed  error
 	stats   BatchStats
 	onBatch func(BatchStats)
+	sizes   prometheus.Histogram // nil until RegisterMetrics
 }
 
 // BatchStats describes the batches applied so far.
@@ -80,6 +84,9 @@ type BatchStats struct {
 	Entries     int
 	LastEntries int
 	LastApplied time.Time
+	// NewestWallclock is the master log time (unix ns) of the newest entry
+	// applied so far; 0 when the master does not send it.
+	NewestWallclock int64
 }
 
 func NewBatchApplier(catDir *catalog.Directory, wal *executor.WALFileType, rootDir string, opts BatchOptions,
@@ -112,8 +119,8 @@ func (a *BatchApplier) Stats() BatchStats {
 
 // Apply queues one transaction group. It returns the error that stopped the
 // applier, if any: a batch that fails to apply is not retried.
-func (a *BatchApplier) Apply(ctx context.Context, seq uint64, tg []byte) error {
-	return a.enqueue(ctx, batchItem{seq: seq, tg: tg})
+func (a *BatchApplier) Apply(ctx context.Context, e Received) error {
+	return a.enqueue(ctx, batchItem{seq: e.Seq, wallclock: e.Wallclock, tg: e.TG})
 }
 
 // SetCursor queues a cursor-only write, ordered after everything queued so far.
@@ -229,9 +236,13 @@ func (a *BatchApplier) commit(batch []batchItem) error {
 		return err
 	}
 	var last uint64
+	var newest int64
 	haveLast := false
 	entries := 0
 	for _, it := range batch {
+		if it.wallclock > newest {
+			newest = it.wallclock
+		}
 		// seq 0 on a data entry means an unsequenced master: no cursor.
 		if it.cursorOnly || it.seq != 0 {
 			last, haveLast = it.seq, true
@@ -270,8 +281,14 @@ func (a *BatchApplier) commit(batch []batchItem) error {
 	a.stats.Entries += entries
 	a.stats.LastEntries = entries
 	a.stats.LastApplied = time.Now()
-	stats, onBatch := a.stats, a.onBatch
+	if newest > a.stats.NewestWallclock {
+		a.stats.NewestWallclock = newest
+	}
+	stats, onBatch, sizes := a.stats, a.onBatch, a.sizes
 	a.mu.Unlock()
+	if sizes != nil {
+		sizes.Observe(float64(entries))
+	}
 	if onBatch != nil {
 		onBatch(stats)
 	}
@@ -283,4 +300,59 @@ func (a *BatchApplier) OnBatch(fn func(BatchStats)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.onBatch = fn
+}
+
+// RegisterMetrics exposes replay progress on reg: entries and batches applied
+// (rate() of the first is the drain rate), batch sizes, the replica's cursor
+// and the age of the newest applied entry, measured against the master's log
+// time. That age returns to near zero when the replica has caught up, and
+// grows while the master writes nothing.
+func (a *BatchApplier) RegisterMetrics(reg prometheus.Registerer, now func() time.Time) error {
+	if now == nil {
+		now = time.Now
+	}
+	opts := func(name, help string) prometheus.Opts {
+		return prometheus.Opts{Namespace: metricsNamespace, Subsystem: metricsSubsystem, Name: name, Help: help}
+	}
+	stat := func(f func(BatchStats) float64) func() float64 {
+		return func() float64 { return f(a.Stats()) }
+	}
+	sizes := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: metricsNamespace, Subsystem: metricsSubsystem,
+		Name:    "replication_replay_batch_entries",
+		Help:    "Transaction groups per replay batch.",
+		Buckets: []float64{1, 10, 50, 100, 250, 500, 1000, 5000},
+	})
+	collectors := []prometheus.Collector{
+		sizes,
+		prometheus.NewCounterFunc(prometheus.CounterOpts(opts("replication_replay_applied_total",
+			"Transaction groups applied by the replica.")),
+			stat(func(s BatchStats) float64 { return float64(s.Entries) })),
+		prometheus.NewCounterFunc(prometheus.CounterOpts(opts("replication_replay_batches_total",
+			"Replay batches committed by the replica.")),
+			stat(func(s BatchStats) float64 { return float64(s.Batches) })),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts(opts("replication_replay_newest_applied_age_seconds",
+			"Age of the newest applied transaction group, by the master's log time (0: unknown).")),
+			stat(func(s BatchStats) float64 {
+				if s.NewestWallclock == 0 {
+					return 0
+				}
+				return now().Sub(time.Unix(0, s.NewestWallclock)).Seconds()
+			})),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts(opts("replication_replica_cursor",
+			"Sequence of the last transaction group the replica committed.")),
+			func() float64 {
+				c, _, _ := a.Cursor()
+				return float64(c)
+			}),
+	}
+	for _, c := range collectors {
+		if err := reg.Register(c); err != nil {
+			return err
+		}
+	}
+	a.mu.Lock()
+	a.sizes = sizes
+	a.mu.Unlock()
+	return nil
 }
