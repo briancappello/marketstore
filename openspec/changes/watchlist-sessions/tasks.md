@@ -73,8 +73,8 @@
 
 ## 12. ta-droid (edited in `../ta-droid`)
 
-- [ ] 12.1 Add labels for the `*_TRADITIONAL` lists and for `VOLUME_UP/DOWN`, and remove `GAP_UP/GAP_DOWN`/`SMA_CROSS_*`. Default the "Top Gainers/Losers" view to the traditional lists during the regular session. Verify with `__tests__/watchlists.test.ts`.
-- [ ] 12.2 Show `session`/`basis`, and interpret `prior_close`/`open` according to `basis`. Verify with `watchlistsScreen.test.tsx`.
+- [x] 12.1 Add labels for the `*_TRADITIONAL` lists and for `VOLUME_UP/DOWN`, and remove `GAP_UP/GAP_DOWN`/`SMA_CROSS_*`. Default the "Top Gainers/Losers" view to the traditional lists during the regular session. Verify with `__tests__/watchlists.test.ts`. Done in ta-droid 4e43ea7 (on `feat/tauri-port`, not pushed). The server publishes GAP and SMA_CROSS as `*_TRADITIONAL` only, and they are labelled "Gap Up/Down" and "SMA Cross Up/Down". The traditional Top Gainers/Losers are listed first.
+- [x] 12.2 Show `session`/`basis`, and interpret `prior_close`/`open` according to `basis`. Verify with `watchlistsScreen.test.tsx`. Done in ta-droid 0dd8f85: the metadata line and a basis-aware prior close/open legend come from REST and `watchlist_update`, and are hidden when an older server omits them. ta-droid: 152/152 tests, tsc clean. Follow-ups: the Tauri port (`src-tauri/.../watchlists.rs`, `ui/.../WatchlistsScreen.tsx`) still has the old labels, and the screen still opens the alphabetically first list.
 
 ## 13. Rollout
 
