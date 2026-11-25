@@ -49,7 +49,7 @@
 
 - [x] 7.1 Two-process integration test (`tests/replication` or a Go test with two instances): a 1M-row backfill burst with ticks on the master while the replica is throttled, then a replica restart mid-burst, then a disconnect longer than a tiny retention. Afterwards fixed buckets equal the master's, ticks are exact while within retention, and the tick gap past retention is reported. Verify that the test passes and `make replication-test` stays green.
 - [x] 7.2 Benchmark: the master's `write_csm_duration` p99 during the burst, before vs after, with no measurable regression. Record it in `notes.md`.
-- [ ] 7.3 Re-run the 0.1 baseline and report new failures and pre-existing failures as separate counts.
+- [x] 7.3 Re-run the 0.1 baseline and report new failures and pre-existing failures as separate counts.
 
 ## 8. Rollout and verification
 

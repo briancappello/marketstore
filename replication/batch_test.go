@@ -120,13 +120,29 @@ func runBatchApplier(t *testing.T, r *replica, opts replication.BatchOptions,
 	return a, cancel, done
 }
 
+// waitCursor waits until a's cursor is want. It fails only when the cursor
+// stops moving for 30s, so a slow run (under -race, say) is not mistaken for
+// a stuck one, and it says where the cursor stopped.
 func waitCursor(t *testing.T, a replication.Applier, want uint64) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	const stall = 30 * time.Second
+	var last uint64
+	lastOK := false
+	moved := time.Now()
+	for {
 		c, ok, err := a.Cursor()
 		require.NoError(t, err)
-		return ok && c == want
-	}, 30*time.Second, time.Millisecond)
+		if ok && c == want {
+			return
+		}
+		if ok != lastOK || c != last {
+			last, lastOK, moved = c, ok, time.Now()
+		}
+		if time.Since(moved) > stall {
+			t.Fatalf("cursor stuck at %d (set: %v) for %v, want %d", c, ok, stall, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestBatchedReplayMatchesPerEntryReplay(t *testing.T) {

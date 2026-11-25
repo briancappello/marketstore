@@ -115,3 +115,26 @@ Harness: `TestMasterWriteLatencyDuringBurst` (`replication/master_bench_test.go`
 **Result: no measurable p99 regression.** The "on" p99 is within the run-to-run noise of "off". The maxima are about 1 s in both modes: btrfs fsync stalls on p1, not replication.
 
 **Caveat.** This is p1's disk (btrfs), not taichi's (ext4). Running the harness on taichi needs about 1 GB of scratch writes on its 91%-full production disk, so it was not run there without approval.
+
+## 7.3 Final test run vs the 0.1 baseline (2026-11-25)
+
+The same commands as 0.1.
+
+| | Baseline (`1efab6fe`) | Final |
+|---|---|---|
+| `go test ./replication/... ./executor/... ./internal/di/... ./frontend/... ./cmd/...` | 13/13 packages pass | 16/16 pass: the 13, plus the new `replication/replog`, `replication/ledger` and `cmd/tool/replication` |
+| `go test -race ./replication/...` | 2/2 pass | 4/4 pass, no data races |
+| `go test -race ./executor/` | not in 0.1 | passes |
+| `make replication-test` (Docker) | 5/5 pass | 5/5 pass |
+| `go vet ./...` | not recorded | clean |
+
+**New failures caused by this change: 0 remaining.** Two were found, both fixed and both test-side:
+- *`test_bootstrap` in `make replication-test`.* It queried outside its retry loop (see 7.1).
+- *`TestGaplessReplicationEndToEnd` under `-race`.* The 1M-row test runs about 11× slower with the race detector (182 s vs 16 s) and outran `waitCursor`'s fixed 30 s deadline. `waitCursor` now fails only when the cursor stops moving for 30 s.
+
+**Pre-existing failures: 0.**
+
+**Pre-existing defects found and not fixed (Tier 4, reported):**
+- `1D` bars dated January 1 are unreadable (see "Findings outside this change").
+- `executor/cache.go` is not gofmt-clean. It was left untouched, so the diff stays clean.
+- `executor.NewInstanceSetup` returns a shared global, so tests elsewhere that build several instances may compare one instance with itself. It is worked around in `replication` tests with `ownInstance`.
