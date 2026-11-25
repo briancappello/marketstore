@@ -63,6 +63,12 @@ type WALFileType struct {
 	replicationLog ReplicationLog
 }
 
+// ReplicationSender was the master's hand-off to the replication fan-out.
+//
+// Deprecated: the replication log (ReplicationLog) replaced it, and nothing
+// in this module sends through it any more. It is kept so external callers of
+// NewWALFile (for example the marketstore-watchlists tests) still compile;
+// pass &NopReplicationSender{}.
 type ReplicationSender interface {
 	Run(ctx context.Context)
 	Send(transactionGroup []byte)
