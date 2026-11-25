@@ -16,8 +16,8 @@ test needs a usable container CLI (docker OR podman) with access to the engine
 that manages the replica container — mount the runtime socket into the pyclient
 container (/var/run/docker.sock, or $XDG_RUNTIME_DIR/podman/podman.sock). When
 no engine is reachable the test skips rather than failing — the same guarantee
-is covered at the Go level by replication/sender_test.go and
-replication/grpc_server_test.go (-race).
+is covered at the Go level by replication/grpc_server_test.go
+(TestStalledStreamDelaysNeitherMasterNorOtherStreams, -race).
 """
 import os
 import time
@@ -59,10 +59,9 @@ def _engine(*args) -> bool:
         return False
 
 
-# Master-side replication buffers: Sender.channel (defaultSenderChannelSize=500)
-# plus each replica's stream channel (defaultReplicationStreamChannelSize=500).
-# A blocking (pre-F1/F2) implementation only stalls once BOTH fill, so the write
-# burst must exceed their combined size to prove the guarantee.
+# Large enough to outrun gRPC flow control on the frozen replica's stream (and,
+# historically, the two 500-slot buffers of the push design), so a write path
+# that waited on a replica would stall here.
 WRITES = 2000
 
 

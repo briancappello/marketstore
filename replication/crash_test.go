@@ -44,8 +44,18 @@ func restart(t *testing.T, root string) *replica {
 	t.Helper()
 	cfg := utils.NewDefaultConfig(root)
 	cfg.BackgroundSync = false
+	return restartWith(t, cfg)
+}
+
+// restartWith opens the replica at cfg.RootDirectory with cfg.
+func restartWith(t *testing.T, cfg *utils.MktsConfig) *replica {
+	t.Helper()
 	c := di.NewContainer(cfg)
-	return &replica{root: root, md: ownInstance(c.GetCatalogDir(), c.GetInitWALFile())}
+	wal := c.GetInitWALFile()
+	if cfg.BackgroundSync {
+		t.Cleanup(wal.Shutdown)
+	}
+	return &replica{root: cfg.RootDirectory, md: ownInstance(c.GetCatalogDir(), wal)}
 }
 
 // reference applies entries one at a time on a fresh replica.
