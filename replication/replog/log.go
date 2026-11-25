@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,6 +64,8 @@ type Options struct {
 	SegmentBytes int64
 	MaxBytes     int64
 	MaxAge       time.Duration
+	// HotTailBytes caps the in-memory tail of newest entries.
+	HotTailBytes int64
 	Now          func() time.Time
 }
 
@@ -132,6 +135,9 @@ type Log struct {
 	total    int64
 	dirty    bool // active segment written since the last Sync
 	toSeal   []*segment
+
+	tail      *hotTail
+	diskReads atomic.Int64
 }
 
 // Open opens or creates the log in dir.
@@ -145,7 +151,7 @@ func Open(dir string, opts Options) (*Log, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create replication log dir: %w", err)
 	}
-	l := &Log{dir: dir, opts: opts, nextSeq: 1}
+	l := &Log{dir: dir, opts: opts, nextSeq: 1, tail: newHotTail(opts.HotTailBytes)}
 	if err := l.load(); err != nil {
 		l.closeFiles()
 		return nil, err
@@ -349,7 +355,8 @@ func (l *Log) OldestWallclock() int64 {
 	return 0
 }
 
-// Append logs one transaction group and returns its sequence number.
+// Append logs one transaction group and returns its sequence number. The log
+// keeps data (in its memory tail), so the caller must not modify it afterwards.
 func (l *Log) Append(tgID int64, data []byte) (uint64, error) {
 	if int64(len(data)) >= maxEntryLen {
 		return 0, fmt.Errorf("replication log: entry of %d bytes is too large", len(data))
@@ -377,6 +384,7 @@ func (l *Log) Append(tgID int64, data []byte) (uint64, error) {
 	l.dirty = true
 	l.nextSeq++
 	l.lastTGID = tgID
+	l.tail.add(e)
 	return e.Seq, nil
 }
 
@@ -507,6 +515,11 @@ func (l *Log) EnforceRetention() {
 		l.segments = l.segments[1:]
 		doomed = append(doomed, s)
 	}
+	if len(doomed) > 0 {
+		if first := l.firstNonEmpty(); first != nil {
+			l.tail.dropBefore(first.first)
+		}
+	}
 	l.mu.Unlock()
 	for _, s := range doomed {
 		_ = s.f.Close()
@@ -551,6 +564,9 @@ func (l *Log) closeFiles() {
 func (l *Log) Read(from uint64, maxEntries int, maxBytes int64) ([]Entry, error) {
 	if maxEntries <= 0 {
 		maxEntries = 1
+	}
+	if es := l.tail.read(from, maxEntries, maxBytes); es != nil {
+		return es, nil
 	}
 	var out []Entry
 	err := l.readDisk(from, maxEntries, maxBytes, func(e Entry) { out = append(out, e) })
@@ -598,6 +614,7 @@ func (l *Log) readDisk(from uint64, maxEntries int, maxBytes int64, fn func(Entr
 	if gap != nil {
 		return gap
 	}
+	l.diskReads.Add(1)
 	if index != nil {
 		return readFromIndex(s, index, from, last, lim, maxEntries, maxBytes, fn)
 	}
@@ -749,6 +766,17 @@ func (sc *scanner) next(withData bool) (Entry, error) {
 	sc.off = end
 	return e, nil
 }
+
+// Notify returns a channel that is closed by the next Append. Take it before
+// reading, and wait on it only if the read found nothing new.
+func (l *Log) Notify() <-chan struct{} { return l.tail.wait() }
+
+// DiskReads counts reads that were served from segment files rather than the
+// in-memory tail.
+func (l *Log) DiskReads() int64 { return l.diskReads.Load() }
+
+// HotTailFirstSeq is the oldest sequence held in memory, or 0.
+func (l *Log) HotTailFirstSeq() uint64 { return l.tail.first() }
 
 // Dir is the directory the log lives in.
 func (l *Log) Dir() string { return l.dir }
