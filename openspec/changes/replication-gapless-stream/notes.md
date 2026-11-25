@@ -96,3 +96,22 @@ Gotcha: a heal takes closed bars only, as the backfill does, so test bars must b
 | this change, after the test fix | 5/5 pass |
 
 **Why it failed.** The test queried the replica right after writing to the master, and the query sat outside its retry loop. A replica now applies in batches that close up to `replay_batch_wait` (50 ms) after their first entry, so the first query can run before the replica holds the bucket. That is a new failure caused by this change, in the test's retry rather than in replication. **The fix** moves the query inside the retry. With the fix, the data arrives within the test's 20 s deadline.
+
+## 7.2 Master write latency during a burst (2026-11-25, p1 `/home`)
+
+Harness: `TestMasterWriteLatencyDuringBurst` (`replication/master_bench_test.go`, opt-in with `MKTS_MASTER_BENCH_DIR`).
+- **Workload.** 8 concurrent writers, each committing 500-bar `WriteCSM`s over 25 buckets apiece. BackgroundSync is on, with the 500 ms WAL interval taichi uses.
+- **What is timed.** Each `WriteCSM`, which is what `write_csm_duration` observes.
+- **"Replication off"** stands for the old push design, whose only write-path cost was a non-blocking channel send.
+- **"Replication on"** adds the log append, the ledger update and the 100 ms group-commit fsync loop, with one healthy and one stalled replica stream reading the log.
+
+| Run (4,000 writes) | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| round 1, off | 0.74 ms | 2.47 ms | 3.68 ms | 1199 ms |
+| round 1, on | 0.71 ms | 1.21 ms | 3.45 ms | 1377 ms |
+| round 2, off | 0.76 ms | 2.74 ms | 6.69 ms | 947 ms |
+| round 2, on | 0.73 ms | 1.24 ms | 3.66 ms | 1375 ms |
+
+**Result: no measurable p99 regression.** The "on" p99 is within the run-to-run noise of "off". The maxima are about 1 s in both modes: btrfs fsync stalls on p1, not replication.
+
+**Caveat.** This is p1's disk (btrfs), not taichi's (ext4). Running the harness on taichi needs about 1 GB of scratch writes on its 91%-full production disk, so it was not run there without approval.
