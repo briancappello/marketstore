@@ -4,7 +4,7 @@
 
 ## 1. Measure before building
 
-- [ ] 1.1 Benchmark replica apply throughput on p1's disk: transaction groups per second when applied one per WriteCSM (today) vs in batches of 100/1000 with one flush. Use a burst captured from a taichi WAL file. Verify by recording the numbers in `notes.md`. If batching is not at least 10× faster, stop and revisit D4 with the user.
+- [x] 1.1 Benchmark replica apply throughput on p1's disk: transaction groups per second when applied one per WriteCSM (today) vs in batches of 100/1000 with one flush. Use a burst captured from a taichi WAL file. Verify by recording the numbers in `notes.md`. If batching is not at least 10× faster, stop and revisit D4 with the user.
 - [ ] 1.2 Measure taichi's replication byte volume per day and per backfill burst (sum of `len(tgSerialized)` over a day, from a temporary counter or a WAL sample). Verify by recording it in `notes.md` and setting the rollout values of `log_max_bytes`/`log_max_age` from it.
 
 ## 2. Replication log (master)

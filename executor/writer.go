@@ -269,6 +269,22 @@ func WriteBufferToFileIndirect(fp stdio.ReadWriteSeeker, buffer wal.OffsetIndexB
 // In order to improve testability, use this function instead of the static WriteCSM function.
 func (w *Writer) WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) error {
 	start := time.Now()
+	if err := w.QueueCSM(csm, isVariableLength); err != nil {
+		return err
+	}
+	w.walFile.RequestFlush()
+	metrics.WriteCSMDuration.Observe(time.Since(start).Seconds())
+	return nil
+}
+
+// QueueCSM is WriteCSM without the flush: it validates csm, creates any
+// missing buckets and queues the write commands, which the next WAL flush
+// commits. A caller that queues several CSMs and then flushes once commits
+// them all in one transaction group, with one WAL fsync.
+//
+// QueueCSM never takes the WAL file lock, so it is safe to call inside
+// WALFileType.WithFlushHeld.
+func (w *Writer) QueueCSM(csm io.ColumnSeriesMap, isVariableLength bool) error {
 	for tbk, cs := range csm {
 		tf, err := tbk.GetTimeFrame()
 		if err != nil {
@@ -380,9 +396,6 @@ func (w *Writer) WriteCSM(csm io.ColumnSeriesMap, isVariableLength bool) error {
 			return fmt.Errorf("write records to %v: %w", tbi, err)
 		}
 	}
-
-	w.walFile.RequestFlush()
-	metrics.WriteCSMDuration.Observe(time.Since(start).Seconds())
 	return nil
 }
 
