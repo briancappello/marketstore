@@ -27,8 +27,11 @@ def test_bootstrap_of_preexisting_data():
     deadline = time.time() + 20
     got = None
     while time.time() < deadline:
-        resp = replica.query(pymkts.Params('BOOT', '1Min', 'OHLCV'))
+        # The query itself fails until the replica holds the bucket ("not in
+        # catalog"), so it belongs inside the retry: replicas apply in batches
+        # (replay_batch_wait), and the first query can beat the first batch.
         try:
+            resp = replica.query(pymkts.Params('BOOT', '1Min', 'OHLCV'))
             got = resp.first().df()
             if len(got) > 0:
                 break

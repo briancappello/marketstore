@@ -72,3 +72,27 @@ A 300-TG run agreed: 31.6 / 359.6 / 2,756.9 / 3,643.8 TG/s, so 115.5× at 1000.
   - *Impact.* US equities have no January 1 sessions, so normally nothing is lost. A crypto feed or an aggregate that produces a January 1 daily bar loses it, and overwrites header padding. taichi has 38,471 `1D` buckets.
   - *Proposed fix.* Make 1D indexes 1-based, as every other timeframe is. This changes the on-disk layout of every `1D` bucket, so it needs a migration (shift each year file by one record) and its own change.
   - *Here.* The replication cursor row uses January 2, which avoids the bug.
+
+## 7.1 Integration (2026-11-25)
+
+`TestGaplessReplicationEndToEnd` (`replication/integration_test.go`, skipped with `-short`) runs a real master and replica in one process. The master runs its log, ledger and gRPC replication service. The replica runs the receiver, the BatchApplier and the LedgerHealer, with production BackgroundSync on. It takes about 16 s.
+
+1. **Burst and crash.** The master writes a 1M-row backfill burst: 1,000 transaction groups × 20 symbols × 50 `1Min` bars, plus 10 `TICKA` trades per group. The replica is throttled to 1 ms per entry. Halfway through, while the replica is behind, it is killed: its data directory is copied uncheckpointed, and it restarts on the copy. Afterwards, every fixed bucket and `TICKA` equal the master's: 1,000,000 bar rows and exactly 10,000 ticks.
+2. **Outage past retention.** The replica stops while the master writes:
+   - a correction of `SYM00`'s oldest bars;
+   - 25 `TICKB` ticks;
+   - 200 groups of filler.
+
+   Retention (8 MiB) then deletes all of it from the log. On reconnect the replica gets a gap notice, and every fixed bucket ends equal to the master's, the correction included. `TICKA` is still exact. `TICKB` is not re-pulled, and `replication_unrecoverable_tick_gaps_total` rises by 1.
+
+Gotcha: a heal takes closed bars only, as the backfill does, so test bars must be dated in the past.
+
+`make replication-test` (Docker), 2026-11-25:
+
+| Run | Result |
+|---|---|
+| baseline `1efab6fe` (separate worktree) | 5/5 pass |
+| this change, before the test fix | 4/5 pass: `test_bootstrap_of_preexisting_data` failed with `category: Timeframe not in catalog` |
+| this change, after the test fix | 5/5 pass |
+
+**Why it failed.** The test queried the replica right after writing to the master, and the query sat outside its retry loop. A replica now applies in batches that close up to `replay_batch_wait` (50 ms) after their first entry, so the first query can run before the replica holds the bucket. That is a new failure caused by this change, in the test's retry rather than in replication. **The fix** moves the query inside the retry. With the fix, the data arrives within the test's 20 s deadline.
