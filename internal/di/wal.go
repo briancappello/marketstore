@@ -53,8 +53,11 @@ func (c *Container) GetInitWALFile() *executor.WALFileType {
 			log.Error("failed to find wal files under %s: %w", filepath.Clean(c.GetAbsRootDir()), err)
 		}
 
-		c := executor.NewWALCleaner(ignoreFile, myInstanceID)
-		err = c.CleanupOldWALFiles(walFileAbsPaths)
+		cleaner := executor.NewWALCleaner(ignoreFile, myInstanceID)
+		if rl := c.GetReplicationLog(); rl != nil {
+			cleaner.SetReplicationLog(replication.NewMasterLog(rl))
+		}
+		err = cleaner.CleanupOldWALFiles(walFileAbsPaths)
 		if err != nil {
 			log.Error("Unable to startup Cache and WAL:" + err.Error())
 			panic(fmt.Sprintf("unable to startup Cache and WAL:%v", err))

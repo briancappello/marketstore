@@ -18,9 +18,13 @@ const (
 )
 
 type WALCleaner struct {
-	ignoreFile   string
-	myInstanceID int64
+	ignoreFile     string
+	myInstanceID   int64
+	replicationLog ReplicationLog
 }
+
+// SetReplicationLog makes replay hand every replayed transaction group to rl.
+func (c *WALCleaner) SetReplicationLog(rl ReplicationLog) { c.replicationLog = rl }
 
 func NewWALCleaner(ignoreFile string, myInstanceID int64) *WALCleaner {
 	return &WALCleaner{
@@ -54,6 +58,7 @@ func (c *WALCleaner) CleanupOldWALFiles(walfileAbsPaths []string) error {
 		if err != nil {
 			return fmt.Errorf("opening %s: %w", fp, err)
 		}
+		w.replicationLog = c.replicationLog
 		if err = w.Replay(false); err != nil {
 			// ---  move walfile to a temporary file and skip replay to continue other marketstore process
 			var walReplayErr wal.ReplayError

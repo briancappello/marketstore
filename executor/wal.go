@@ -74,6 +74,11 @@ type ReplicationSender interface {
 // return: a failing log must never fail or stall the write path.
 type ReplicationLog interface {
 	LogTransactionGroup(tgID int64, tgSerialized []byte)
+	// LogReplayedTransactionGroup is called for each transaction group WAL
+	// replay re-applies, in commit order. It must log only groups the log
+	// does not hold yet: a crash can come after the WAL commit but before
+	// the log entry reached disk.
+	LogReplayedTransactionGroup(tgID int64, tgSerialized []byte)
 }
 
 // SetReplicationLog installs the replication log. Call it before writes start.

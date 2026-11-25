@@ -122,3 +122,83 @@ func TestFullLogDiskBreaksLogButNotWrites(t *testing.T) {
 	require.False(t, broken)
 	require.Equal(t, uint64(4), f.log.LastSeq())
 }
+
+func snapshotDir(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	des, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	out := map[string][]byte{}
+	for _, de := range des {
+		b, err := os.ReadFile(filepath.Join(dir, de.Name()))
+		require.NoError(t, err)
+		out[de.Name()] = b
+	}
+	return out
+}
+
+func restoreDir(t *testing.T, dir string, snap map[string][]byte) {
+	t.Helper()
+	require.NoError(t, os.RemoveAll(dir))
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	for name, b := range snap {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), b, 0o600))
+	}
+}
+
+// A master that dies after a transaction group's WAL commit but before its log
+// entry is durable re-applies the group from the WAL on restart; replay must
+// put it in the log exactly once, and must not re-log groups already there.
+func TestWALReplayLogsGroupsMissingFromTheLogOnce(t *testing.T) {
+	for _, lostAppend := range []bool{true, false} {
+		t.Run(map[bool]string{true: "log entry lost", false: "log entry durable"}[lostAppend], func(t *testing.T) {
+			f := newMasterFixture(t)
+			const epoch = 1795600000
+			logDir := f.log.Dir()
+
+			f.writeBar(t, "AAPL/1Min/OHLCV", epoch, 1)
+			require.NoError(t, f.log.Sync())
+			beforeSecond := snapshotDir(t, logDir)
+			f.writeBar(t, "AAPL/1Min/OHLCV", epoch+60, 2)
+			want, err := f.log.Read(1, 10, 0)
+			require.NoError(t, err)
+			require.Len(t, want, 2)
+
+			fi, err := f.metadata.WALFile.FilePtr.Stat()
+			require.NoError(t, err)
+			walBytes := make([]byte, fi.Size())
+			_, err = f.metadata.WALFile.FilePtr.ReadAt(walBytes, 0)
+			require.NoError(t, err)
+
+			// The crash.
+			require.NoError(t, f.log.Close())
+			if lostAppend {
+				restoreDir(t, logDir, beforeSecond)
+			}
+
+			// The restart: open the log, then replay the WAL left behind.
+			l, err := replog.Open(logDir, replog.Options{})
+			require.NoError(t, err)
+			defer l.Close()
+			if lostAppend {
+				require.Equal(t, uint64(1), l.LastSeq())
+			}
+			for i := 0; i < 8; i++ {
+				walBytes[3+i] = 1 // owned by the crashed instance
+			}
+			walPath := filepath.Join(f.root, "WALFile.1.walfile")
+			require.NoError(t, os.WriteFile(walPath, walBytes, 0o600))
+			cleaner := executor.NewWALCleaner("", 12345)
+			cleaner.SetReplicationLog(replication.NewMasterLog(l))
+			require.NoError(t, cleaner.CleanupOldWALFiles([]string{walPath}))
+
+			got, err := l.Read(1, 10, 0)
+			require.NoError(t, err)
+			require.Len(t, got, 2)
+			for i := range got {
+				require.Equal(t, want[i].Seq, got[i].Seq)
+				require.Equal(t, want[i].TGID, got[i].TGID)
+				require.Equal(t, want[i].Data, got[i].Data)
+			}
+		})
+	}
+}

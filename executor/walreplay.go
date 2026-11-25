@@ -154,6 +154,9 @@ func (wf *WALFileType) Replay(dryRun bool) error {
 			return fmt.Errorf("replay transaction group data. tgID=%d, "+
 				"write transaction size=%d:%w", tgID, len(wtSets), err)
 		}
+		if wf.replicationLog != nil {
+			wf.replicationLog.LogReplayedTransactionGroup(tgID, tgSerialized)
+		}
 	}
 
 	log.Info("Replay of WAL file %s finished", wf.FilePtr.Name())

@@ -21,5 +21,16 @@ func (m *MasterLog) LogTransactionGroup(tgID int64, tgSerialized []byte) {
 	_, _ = m.log.Append(tgID, tgSerialized)
 }
 
+// LogReplayedTransactionGroup appends a transaction group re-applied by WAL
+// replay unless the log already holds it. Transaction-group IDs grow
+// monotonically (a restarted master seeds them from the clock), so any group
+// newer than the log's last entry never reached the log before the crash.
+func (m *MasterLog) LogReplayedTransactionGroup(tgID int64, tgSerialized []byte) {
+	if tgID <= m.log.LastTGID() {
+		return
+	}
+	_, _ = m.log.Append(tgID, tgSerialized)
+}
+
 // Log is the underlying replication log.
 func (m *MasterLog) Log() *replog.Log { return m.log }
