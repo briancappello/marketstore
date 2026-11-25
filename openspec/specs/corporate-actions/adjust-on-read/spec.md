@@ -17,7 +17,7 @@ The `adjust` query function SHALL read events only from the corporate-event stor
 - **THEN** `adjust('split')` on AAPL data returns it unchanged
 
 ### Requirement: Arguments select event kinds
-`adjust('split')` SHALL apply `SPLITS` events only. `adjust('dividend')` SHALL apply dividend events only (none exist in this change). `adjust()` with no argument, or with both arguments, SHALL apply every kind it supports. Argument matching SHALL ignore case.
+`adjust('split')` SHALL apply `SPLITS` events only. `adjust('dividend')` SHALL apply dividend events only (no dividend kind exists yet). `adjust()` with no argument, or with both arguments, SHALL apply every kind it supports. Argument matching SHALL ignore case.
 
 #### Scenario: Dividend-only adjust
 - **WHEN** `adjust('dividend')` runs on a symbol that only has split events

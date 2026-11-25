@@ -1,7 +1,7 @@
 # massive/split-repair Specification
 
 ## Purpose
-Gives operators one explicit command that replaces split-adjusted bars, written before this change, with raw bars. It touches only the symbols and date ranges that a split could have affected.
+Gives operators one explicit command that replaces split-adjusted bars, written while REST backfill still requested adjusted data, with raw bars. It touches only the symbols and date ranges that a split could have affected.
 
 ## Requirements
 
