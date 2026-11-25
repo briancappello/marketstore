@@ -25,9 +25,9 @@
 
 ## 4. Batched replay with an atomic cursor (replica)
 
-- [ ] 4.1 Add `WALFileType.WithFlushHeld` and the `__replication__/1D/CURSOR` bucket read/write. Verify with a test that a ticker flush cannot split commands queued under it.
-- [ ] 4.2 The batcher (max entries/bytes/wait) applies each batch plus the cursor in one transaction group. Verify that it gives the same result as per-entry apply on a recorded burst, and that the latency of a single trickled entry stays within 50 ms plus a flush.
-- [ ] 4.3 Crash tests: kill after a batch flush or before it, restart, and check that the cursor is exact and tick buckets have no duplicate and no missing rows.
+- [ ] 4.1 Add `executor.NewBatchWriter` (collects commands), `WALFileType.CommitCommands` (one transaction group under `fileMu`) and the `__replication__/1D/CURSOR` bucket read/write. Verify with tests: concurrent ticker flushes and other writers never split a committed batch from its cursor, and a batch larger than the free write-channel capacity commits without blocking.
+- [ ] 4.2 The batcher (max entries/bytes/commands/wait) applies each batch plus the cursor in one transaction group. Verify that it gives the same result as per-entry apply on a recorded burst, and that the latency of a single trickled entry stays within 50 ms plus a flush.
+- [ ] 4.3 Replay idempotency: write the cursor's primary write last in `FlushCommandsToWAL`, and add the WAL-cleaner replay filter that skips transaction groups whose cursor ≤ the on-disk cursor (wired only on a replica). Crash tests: kill after a batch flush or before it, restart, and check that the cursor is exact and tick buckets have no duplicate and no missing rows.
 - [ ] 4.4 Hide `__`-prefixed symbols from `ListSymbols`, the watchlist universe and the backfill driver's enumeration. Verify with tests.
 - [ ] 4.5 Replay metrics (applied/s, batch sizes, newest applied age). Verify with a test.
 
@@ -35,7 +35,7 @@
 
 - [ ] 5.1 Derive per-bucket epoch ranges from the write commands, and coalesce them with the 64-range cap (D5). Verify with unit tests: fixed and variable keys, overlapping and adjacent ranges, cap merging.
 - [ ] 5.2 Snapshot plus rebuild from the log on startup, and expiry by `ledger_max_age`. Verify with restart tests.
-- [ ] 5.3 `ChangesSince` RPC and the replica heal: re-pull fixed ranges via `BackfillBucket`, report variable ranges (log + `replication_unrecoverable_tick_gaps_total`), and log "full resync required" past the ledger's history. Verify with tests for each scenario in `specs/replication/change-ledger`.
+- [ ] 5.3 `ChangesSince` RPC and the replica heal: re-pull fixed ranges via a range variant of `BackfillBucket` (`HealRange`, watermark untouched), report variable ranges (log + `replication_unrecoverable_tick_gaps_total`), and log "full resync required" past the ledger's history. Verify with tests for each scenario in `specs/replication/change-ledger`.
 
 ## 6. Config, tools, docs
 
