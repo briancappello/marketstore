@@ -278,6 +278,13 @@ func (d *Directory) GetTimeBucketInfoSlice() (tbinfolist []*io.TimeBucketInfo) {
 	return tbinfolist
 }
 
+// IsInternal reports whether a catalog item name is reserved for MarketStore's
+// own bookkeeping: it starts with "__" (for example the replica's cursor,
+// "__replication__/1D/CURSOR"). Internal buckets are read and written by key
+// like any other, but every listing leaves them out.
+func IsInternal(itemName string) bool { return strings.HasPrefix(itemName, "__") }
+
+// GatherTimeBucketInfo lists every bucket year file except internal ones.
 func (d *Directory) GatherTimeBucketInfo() ([]*io.TimeBucketInfo, error) {
 	// Locates a path in the directory and returns the TimeBucketInfo for that path or error if it isn't there
 	// Must be thread-safe for READ access
@@ -295,7 +302,7 @@ func (d *Directory) GatherTimeBucketInfo() ([]*io.TimeBucketInfo, error) {
 		return nil
 	}
 	fileInfoList := make([]*io.TimeBucketInfo, 0)
-	err := d.recurse(&fileInfoList, fileInfoFunc)
+	err := d.recurseVisible(&fileInfoList, fileInfoFunc)
 	if err != nil {
 		return nil, fmt.Errorf("recurse dir to gather time bucket info: %w", err)
 	}
@@ -461,7 +468,10 @@ func (d *Directory) GetListOfSubDirs() (subDirList []*Directory) {
 		return nil
 	}
 	subDirList = make([]*Directory, 0)
-	for _, subdir := range d.subDirs {
+	for name, subdir := range d.subDirs {
+		if IsInternal(name) {
+			continue
+		}
 		subDirList = append(subDirList, subdir)
 	}
 	return subDirList
@@ -515,7 +525,7 @@ func (d *Directory) GatherCategoriesAndItems() (map[string]map[string]int, error
 	// Must be thread-safe for READ access
 	// Provides a map of categories and items within and below this directory
 	catList := make(map[string]map[string]int)
-	err := d.recurse(catList, catalogListFunc)
+	err := d.recurseVisible(catList, catalogListFunc)
 	if err != nil {
 		return nil, fmt.Errorf("recurse to gather category and items: %w", err)
 	}
@@ -538,6 +548,9 @@ func catalogListFunc(d *Directory, itemList interface{}) error {
 	}
 	if d.subDirs != nil {
 		for _, subdir := range d.subDirs {
+			if IsInternal(subdir.itemName) {
+				continue
+			}
 			list[d.category][subdir.itemName] = 0
 		}
 	}
@@ -559,7 +572,7 @@ func ListTimeBucketKeyNames(d *Directory) []string {
 	// look up symbol->timeframe->attributeGroup directory recursively
 	// (e.g. "AAPL" -> "1Min" -> "Tick",  and store "AAPL/1Min/Tick" )
 	for symbol, symbolDir := range d.subDirs {
-		if symbolDir == nil {
+		if symbolDir == nil || IsInternal(symbol) {
 			continue
 		}
 		for timeframe, timeframeDir := range symbolDir.subDirs {
@@ -724,6 +737,26 @@ func (d *Directory) recurse(elem interface{}, levelFunc levelFunc) error {
 			if err := pd.recurse(elem, levelFunc); err != nil {
 				return fmt.Errorf("recurse directory: %w", err)
 			}
+		}
+	}
+	return nil
+}
+
+// recurseVisible is recurse that skips internal subdirectories (IsInternal).
+// Listings use it; lookups by key use recurse.
+func (d *Directory) recurseVisible(elem interface{}, levelFunc levelFunc) error {
+	d.RLock()
+	defer d.RUnlock()
+
+	if err := levelFunc(d, elem); err != nil {
+		return fmt.Errorf("execute levelFunc in directory: %w", err)
+	}
+	for name, pd := range d.subDirs {
+		if IsInternal(name) {
+			continue
+		}
+		if err := pd.recurseVisible(elem, levelFunc); err != nil {
+			return fmt.Errorf("recurse directory: %w", err)
 		}
 	}
 	return nil

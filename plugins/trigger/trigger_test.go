@@ -147,3 +147,10 @@ func TestRecordsToColumnSeries(t *testing.T) {
 		assert.Equal(t, cs.GetEpoch()[i], testCS.GetEpoch()[i])
 	}
 }
+
+// Internal buckets (catalog.IsInternal) never fire triggers, whatever "on" says.
+func TestMatchSkipsInternalBuckets(t *testing.T) {
+	m := trigger.NewMatcher(&EmptyTrigger{}, "*/1D/*")
+	assert.True(t, m.Match("AAPL/1D/OHLCV/2026.bin"))
+	assert.False(t, m.Match("__replication__/1D/CURSOR/2000.bin"))
+}

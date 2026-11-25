@@ -6,6 +6,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/alpacahq/marketstore/v4/catalog"
 	"github.com/alpacahq/marketstore/v4/frontend"
 	pb "github.com/alpacahq/marketstore/v4/proto"
 	"github.com/alpacahq/marketstore/v4/utils/io"
@@ -34,7 +35,14 @@ func (c *GRPCClient) ListTBKs(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list symbols: %w", err)
 	}
-	return resp.GetResults(), nil
+	// A master already leaves internal buckets out; do not depend on it.
+	tbks := resp.GetResults()[:0:0]
+	for _, tbk := range resp.GetResults() {
+		if !catalog.IsInternal(tbk) {
+			tbks = append(tbks, tbk)
+		}
+	}
+	return tbks, nil
 }
 
 // QueryRange reads [startEpoch, endEpoch] (inclusive of start) for one bucket.

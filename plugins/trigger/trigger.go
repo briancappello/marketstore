@@ -206,6 +206,11 @@ func NewMatcher(trigger Trigger, on string) *Matcher {
 
 // Match returns true if keyPath matches the On condition.
 func (tm *Matcher) Match(keyPath string) bool {
+	// Internal buckets (names starting "__", see catalog.IsInternal) are
+	// bookkeeping, such as the replica's cursor, and never fire triggers.
+	if strings.HasPrefix(keyPath, "__") {
+		return false
+	}
 	if tm.onRegex == nil {
 		// Only reachable for a Matcher built as a bare struct literal instead
 		// of via NewMatcher. Compile per call rather than caching, to keep
