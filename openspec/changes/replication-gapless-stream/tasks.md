@@ -1,6 +1,6 @@
 ## 0. Baseline
 
-- [ ] 0.1 Record the test baseline: `go test ./replication/... ./executor/... ./internal/di/... ./frontend/... ./cmd/...` (pass/fail per package), plus `go test -race ./replication/...`, in `notes.md`.
+- [x] 0.1 Record the test baseline: `go test ./replication/... ./executor/... ./internal/di/... ./frontend/... ./cmd/...` (pass/fail per package), plus `go test -race ./replication/...`, in `notes.md`.
 
 ## 1. Measure before building
 
