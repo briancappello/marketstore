@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/alpacahq/marketstore/v4/executor"
@@ -85,6 +86,9 @@ func (c *Container) StartReplicationServer() {
 	c.replicationServerStarted = true
 
 	pb.RegisterReplicationServer(c.GetGRPCReplicationServer(), c.GetReplicationServer())
+	if err := prometheus.DefaultRegisterer.Register(c.GetReplicationServer()); err != nil {
+		log.Error("replication lag metrics: %v", err)
+	}
 
 	listenPort := c.mktsConfig.Replication.ListenPort
 	lis, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", listenPort))

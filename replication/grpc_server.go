@@ -3,6 +3,11 @@ package replication
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"sync"
+	"sync/atomic"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
@@ -29,10 +34,78 @@ type GRPCReplicationServer struct {
 	CertKeyFile string
 
 	log *replog.Log
+
+	mu      sync.Mutex
+	streams map[uint64]*streamState
+	lastID  uint64
+}
+
+// streamState is what the lag metrics need to know about one open stream.
+type streamState struct {
+	replica string
+	next    atomic.Uint64 // the next sequence this stream will send
 }
 
 func NewGRPCReplicationServer(l *replog.Log) *GRPCReplicationServer {
-	return &GRPCReplicationServer{log: l}
+	return &GRPCReplicationServer{log: l, streams: map[uint64]*streamState{}}
+}
+
+func (rs *GRPCReplicationServer) register(replica string, next uint64) (uint64, *streamState) {
+	st := &streamState{replica: replica}
+	st.next.Store(next)
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.lastID++
+	rs.streams[rs.lastID] = st
+	return rs.lastID, st
+}
+
+func (rs *GRPCReplicationServer) unregister(id uint64) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	delete(rs.streams, id)
+}
+
+var (
+	lagSeqDesc = prometheus.NewDesc(metricsNamespace+"_"+metricsSubsystem+"_replication_replica_lag_seq",
+		"Log entries a replica stream has yet to be sent.", []string{"replica", "stream"}, nil)
+	lagBytesDesc = prometheus.NewDesc(metricsNamespace+"_"+metricsSubsystem+"_replication_replica_lag_bytes",
+		"Bytes of log entries a replica stream has yet to be sent.", []string{"replica", "stream"}, nil)
+)
+
+// Describe implements prometheus.Collector: per-stream replica lag.
+func (rs *GRPCReplicationServer) Describe(ch chan<- *prometheus.Desc) {
+	ch <- lagSeqDesc
+	ch <- lagBytesDesc
+}
+
+// Collect implements prometheus.Collector. Lag is measured against what each
+// stream has sent; gRPC flow control bounds how far that runs ahead of what
+// the replica has applied.
+func (rs *GRPCReplicationServer) Collect(ch chan<- prometheus.Metric) {
+	rs.mu.Lock()
+	ids := make([]uint64, 0, len(rs.streams))
+	states := make([]*streamState, 0, len(rs.streams))
+	for id, st := range rs.streams {
+		ids = append(ids, id)
+		states = append(states, st)
+	}
+	rs.mu.Unlock()
+	last := rs.log.LastSeq()
+	for i, st := range states {
+		next := st.next.Load()
+		var lag uint64
+		if next <= last {
+			lag = last - next + 1
+		}
+		bytes, err := rs.log.BytesFrom(next)
+		if err != nil {
+			bytes = 0
+		}
+		id := strconv.FormatUint(ids[i], 10)
+		ch <- prometheus.MustNewConstMetric(lagSeqDesc, prometheus.GaugeValue, float64(lag), st.replica, id)
+		ch <- prometheus.MustNewConstMetric(lagBytesDesc, prometheus.GaugeValue, float64(bytes), st.replica, id)
+	}
 }
 
 func getClientAddr(stream grpc.ServerStream) string {
@@ -56,6 +129,8 @@ func (rs *GRPCReplicationServer) GetWALStream(req *pb.GetWALStreamRequest, strea
 	}
 	log.Info("replica %s connected: streaming from sequence %d (resumable=%v)", addr, next, req.GetResumable())
 	defer log.Info("[master] closed replication connection: %v", addr)
+	id, state := rs.register(addr, next)
+	defer rs.unregister(id)
 
 	for {
 		// Take the notification channel before reading, so an append that
@@ -69,6 +144,7 @@ func (rs *GRPCReplicationServer) GetWALStream(req *pb.GetWALStreamRequest, strea
 				metrics.ReplicationDroppedMessages.Add(float64(gap.Next - next))
 				log.Warn("replica %s: skipping sequences %d-%d (%s)", addr, next, gap.Next-1, gap.Reason)
 				next = gap.Next
+				state.next.Store(next)
 				continue
 			}
 			log.Warn("replica %s: sequences %d-%d unavailable (%s); sent a gap notice", addr, next, gap.Next-1, gap.Reason)
@@ -89,6 +165,7 @@ func (rs *GRPCReplicationServer) GetWALStream(req *pb.GetWALStreamRequest, strea
 				log.Info("replica %s: send failed: %v", addr, err)
 				return err
 			}
+			state.next.Store(e.Seq + 1)
 		}
 		if len(entries) > 0 {
 			next = entries[len(entries)-1].Seq + 1

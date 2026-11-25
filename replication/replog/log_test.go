@@ -208,3 +208,27 @@ func TestReadsSpanSealedSegmentsAfterReopen(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, es)
 }
+
+func TestBytesFromCountsEntriesToTheEnd(t *testing.T) {
+	dir := t.TempDir()
+	l, err := replog.Open(dir, replog.Options{SegmentBytes: 1000})
+	require.NoError(t, err)
+	appendN(t, l, 1, 300) // every entry is 32 + 9 bytes
+	const size = 41
+	check := func(l *replog.Log) {
+		for _, seq := range []uint64{1, 2, 63, 64, 65, 150, 300} {
+			got, err := l.BytesFrom(seq)
+			require.NoError(t, err)
+			require.Equal(t, int64(300-seq+1)*size, got, "from %d", seq)
+		}
+		got, err := l.BytesFrom(301)
+		require.NoError(t, err)
+		require.Zero(t, got)
+	}
+	check(l)
+	require.NoError(t, l.Close())
+	l, err = replog.Open(dir, replog.Options{SegmentBytes: 1000})
+	require.NoError(t, err)
+	defer l.Close()
+	check(l)
+}

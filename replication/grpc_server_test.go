@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http/httptest"
 	"os"
+	"regexp"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -252,4 +257,47 @@ func TestLegacyStreamSkipsGaps(t *testing.T) {
 	s := h.open(t, context.Background(), &pb.GetWALStreamRequest{StartSeq: 2})
 	requireConsecutive(t, recvSeqs(t, s, int(100-first+1)), first)
 	require.Equal(t, dropped+float64(first-2), testutil.ToFloat64(metrics.ReplicationDroppedMessages))
+}
+
+func TestReplicaLagMetricsPerStream(t *testing.T) {
+	h := newStreamHarness(t, replog.Options{HotTailBytes: 1 << 20})
+	reg := prometheus.NewRegistry()
+	require.NoError(t, reg.Register(h.server))
+	srv := httptest.NewServer(promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = h.open(t, ctx, &pb.GetWALStreamRequest{StartSeq: 1, Resumable: true}) // stalls
+	healthy := h.open(t, ctx, &pb.GetWALStreamRequest{StartSeq: 1, Resumable: true})
+	const n = 5000
+	h.appendN(t, 1, n, 1024)
+	requireConsecutive(t, recvSeqs(t, healthy, n), 1)
+
+	lagOf := func(body, name string) map[string]float64 {
+		out := map[string]float64{}
+		re := regexp.MustCompile(`(?m)^alpaca_marketstore_` + name + `\{replica="[^"]*",stream="(\d+)"\} (\S+)$`)
+		for _, m := range re.FindAllStringSubmatch(body, -1) {
+			v, err := strconv.ParseFloat(m[2], 64)
+			require.NoError(t, err)
+			out[m[1]] = v
+		}
+		return out
+	}
+	var seqLag, byteLag map[string]float64
+	require.Eventually(t, func() bool {
+		body := scrape(t, srv.URL)
+		seqLag = lagOf(body, "replication_replica_lag_seq")
+		byteLag = lagOf(body, "replication_replica_lag_bytes")
+		return len(seqLag) == 2 && (seqLag["1"] == 0 || seqLag["2"] == 0)
+	}, 10*time.Second, 10*time.Millisecond)
+
+	stalled, caughtUp := "1", "2"
+	if seqLag["1"] == 0 {
+		stalled, caughtUp = "2", "1"
+	}
+	require.Zero(t, seqLag[caughtUp])
+	require.Zero(t, byteLag[caughtUp])
+	require.Greater(t, seqLag[stalled], float64(1000), "the stalled stream is far behind")
+	require.InDelta(t, seqLag[stalled]*(32+1024), byteLag[stalled], 1, "byte lag matches the entries left")
 }

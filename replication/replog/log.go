@@ -909,3 +909,62 @@ func (l *Log) HotTailFirstSeq() uint64 { return l.tail.first() }
 
 // Dir is the directory the log lives in.
 func (l *Log) Dir() string { return l.dir }
+
+// BytesFrom is the size on disk of the entries from seq to the newest: how
+// far, in bytes, a reader whose next sequence is seq lags behind the log.
+func (l *Log) BytesFrom(seq uint64) (int64, error) {
+	l.mu.RLock()
+	if seq >= l.nextSeq {
+		l.mu.RUnlock()
+		return 0, nil
+	}
+	var (
+		in    *segment
+		later int64
+		lim   int64
+		index []int64
+	)
+	for i := len(l.segments) - 1; i >= 0; i-- {
+		s := l.segments[i]
+		if s.last == 0 {
+			continue
+		}
+		if seq > s.last {
+			break
+		}
+		if seq >= s.first {
+			in, lim = s, s.size
+			if !s.sealed {
+				index = s.index[:len(s.index):len(s.index)]
+			}
+			break
+		}
+		later += s.size // seq is before this segment: all of it counts
+	}
+	l.mu.RUnlock()
+	if in == nil {
+		return later, nil
+	}
+	if index == nil {
+		in.idxMu.Lock()
+		if !in.indexed {
+			if err := indexSealed(in, lim); err != nil {
+				in.idxMu.Unlock()
+				return 0, err
+			}
+		}
+		index = in.index
+		in.idxMu.Unlock()
+	}
+	k := int((seq - in.first) / sparseEvery)
+	if k >= len(index) {
+		k = len(index) - 1
+	}
+	it := newScanner(in.f, index[k], lim)
+	for cur := in.first + uint64(k)*sparseEvery; cur < seq; cur++ {
+		if _, err := it.next(false); err != nil {
+			return 0, fmt.Errorf("replication log: locate sequence %d: %w", seq, err)
+		}
+	}
+	return later + lim - it.off, nil
+}
