@@ -27,7 +27,7 @@
 
 ## 4. Batched replay with an atomic cursor (replica)
 
-- [ ] 4.1 Add `executor.NewBatchWriter` (collects commands), `WALFileType.CommitCommands` (one transaction group under `fileMu`) and the `__replication__/1D/CURSOR` bucket read/write. Verify with tests: concurrent ticker flushes and other writers never split a committed batch from its cursor, and a batch larger than the free write-channel capacity commits without blocking.
+- [x] 4.1 Add `executor.NewBatchWriter` (collects commands), `WALFileType.CommitCommands` (one transaction group under `fileMu`) and the `__replication__/1D/CURSOR` bucket read/write. Verify with tests: concurrent ticker flushes and other writers never split a committed batch from its cursor, and a batch larger than the free write-channel capacity commits without blocking.
 - [ ] 4.2 The batcher (max entries/bytes/commands/wait) applies each batch plus the cursor in one transaction group. Verify that it gives the same result as per-entry apply on a recorded burst, and that the latency of a single trickled entry stays within 50 ms plus a flush.
 - [ ] 4.3 Crash tests on the replica: kill after a batch flush or before it, restart, and check that the cursor is exact and tick buckets have no duplicate and no missing rows (relies on 1.3).
 - [ ] 4.4 Hide `__`-prefixed symbols from `ListSymbols`, the watchlist universe and the backfill driver's enumeration. Verify with tests.

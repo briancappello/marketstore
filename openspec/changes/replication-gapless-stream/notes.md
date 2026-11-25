@@ -64,3 +64,11 @@ A 300-TG run agreed: 31.6 / 359.6 / 2,756.9 / 3,643.8 TG/s, so 115.5× at 1000.
   - fixed-only groups stay byte-identical to the old format;
   - a mismatched trailer is ignored, and same-slot merging leaves fixed writes and the caller's commands alone.
 - **Suites.** The full 0.1 suite passes: 13/13 packages. `go test -race ./replication/... ./executor/` passes.
+
+## Findings outside this change
+
+- **`1D` bars dated January 1 are written into the file header and never read back.** Tier 4: reported, not fixed. Found in 4.1.
+  - *Cause.* For `1D`, `io.TimeToIndex` returns `YearDay() - 1`, so January 1 gets index 0. Every other timeframe is 1-based. `IndexToOffset(0)` is `Headersize - recordSize`, the last bytes of the 37,024-byte header. The reader treats index 0 as an empty slot.
+  - *Impact.* US equities have no January 1 sessions, so normally nothing is lost. A crypto feed or an aggregate that produces a January 1 daily bar loses it, and overwrites header padding. taichi has 38,471 `1D` buckets.
+  - *Proposed fix.* Make 1D indexes 1-based, as every other timeframe is. This changes the on-disk layout of every `1D` bucket, so it needs a migration (shift each year file by one record) and its own change.
+  - *Here.* The replication cursor row uses January 2, which avoids the bug.

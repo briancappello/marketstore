@@ -276,9 +276,28 @@ func (wf *WALFileType) FlushToWAL() (err error) {
 	}
 	wf.fileMu.Lock()
 	defer wf.fileMu.Unlock()
+	return wf.flushLocked(nil)
+}
 
+// CommitCommands commits cmds, together with whatever other writers have
+// queued, as one transaction group, and returns once it is durable in the WAL.
+// cmds never pass through the shared write channel, so a concurrent flush
+// cannot split them, and their number is not bounded by the channel's depth.
+// Build them with a BatchWriter.
+func (wf *WALFileType) CommitCommands(cmds []*wal.WriteCommand) error {
+	if wf.txnPipe == nil || len(cmds) == 0 {
+		return nil
+	}
+	wf.fileMu.Lock()
+	defer wf.fileMu.Unlock()
+	return wf.flushLocked(cmds)
+}
+
+// flushLocked commits the queued write commands plus extra as one transaction
+// group. The caller holds fileMu.
+func (wf *WALFileType) flushLocked(extra []*wal.WriteCommand) error {
 	WTCount := len(wf.txnPipe.writeChannel)
-	if WTCount == 0 {
+	if WTCount+len(extra) == 0 {
 		// refresh TGID so requester can confirm it went through even if nothing is written
 		wf.txnPipe.IncrementTGID()
 		return nil
@@ -298,10 +317,11 @@ func (wf *WALFileType) FlushToWAL() (err error) {
 	}
 
 	// Serialize all data to be written except for the size of this buffer
-	writeCommands := make([]*wal.WriteCommand, WTCount)
+	writeCommands := make([]*wal.WriteCommand, WTCount, WTCount+len(extra))
 	for i := 0; i < WTCount; i++ {
 		writeCommands[i] = <-wf.txnPipe.writeChannel
 	}
+	writeCommands = append(writeCommands, extra...)
 
 	return wf.FlushCommandsToWAL(writeCommands)
 }

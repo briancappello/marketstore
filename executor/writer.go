@@ -24,7 +24,56 @@ import (
 type Writer struct {
 	rootCatDir *catalog.Directory
 	walFile    *WALFileType
+	// collect, when set, receives write commands instead of the WAL's shared
+	// write channel (see BatchWriter).
+	collect func(*wal.WriteCommand)
 }
+
+func (w *Writer) queue(cc *wal.WriteCommand) {
+	if w.collect != nil {
+		w.collect(cc)
+		return
+	}
+	w.walFile.QueueWriteCommand(cc)
+}
+
+// BatchWriter builds write commands for several CSMs without queueing them,
+// and Commit writes them all as one transaction group with one WAL fsync. Use
+// it when a set of writes must become durable together or not at all.
+type BatchWriter struct {
+	w    *Writer
+	cmds []*wal.WriteCommand
+}
+
+func NewBatchWriter(rootCatDir *catalog.Directory, walFile *WALFileType) (*BatchWriter, error) {
+	w, err := NewWriter(rootCatDir, walFile)
+	if err != nil {
+		return nil, err
+	}
+	b := &BatchWriter{w: w}
+	w.collect = func(cc *wal.WriteCommand) { b.cmds = append(b.cmds, cc) }
+	return b, nil
+}
+
+// QueueCSM adds csm to the batch, creating any missing buckets now.
+func (b *BatchWriter) QueueCSM(csm io.ColumnSeriesMap, isVariableLength bool) error {
+	return b.w.QueueCSM(csm, isVariableLength)
+}
+
+// Len is the number of write commands in the batch.
+func (b *BatchWriter) Len() int { return len(b.cmds) }
+
+// Commit writes the batch, and anything other writers have queued, as one
+// transaction group, and empties the batch. When it returns nil the batch is
+// durable in the WAL.
+func (b *BatchWriter) Commit() error {
+	cmds := b.cmds
+	b.cmds = nil
+	return b.w.walFile.CommitCommands(cmds)
+}
+
+// Reset drops the batch without writing it.
+func (b *BatchWriter) Reset() { b.cmds = nil }
 
 func NewWriter(rootCatDir *catalog.Directory, walFile *WALFileType) (*Writer, error) {
 	// Check to ensure there is a valid WALFile for this instance before writing
@@ -122,7 +171,7 @@ func (w *Writer) WriteRecords(ts []time.Time, data []byte, dsWithEpoch []io.Data
 			/*
 				This row is at a new index, output previous output buffer
 			*/
-			w.walFile.QueueWriteCommand(cc)
+			w.queue(cc)
 			// Setup next command
 			prevIndex = index
 			outBuf = formatRecord([]byte{}, record, t, index, tbi.GetIntervals(), tbi.GetRecordType() == io.VARIABLE)
@@ -133,7 +182,7 @@ func (w *Writer) WriteRecords(ts []time.Time, data []byte, dsWithEpoch []io.Data
 	}
 
 	// output to WAL
-	w.walFile.QueueWriteCommand(cc)
+	w.queue(cc)
 
 	return nil
 }

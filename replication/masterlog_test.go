@@ -202,3 +202,21 @@ func TestWALReplayLogsGroupsMissingFromTheLogOnce(t *testing.T) {
 		})
 	}
 }
+
+// readOpensRange reads n one-minute bars of key starting at epoch0.
+func (f *masterFixture) readOpensRange(t *testing.T, key string, epoch0 int64, n int) []float32 {
+	t.Helper()
+	q := planner.NewQuery(f.metadata.CatalogDir)
+	q.AddTargetKey(io.NewTimeBucketKey(key))
+	q.SetRange(time.Unix(epoch0, 0), time.Unix(epoch0+int64(n-1)*60, 0))
+	parsed, err := q.Parse()
+	require.NoError(t, err)
+	r, err := executor.NewReader(parsed)
+	require.NoError(t, err)
+	csm, err := r.Read()
+	require.NoError(t, err)
+	for _, cs := range csm {
+		return cs.GetColumn("Open").([]float32)
+	}
+	return nil
+}
