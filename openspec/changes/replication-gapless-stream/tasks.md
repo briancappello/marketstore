@@ -36,7 +36,7 @@
 ## 5. Change ledger
 
 - [x] 5.1 Derive per-bucket epoch ranges from the write commands, and coalesce them with the 64-range cap (D5). Verify with unit tests: fixed and variable keys, overlapping and adjacent ranges, cap merging.
-- [ ] 5.2 Snapshot plus rebuild from the log on startup, and expiry by `ledger_max_age`. Verify with restart tests.
+- [x] 5.2 Snapshot plus rebuild from the log on startup, and expiry by `ledger_max_age`. Verify with restart tests.
 - [ ] 5.3 `ChangesSince` RPC and the replica heal: re-pull fixed ranges via a range variant of `BackfillBucket` (`HealRange`, watermark untouched), report variable ranges (log + `replication_unrecoverable_tick_gaps_total`), and log "full resync required" past the ledger's history. Verify with tests for each scenario in `specs/replication/change-ledger`.
 
 ## 6. Config, tools, docs

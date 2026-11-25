@@ -13,6 +13,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/frontend"
 	"github.com/alpacahq/marketstore/v4/replication"
 	"github.com/alpacahq/marketstore/v4/replication/backfill"
+	"github.com/alpacahq/marketstore/v4/replication/ledger"
 	"github.com/alpacahq/marketstore/v4/replication/replog"
 	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/log"
@@ -44,6 +45,8 @@ type Container struct {
 	replicationServerStarted bool
 	replicaApplier           *replication.BatchApplier
 	replicaApplierDone       chan struct{}
+	masterLog                *replication.MasterLog
+	replicationLedger        *ledger.Ledger
 }
 
 func NewContainer(cfg *utils.MktsConfig) *Container {

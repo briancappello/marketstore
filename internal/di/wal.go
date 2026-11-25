@@ -39,8 +39,8 @@ func (c *Container) GetInitWALFile() *executor.WALFileType {
 		panic(fmt.Sprintf("unable to create WAL: %v", err))
 	}
 
-	if rl := c.GetReplicationLog(); rl != nil && !walfile.WALBypass {
-		walfile.SetReplicationLog(replication.NewMasterLog(rl))
+	if ml := c.GetMasterLog(); ml != nil && !walfile.WALBypass {
+		walfile.SetReplicationLog(ml)
 	}
 
 	if !walfile.WALBypass {
@@ -56,8 +56,8 @@ func (c *Container) GetInitWALFile() *executor.WALFileType {
 		}
 
 		cleaner := executor.NewWALCleaner(ignoreFile, myInstanceID)
-		if rl := c.GetReplicationLog(); rl != nil {
-			cleaner.SetReplicationLog(replication.NewMasterLog(rl))
+		if ml := c.GetMasterLog(); ml != nil {
+			cleaner.SetReplicationLog(ml)
 		}
 		err = cleaner.CleanupOldWALFiles(walFileAbsPaths)
 		if err != nil {
@@ -91,7 +91,35 @@ const (
 	replicationLogRetainInterval = 10 * time.Second
 	defaultReplicationLogMaxSize = 20 << 30
 	defaultReplicationLogMaxAge  = 48 * time.Hour
+
+	replicationLedgerSnapshotInterval = 10 * time.Minute
+	defaultReplicationLedgerMaxAge    = 30 * 24 * time.Hour
 )
+
+func (c *Container) ledgerSnapshotPath() string {
+	return filepath.Join(c.GetAbsRootDir(), "replication_ledger.snap")
+}
+
+// GetMasterLog is the master's replication log plus change ledger, as handed
+// to the WAL, or nil when this instance is not a replication master. The
+// ledger is rebuilt (snapshot plus the log after it) before WAL replay, so
+// groups that replay logs are recorded in it too.
+func (c *Container) GetMasterLog() *replication.MasterLog {
+	rl := c.GetReplicationLog()
+	if rl == nil {
+		return nil
+	}
+	if c.masterLog != nil {
+		return c.masterLog
+	}
+	lg := replication.RebuildLedger(c.ledgerSnapshotPath(), rl, 0)
+	log.Info("replication ledger: history from sequence %d, up to %d", lg.HistoryStart(), lg.LastSeq())
+	go replication.RunLedger(context.Background(), lg, c.ledgerSnapshotPath(),
+		replicationLedgerSnapshotInterval, defaultReplicationLedgerMaxAge)
+	c.replicationLedger = lg
+	c.masterLog = replication.NewMasterLog(rl, lg)
+	return c.masterLog
+}
 
 // GetReplicationLog opens the master's replication log, or returns nil when
 // this instance is not a replication master. The log is opened before WAL
@@ -124,6 +152,9 @@ func (c *Container) GetReplicationLog() *replog.Log {
 func (c *Container) CloseReplicationLog() {
 	if c.replicationLog == nil {
 		return
+	}
+	if c.replicationLedger != nil {
+		replication.SaveLedger(c.replicationLedger, c.ledgerSnapshotPath(), defaultReplicationLedgerMaxAge)
 	}
 	if err := c.replicationLog.Close(); err != nil {
 		log.Error("closing the replication log: %v", err)

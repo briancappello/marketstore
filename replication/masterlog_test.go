@@ -15,6 +15,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/internal/di"
 	"github.com/alpacahq/marketstore/v4/planner"
 	"github.com/alpacahq/marketstore/v4/replication"
+	"github.com/alpacahq/marketstore/v4/replication/ledger"
 	"github.com/alpacahq/marketstore/v4/replication/replog"
 	"github.com/alpacahq/marketstore/v4/utils"
 	"github.com/alpacahq/marketstore/v4/utils/io"
@@ -25,6 +26,7 @@ type masterFixture struct {
 	metadata *executor.InstanceMetadata
 	writer   *executor.Writer
 	log      *replog.Log
+	ledger   *ledger.Ledger
 	full     atomic.Bool
 }
 
@@ -48,7 +50,8 @@ func newMasterFixture(t *testing.T) *masterFixture {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = f.log.Close() })
-	f.metadata.WALFile.SetReplicationLog(replication.NewMasterLog(f.log))
+	f.ledger = ledger.New(0)
+	f.metadata.WALFile.SetReplicationLog(replication.NewMasterLog(f.log, f.ledger))
 	return f
 }
 
@@ -189,7 +192,7 @@ func TestWALReplayLogsGroupsMissingFromTheLogOnce(t *testing.T) {
 			walPath := filepath.Join(f.root, "WALFile.1.walfile")
 			require.NoError(t, os.WriteFile(walPath, walBytes, 0o600))
 			cleaner := executor.NewWALCleaner("", 12345)
-			cleaner.SetReplicationLog(replication.NewMasterLog(l))
+			cleaner.SetReplicationLog(replication.NewMasterLog(l, nil))
 			require.NoError(t, cleaner.CleanupOldWALFiles([]string{walPath}))
 
 			got, err := l.Read(1, 10, 0)

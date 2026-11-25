@@ -433,8 +433,9 @@ func (l *Log) OldestWallclock() int64 {
 	return 0
 }
 
-// Append logs one transaction group and returns its sequence number. The log
-// keeps data (in its memory tail), so the caller must not modify it afterwards.
+// Append logs one transaction group and returns its sequence number. On
+// failure the sequence is still consumed and returned, with the error. The
+// log keeps data (in its memory tail), so the caller must not modify it.
 func (l *Log) Append(tgID int64, data []byte) (uint64, error) {
 	if int64(len(data)) >= maxEntryLen {
 		return 0, fmt.Errorf("replication log: entry of %d bytes is too large", len(data))
@@ -469,9 +470,10 @@ func (l *Log) Append(tgID int64, data []byte) (uint64, error) {
 			log.Error("replication log broken at sequence %d: %v", e.Seq, err)
 		}
 		// The sequence is consumed: it may have been partly written, and a
-		// recovered log must leave a hole where entries were lost.
+		// recovered log must leave a hole where entries were lost. It is
+		// returned with the error, so callers can still account for it.
 		l.nextSeq++
-		return 0, err
+		return e.Seq, err
 	}
 	if s.last == 0 {
 		s.firstWall = e.Wallclock

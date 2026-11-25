@@ -102,7 +102,11 @@ A new replica with no cursor also sends `start_seq = 0`. A new master stamps `se
 - **Coalescing.** A new write extends the bucket's newest range when its epochs overlap, or fall within one timeframe interval of it. Otherwise it opens a new range. At 64 ranges per bucket, the two closest ranges merge, which over-approximates and is safe because re-pulls are idempotent.
 - **Persistence.** Snapshots go to `<root>/replication_ledger.snap` every 10 minutes and at shutdown. At startup, the ledger is rebuilt from the snapshot plus the log entries after it. If the log was truncated past the snapshot, the ledger history starts at the snapshot.
 - **Expiry.** Ranges with `lastWallclock` older than `ledger_max_age` (30 days) are dropped.
-- **Size.** About 50k buckets × a few ranges × 40 B, so a few MB in practice.
+- **Size.** taichi has 50,231 buckets (2026-11-25).
+  - *Ranges.* Intraday buckets get one range per trading day. `1D` buckets get about one per week, because weekends break adjacency. That is about 640k ranges over 30 days.
+  - *Cost.* About 26 MB in memory, and a gob snapshot of about 15 MB.
+  - *Locking.* A snapshot copies the ranges under the ledger lock and encodes them outside it, so the write path waits milliseconds at most.
+  - *Broken log.* A failed append still returns its consumed sequence, so the ledger records groups that the disk log lost.
 - **Healing.** `ChangesSince` returns the ranges with `lastSeq > since`. The replica heals fixed ranges over [epochMin, epochMax], and reports variable ranges (spec). `BackfillBucket` is watermark-anchored (`[watermark+1−lookback, now]`), so the heal uses a range variant, `HealRange`. It shares the query, the closed-bar filter and the row-diff write, and leaves the watermark alone.
 
 ### D7. WAL replay is idempotent for variable records (master and replica)
