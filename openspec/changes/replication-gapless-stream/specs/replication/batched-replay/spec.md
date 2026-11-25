@@ -16,7 +16,7 @@ The replica SHALL apply consecutive received transaction groups in batches, with
 - **THEN** it is applied within 50ms plus one flush
 
 ### Requirement: A batch and its cursor become durable together
-The replica SHALL commit a batch's writes and the batch's last sequence number (the new cursor) in a single WAL transaction group. After a crash, WAL replay SHALL restore both or neither. The replica SHALL then resume from the restored cursor + 1. WAL replay SHALL skip a transaction group whose cursor is not newer than the cursor already in primary storage, so a batch whose primary writes completed is not applied a second time. After a process crash, no entry SHALL be applied twice, so tick buckets never get duplicate rows. A power loss, or a crash inside one flush's primary writes, MAY duplicate or drop ticks from the last checkpoint interval; the design documents this.
+The replica SHALL commit a batch's writes and the batch's last sequence number (the new cursor) in a single WAL transaction group. After a crash, WAL replay SHALL restore both or neither. The replica SHALL then resume from the restored cursor + 1. Because WAL replay is idempotent for variable records (see `storage/wal-replay`), a batch whose primary writes completed before a crash SHALL NOT add rows when it is replayed. No entry SHALL be applied twice, so tick buckets never get duplicate rows.
 
 #### Scenario: Crash after a batch flush
 - **WHEN** the replica process crashes right after the WAL flush and primary writes of batch 2001-3000, before the next checkpoint

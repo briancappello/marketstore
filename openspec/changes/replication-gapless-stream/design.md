@@ -9,7 +9,7 @@ See proposal.md (Why). Current mechanics this design replaces or builds on:
 - **Transaction-group IDs** start at `time.Now().UnixNano()` and also increment on empty flushes (`executor/cache.go`, `FlushToWAL`). They are monotonic but not consecutive, so they cannot detect gaps.
 - **The master WAL** is truncated every `wal_rotate_interval` × 5 min (about 25 min on taichi), so it cannot serve resends.
 - **Replica receive path.** `Receiver.Run` → `Replayer.Replay` → `ParseTGData` → `WTSetToCSM` → `GetDefaultWriter().WriteCSM`, once per **write set**. That is one WriteCSM, and so one `RequestFlush`/WAL fsync, per write command of the received transaction group (about 16 per TG on taichi's live traffic), not one per transaction group. Measured on p1 (task 1.1): 24 TG/s.
-- **WAL replay is not idempotent for ticks.** `Replay` (`executor/walreplay.go`) re-applies every transaction group after the last completed checkpoint, whether or not its primary writes already ran. Fixed writes are idempotent. Variable writes are a read-append-rewrite, so after a process crash every tick written since the last checkpoint (up to 5 min) is duplicated. This applies to the master and the replica alike, today.
+- **WAL replay is not idempotent for ticks.** `Replay` (`executor/walreplay.go`) re-applies every transaction group after the last completed checkpoint, whether or not its primary writes already ran. Fixed writes are idempotent. Variable writes are a read-append-rewrite, so after a process crash every tick written since the last checkpoint (up to 5 min) is duplicated. This applies to the master and the replica alike, today. D7 fixes it.
 - **Replica catch-up.** The backfill driver (`replication/backfill/driver.go`) runs shallow passes ([watermark+1, now]) and daily deep passes (24h before the last complete deep pass). It skips variable (tick) buckets.
 - **Measured on taichi** (2026-11-24/25): 2.85M dropped of 61M writes. Drops were zero during a minute of live trading, and they come in backfill bursts.
 
@@ -68,12 +68,7 @@ A new replica with no cursor also sends `start_seq = 0`. A new master stamps `se
   - `WALFileType.CommitCommands(cmds)` then takes `fileMu`, drains whatever other writers have queued, appends `cmds`, and writes it all as one transaction group with one fsync.
   - A ticker flush cannot split the batch, because the batch is never in the channel.
   - *Rejected: `WithFlushHeld(fn)`, holding `fileMu` while `fn` queues into the channel.* The channel holds 1M commands, and the flusher that drains it needs `fileMu`. A batch, or a concurrent backfill write, that fills the channel while the lock is held deadlocks the replica. A large bootstrap bucket alone is one command per bar. It would also hold `fileMu` through parsing and catalog work, and a `RequestFlush` inside `fn` would self-deadlock on the non-reentrant mutex.
-- **Replay idempotency for the replica.** The cursor alone does not stop duplicate ticks after a crash, because WAL replay re-applies transaction groups whose primary writes already ran (see Context).
-  - `FlushCommandsToWAL` writes the cursor bucket's primary write last.
-  - Before WAL replay, the replica reads the cursor from primary. Replay then skips every transaction group that carries a cursor write ≤ that value: its primary writes all completed before the crash.
-  - Transaction groups without a cursor write (backfill writes, fixed only) replay as today.
-  - The filter is an optional hook on the WAL cleaner, set by `internal/di` only on a replica. The executor gains no knowledge of replication.
-  - *Limits.* This is exact for process crashes (panic, OOM, kill -9), where the page cache survives. Two windows remain. A crash in the middle of one flush's primary-write loop can duplicate that flush's ticks. A power loss can persist the cursor and a tick block in either order, so it can duplicate or drop ticks written since the last checkpoint.
+- **Replay idempotency.** The cursor alone does not stop duplicate ticks after a crash, because WAL replay re-applies transaction groups whose primary writes already ran (see Context). D7 makes WAL replay idempotent for variable records on every instance. The replica therefore needs no replay rule of its own.
 - **Cursor storage.** The cursor is a fixed bucket, `__replication__/1D/CURSOR`: one row at a constant epoch, with column `Seq uint64`. WAL replay therefore restores the cursor together with the data, and a crash leaves both or neither (spec).
   - Watchlist, listing and symbol-enumeration code skip symbols that start with `__`. This is a small shared helper used by `ListSymbols` and the watchlist universe.
   - Replicas never forward to other replicas, and the bucket is never sent to the master.
@@ -91,6 +86,50 @@ A new replica with no cursor also sends `start_seq = 0`. A new master stamps `se
 - **Expiry.** Ranges with `lastWallclock` older than `ledger_max_age` (30 days) are dropped.
 - **Size.** About 50k buckets × a few ranges × 40 B, so a few MB in practice.
 - **Healing.** `ChangesSince` returns the ranges with `lastSeq > since`. The replica heals fixed ranges over [epochMin, epochMax], and reports variable ranges (spec). `BackfillBucket` is watermark-anchored (`[watermark+1−lookback, now]`), so the heal uses a range variant, `HealRange`. It shares the query, the closed-bar filter and the row-diff write, and leaves the watermark alone.
+
+### D7. WAL replay is idempotent for variable records (master and replica)
+A crash today duplicates every tick written since the last checkpoint, on the master and on the replica. The master's own tick buckets would then differ from a replica that got each transaction group once from the log. So this change fixes replay itself, for all instances.
+
+The fix rests on two invariants of the variable write path (`WriteBufferToFileIndirect`):
+- A variable data file only grows after it is created. A rewritten block is always written at end-of-file, and the old block is never overwritten.
+- The 24-byte index slot `{Index, Offset, Len}` is updated after its block is written.
+
+So if a slot's `Offset` is at or past the file's size from before a transaction group's primary writes began, the slot already holds that group's write.
+
+**Recording the pre-write size.**
+- `FlushCommandsToWAL` records each variable file's size (`preEOF`) before it writes the WAL.
+  - It opens each variable file once and seeks to the end, and it reuses that handle for the primary write. The cost is one `lseek` per file per flush.
+  - Nothing else writes primary files between the WAL write and the primary write, because `fileMu` is held for the whole call.
+- The sizes travel in a **trailer** appended to `tgSerialized`, after the last write command: `preEOF int64` for each variable command in command order, then `count int64`, then an 8-byte magic.
+  - The WAL checksum covers the trailer.
+  - `ParseTGData` (old and new) reads exactly `WTCount` commands and ignores trailing bytes. Old binaries and old replicas therefore parse new transaction groups unchanged; they just don't use the trailer.
+- Within one transaction group, variable commands for the same file and index are **merged** into one command before serialization, by concatenating their payloads in order.
+  - This gives the same block as applying them one by one. The block is old + P1 + P2 stably sorted by interval ticks, and stable sorting is associative over concatenation.
+  - Each slot then gets at most one write per transaction group, so the per-slot check is exact.
+
+**Replay.**
+- For a variable command, replay reads the slot. It skips the command when `Index != 0 && Offset >= preEOF`; otherwise it appends as today.
+- Fixed commands and transaction groups without a trailer (written by an old binary) replay as today.
+
+**Why this is exact.**
+- Flushes are serialized, and a transaction group reaches the WAL only after the previous group's primary writes have finished. So only the last group in a WAL file can be partly applied, and the per-slot check settles each of its slots on its own.
+- Re-applying a slot writes at the current end-of-file. That is beyond the `preEOF` of every earlier group, and no later group exists in the WAL.
+- A failed primary write (logged and skipped today) leaves the slot below `preEOF`, so replay heals it.
+
+**Power loss.**
+- If the block persisted but the slot did not, the slot is below `preEOF`, so the command is re-applied from the intact old block. That is correct.
+- If the file lost appended pages, later slots also fall below their `preEOF` and are re-applied. That is correct too.
+- Only "slot persisted, block lost" stays corrupt. That is a pre-existing torn-write case that this change neither causes nor fixes.
+
+**Replication.** The replica ignores the master's trailer, because master file offsets mean nothing locally. It writes through its own `FlushCommandsToWAL`, which records its own trailer. Merged commands are still ordinary write sets, so `WTSetToCSM` handles them unchanged.
+
+**Rollback.** An old binary replaying a new WAL ignores the trailer and duplicates, exactly as it does today. Rolling back after a clean shutdown leaves nothing to replay.
+
+*Alternatives:*
+- *A "primary applied" marker per transaction group in the WAL.* It is not fsynced with the primary pages. After a power loss it can claim writes that never reached disk, which turns today's duplicates into lost ticks.
+- *Content-based de-duplication at replay.* Identical genuine ticks (same nanosecond, price and size) are indistinguishable from replayed ones.
+- *Full merged blocks in the WAL.* Replace semantics would be idempotent, but they change what replicas receive. Old replicas would append whole blocks, and continuation writes would inflate the WAL.
+- *A replica-only cursor filter.* It fixes only the replica, and leaves a window inside one flush's primary writes.
 
 ### D6. Configuration
 New `replication` keys (master unless noted):
@@ -115,7 +154,7 @@ The defaults are sized for taichi (132 GB free today). Task 1.2 measures the rea
 - **[`__replication__` bucket visible in the catalog]** → The `__` prefix is filtered by a shared helper. A test lists symbols on a replica and checks it is absent.
 - **[Over-approximated ledger ranges re-pull more than needed]** → Re-pulls are idempotent and bounded by the 64-range cap.
 - **[Tick gaps past retention remain unhealable]** → Accepted and reported. With a 48h log, only an outage longer than retention produces them.
-- **[Master WAL replay duplicates ticks after a master crash (pre-existing, not fixed here)]** → The replica gets each transaction group once from the log. After a master crash, though, the master's own tick buckets can hold duplicates the replica does not have. Clean restarts (`systemctl --user restart`) flush and checkpoint, so they are not affected. The fix (an idempotent variable replay, or a primary-applied marker) changes WAL semantics for every instance, and needs its own change.
+- **[Idempotent replay (D7) touches the write path of every instance]** → The trailer is ignored by old parsers, and the same-slot merge is semantically neutral. Tests cover: crash after the WAL fsync but before primary, crash mid primary loop, crash after primary, an old-format WAL, and identical decoded blocks with the merge versus without it.
 - **[Protocol change]** → Deploy master and replica together. Mixed versions degrade to today's behavior and do not fail (spec).
 
 ## Migration Plan

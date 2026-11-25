@@ -2,10 +2,12 @@
 
 - [x] 0.1 Record the test baseline: `go test ./replication/... ./executor/... ./internal/di/... ./frontend/... ./cmd/...` (pass/fail per package), plus `go test -race ./replication/...`, in `notes.md`.
 
-## 1. Measure before building
+## 1. Measure, and make crash replay safe, before building
 
 - [x] 1.1 Benchmark replica apply throughput on p1's disk: transaction groups per second when applied one per WriteCSM (today) vs in batches of 100/1000 with one flush. Use a burst captured from a taichi WAL file. Verify by recording the numbers in `notes.md`. If batching is not at least 10× faster, stop and revisit D4 with the user.
 - [ ] 1.2 Measure taichi's replication byte volume per day and per backfill burst (sum of `len(tgSerialized)` over a day, from a temporary counter or a WAL sample). Verify by recording it in `notes.md` and setting the rollout values of `log_max_bytes`/`log_max_age` from it.
+
+- [ ] 1.3 Idempotent variable replay (D7): same-slot merge of variable commands, the `preEOF` trailer in `tgSerialized`, and the slot check in WAL replay. Verify with tests for each scenario in `specs/storage/wal-replay`: crash before primary, mid primary loop and after primary give each tick once; merged and unmerged writes decode to the same rows; an old-format transaction group (no trailer) still parses and replays as before; old `ParseTGData` semantics (`WTCount` commands) are unchanged on a trailer-carrying group.
 
 ## 2. Replication log (master)
 
@@ -27,7 +29,7 @@
 
 - [ ] 4.1 Add `executor.NewBatchWriter` (collects commands), `WALFileType.CommitCommands` (one transaction group under `fileMu`) and the `__replication__/1D/CURSOR` bucket read/write. Verify with tests: concurrent ticker flushes and other writers never split a committed batch from its cursor, and a batch larger than the free write-channel capacity commits without blocking.
 - [ ] 4.2 The batcher (max entries/bytes/commands/wait) applies each batch plus the cursor in one transaction group. Verify that it gives the same result as per-entry apply on a recorded burst, and that the latency of a single trickled entry stays within 50 ms plus a flush.
-- [ ] 4.3 Replay idempotency: write the cursor's primary write last in `FlushCommandsToWAL`, and add the WAL-cleaner replay filter that skips transaction groups whose cursor ≤ the on-disk cursor (wired only on a replica). Crash tests: kill after a batch flush or before it, restart, and check that the cursor is exact and tick buckets have no duplicate and no missing rows.
+- [ ] 4.3 Crash tests on the replica: kill after a batch flush or before it, restart, and check that the cursor is exact and tick buckets have no duplicate and no missing rows (relies on 1.3).
 - [ ] 4.4 Hide `__`-prefixed symbols from `ListSymbols`, the watchlist universe and the backfill driver's enumeration. Verify with tests.
 - [ ] 4.5 Replay metrics (applied/s, batch sizes, newest applied age). Verify with a test.
 

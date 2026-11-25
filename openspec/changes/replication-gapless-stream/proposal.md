@@ -15,6 +15,7 @@ Replication from taichi to p1 loses data. The master drops a transaction group w
   - A replica whose cursor is older than the log's retention asks for the ranges changed since its cursor, and re-pulls exactly those for fixed buckets.
   - For tick buckets past retention, the gap cannot be refilled without duplicating rows. It is reported (metric + log), not guessed at.
 - **B: faster replay on the replica.** The replica applies received messages in batches, with one write and one WAL flush per batch instead of one per message. A replica then drains backfill bursts faster than the master produces them. A measurement task confirms the current bottleneck first.
+- **Crash-safe ticks on every instance.** Today WAL replay after a crash re-appends every tick written since the last checkpoint, on the master and on replicas. Replay becomes idempotent for variable-length records, so a crash no longer duplicates ticks, and the master and replicas cannot drift apart that way.
 - **Observability.** Metrics for replication lag (sequence numbers and bytes), log size and retention, ledger heals and unrecoverable tick gaps. A drop now only happens when a replica falls past retention.
 - **BREAKING (replication protocol):** `GetWALStream` gains a start-sequence request field, and the responses carry sequence numbers. Master and replicas must be upgraded together. A new-master/old-replica pair keeps working only as a best-effort stream.
 - One-time rollout step: copy p1's missing tick history from taichi while p1 is stopped. History from before the replica's first cursor is out of scope for the protocol.
@@ -26,6 +27,7 @@ Replication from taichi to p1 loses data. The master drops a transaction group w
 - `replication/resumable-stream`: cursor-based streaming, replica resume, gap detection and gap fill, and master isolation.
 - `replication/change-ledger`: per-bucket change ranges for replicas past retention, plus fixed-bucket heal and tick-gap reporting.
 - `replication/batched-replay`: how the replica applies received transaction groups in batches, with durability and ordering.
+- `storage/wal-replay`: crash replay that does not duplicate variable-length (tick) rows, on every instance.
 
 ### Modified Capabilities
 <!-- None: replication has no main specs yet in openspec/specs/. -->
@@ -35,6 +37,7 @@ Replication from taichi to p1 loses data. The master drops a transaction group w
 - **Code:**
   - `replication/` (sender, grpc_server, grpc_client, receiver, replay, and backfill driver integration)
   - `executor/wal.go` (handing committed transaction groups to the log)
+  - `executor/wal.go`, `executor/walreplay.go`, `executor/writer.go` (idempotent variable replay: pre-write file sizes in a transaction-group trailer, and same-slot merge)
   - `proto/replication.proto` plus regenerated code
   - `internal/di/replication.go`
   - `utils/config.go` (new `replication` options)
