@@ -17,6 +17,7 @@ import (
 	pb "github.com/alpacahq/marketstore/v4/proto"
 	"github.com/alpacahq/marketstore/v4/replication"
 	"github.com/alpacahq/marketstore/v4/replication/backfill"
+	"github.com/alpacahq/marketstore/v4/replication/ledger"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 	"google.golang.org/grpc"
@@ -60,7 +61,11 @@ func (c *Container) GetReplicationServer() *replication.GRPCReplicationServer {
 	if c.replicationServer != nil {
 		return c.replicationServer
 	}
-	c.replicationServer = replication.NewGRPCReplicationServer(c.GetReplicationLog())
+	var lg *ledger.Ledger
+	if ml := c.GetMasterLog(); ml != nil {
+		lg = c.replicationLedger
+	}
+	c.replicationServer = replication.NewGRPCReplicationServer(c.GetReplicationLog(), lg)
 	return c.replicationServer
 }
 
@@ -159,7 +164,13 @@ func (c *Container) GetReplicationClientWithRetry() ReplicationClient {
 		log.Error("replication replay metrics: %v", err)
 	}
 	c.replicaApplierDone = make(chan struct{})
-	replicationReceiver := replication.NewReceiver(cli, applier, replication.UnhealedGaps{})
+	// A gap past the master's log retention is healed from its change ledger
+	// when this replica can query the master; otherwise it is only reported.
+	var healer replication.GapHealer = replication.UnhealedGaps{}
+	if driver := c.GetReplicationBackfillDriver(); driver != nil {
+		healer = replication.NewLedgerHealer(pb.NewReplicationClient(conn), driver.HealRange)
+	}
+	replicationReceiver := replication.NewReceiver(cli, applier, healer)
 
 	// A sequenced stream resumes exactly where it stopped, so a reconnect
 	// loses nothing. Only a master that does not sequence its stream can drop

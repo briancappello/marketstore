@@ -165,6 +165,10 @@ message ChangesSinceRequest {
 message EpochRange {
     int64 epoch_from = 1;
     int64 epoch_to = 2;
+    // The log sequences that wrote the range (coalesced, so approximate:
+    // first_seq is the earliest write merged into it, last_seq the latest).
+    uint64 first_seq = 3;
+    uint64 last_seq = 4;
 }
 
 message BucketChanges {

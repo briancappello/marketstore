@@ -330,3 +330,9 @@ func (d *Driver) Run(ctx context.Context, interval time.Duration, nowFn func() i
 		}
 	}
 }
+
+// HealRange re-pulls [from, to] of one fixed bucket from the master and writes
+// what differs, leaving the watermark alone (see HealRange).
+func (d *Driver) HealRange(ctx context.Context, tbk string, from, to int64) (int, error) {
+	return HealRange(ctx, d.api, d.readLocal, d.write, tbk, from, to, time.Now().Unix())
+}

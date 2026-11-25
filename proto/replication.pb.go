@@ -377,9 +377,13 @@ func (x *ChangesSinceRequest) GetSinceSeq() uint64 {
 
 // EpochRange is an inclusive range of epochs (unix seconds) written.
 type EpochRange struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EpochFrom     int64                  `protobuf:"varint,1,opt,name=epoch_from,json=epochFrom,proto3" json:"epoch_from,omitempty"`
-	EpochTo       int64                  `protobuf:"varint,2,opt,name=epoch_to,json=epochTo,proto3" json:"epoch_to,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	EpochFrom int64                  `protobuf:"varint,1,opt,name=epoch_from,json=epochFrom,proto3" json:"epoch_from,omitempty"`
+	EpochTo   int64                  `protobuf:"varint,2,opt,name=epoch_to,json=epochTo,proto3" json:"epoch_to,omitempty"`
+	// The log sequences that wrote the range (coalesced, so approximate:
+	// first_seq is the earliest write merged into it, last_seq the latest).
+	FirstSeq      uint64 `protobuf:"varint,3,opt,name=first_seq,json=firstSeq,proto3" json:"first_seq,omitempty"`
+	LastSeq       uint64 `protobuf:"varint,4,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -424,6 +428,20 @@ func (x *EpochRange) GetEpochFrom() int64 {
 func (x *EpochRange) GetEpochTo() int64 {
 	if x != nil {
 		return x.EpochTo
+	}
+	return 0
+}
+
+func (x *EpochRange) GetFirstSeq() uint64 {
+	if x != nil {
+		return x.FirstSeq
+	}
+	return 0
+}
+
+func (x *EpochRange) GetLastSeq() uint64 {
+	if x != nil {
+		return x.LastSeq
 	}
 	return 0
 }
@@ -589,12 +607,14 @@ const file_replication_proto_rawDesc = "" +
 	"\twallclock\x18\x04 \x01(\x03R\twallclockB\x06\n" +
 	"\x04body\"2\n" +
 	"\x13ChangesSinceRequest\x12\x1b\n" +
-	"\tsince_seq\x18\x01 \x01(\x04R\bsinceSeq\"F\n" +
+	"\tsince_seq\x18\x01 \x01(\x04R\bsinceSeq\"~\n" +
 	"\n" +
 	"EpochRange\x12\x1d\n" +
 	"\n" +
 	"epoch_from\x18\x01 \x01(\x03R\tepochFrom\x12\x19\n" +
-	"\bepoch_to\x18\x02 \x01(\x03R\aepochTo\"h\n" +
+	"\bepoch_to\x18\x02 \x01(\x03R\aepochTo\x12\x1b\n" +
+	"\tfirst_seq\x18\x03 \x01(\x04R\bfirstSeq\x12\x19\n" +
+	"\blast_seq\x18\x04 \x01(\x04R\alastSeq\"h\n" +
 	"\rBucketChanges\x12\x10\n" +
 	"\x03tbk\x18\x01 \x01(\tR\x03tbk\x12\x1a\n" +
 	"\bvariable\x18\x02 \x01(\bR\bvariable\x12)\n" +

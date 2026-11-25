@@ -26,11 +26,11 @@ On a gap notice, the replica SHALL re-pull from the master every listed range of
 - **THEN** after the replica resumes, its MSFT 1Min bars for 2026-11-20 equal the master's
 
 ### Requirement: Unhealable tick gaps are reported
-For a variable bucket listed in a gap, the replica SHALL NOT re-pull the range. Re-pulling appends, so it would duplicate rows. It SHALL log the bucket and range, and increment `replication_unrecoverable_tick_gaps_total`.
+For a variable bucket listed in a gap, the replica SHALL NOT re-pull the range. Re-pulling appends, so it would duplicate rows. It SHALL log the bucket and range, and increment `replication_unrecoverable_tick_gaps_total`. Only ranges first written before the gap's end are considered; later ones arrive through the stream. To support this, the ledger's ranges carry their first and last sequence.
 
 #### Scenario: Tick gap past retention
 - **WHEN** a gap lists `AAPL/1Sec/TRADE` for 2026-11-24
-- **THEN** no AAPL trades are re-pulled, and the log line and metric name the bucket and range
+- **THEN** no AAPL trades are re-pulled, the log line names the bucket, epochs and sequences, and `replication_unrecoverable_tick_gaps_total` increases. The metric has no per-bucket labels, because a series per bucket and range would be unbounded
 
 ### Requirement: Ledger past its history falls back to a deep resync
 If the change ledger cannot cover the replica's cursor, the replica SHALL log that a full resync is required, raise a metric and keep streaming. It SHALL NOT delete local data automatically.

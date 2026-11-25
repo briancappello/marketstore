@@ -32,6 +32,13 @@ type masterFixture struct {
 
 func newMasterFixture(t *testing.T) *masterFixture {
 	t.Helper()
+	return newMasterFixtureWith(t, replog.Options{})
+}
+
+// newMasterFixtureWith opens the master's log with opts (WriteAt is the
+// fixture's own, for disk-full simulation).
+func newMasterFixtureWith(t *testing.T, opts replog.Options) *masterFixture {
+	t.Helper()
 	f := &masterFixture{root: t.TempDir()}
 	cfg := utils.NewDefaultConfig(f.root)
 	cfg.BackgroundSync = false
@@ -40,14 +47,13 @@ func newMasterFixture(t *testing.T) *masterFixture {
 	var err error
 	f.writer, err = executor.NewWriter(c.GetCatalogDir(), f.metadata.WALFile)
 	require.NoError(t, err)
-	f.log, err = replog.Open(filepath.Join(f.root, "replication_log"), replog.Options{
-		WriteAt: func(fp *os.File, b []byte, off int64) (int, error) {
-			if f.full.Load() {
-				return 0, syscall.ENOSPC
-			}
-			return fp.WriteAt(b, off)
-		},
-	})
+	opts.WriteAt = func(fp *os.File, b []byte, off int64) (int, error) {
+		if f.full.Load() {
+			return 0, syscall.ENOSPC
+		}
+		return fp.WriteAt(b, off)
+	}
+	f.log, err = replog.Open(filepath.Join(f.root, "replication_log"), opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = f.log.Close() })
 	f.ledger = ledger.New(0)

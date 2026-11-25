@@ -10,10 +10,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 
 	"github.com/alpacahq/marketstore/v4/metrics"
 	pb "github.com/alpacahq/marketstore/v4/proto"
+	"github.com/alpacahq/marketstore/v4/replication/ledger"
 	"github.com/alpacahq/marketstore/v4/replication/replog"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
@@ -33,7 +36,8 @@ type GRPCReplicationServer struct {
 	CertFile    string
 	CertKeyFile string
 
-	log *replog.Log
+	log    *replog.Log
+	ledger *ledger.Ledger // nil: ChangesSince is unavailable
 
 	mu      sync.Mutex
 	streams map[uint64]*streamState
@@ -46,8 +50,47 @@ type streamState struct {
 	next    atomic.Uint64 // the next sequence this stream will send
 }
 
-func NewGRPCReplicationServer(l *replog.Log) *GRPCReplicationServer {
-	return &GRPCReplicationServer{log: l, streams: map[uint64]*streamState{}}
+func NewGRPCReplicationServer(l *replog.Log, lg *ledger.Ledger) *GRPCReplicationServer {
+	return &GRPCReplicationServer{log: l, ledger: lg, streams: map[uint64]*streamState{}}
+}
+
+// changesChunk bounds the buckets per ChangesSince message.
+const changesChunk = 1000
+
+// ChangesSince streams, per bucket, the epoch ranges written after
+// req.since_seq, from the change ledger. Every chunk repeats the header, and
+// at least one is always sent.
+func (rs *GRPCReplicationServer) ChangesSince(req *pb.ChangesSinceRequest, stream pb.Replication_ChangesSinceServer,
+) error {
+	if rs.ledger == nil {
+		return status.Error(codes.Unimplemented, "this master keeps no change ledger")
+	}
+	c := rs.ledger.ChangesSince(req.GetSinceSeq())
+	newChunk := func() *pb.ChangesSinceResponse {
+		return &pb.ChangesSinceResponse{
+			HistoryIncomplete: c.Incomplete, HistoryStartSeq: c.HistoryStart, AsOfSeq: c.AsOf,
+		}
+	}
+	chunk := newChunk()
+	for _, b := range c.Buckets {
+		bc := &pb.BucketChanges{Tbk: b.Key, Variable: b.Variable}
+		for _, r := range b.Ranges {
+			bc.Ranges = append(bc.Ranges, &pb.EpochRange{
+				EpochFrom: r.EpochMin, EpochTo: r.EpochMax, FirstSeq: r.FirstSeq, LastSeq: r.LastSeq,
+			})
+		}
+		chunk.Buckets = append(chunk.Buckets, bc)
+		if len(chunk.Buckets) == changesChunk {
+			if err := stream.Send(chunk); err != nil {
+				return err
+			}
+			chunk = newChunk()
+		}
+	}
+	if len(chunk.Buckets) > 0 || len(c.Buckets) == 0 {
+		return stream.Send(chunk)
+	}
+	return nil
 }
 
 func (rs *GRPCReplicationServer) register(replica string, next uint64) (uint64, *streamState) {

@@ -23,6 +23,7 @@ import (
 	"github.com/alpacahq/marketstore/v4/metrics"
 	pb "github.com/alpacahq/marketstore/v4/proto"
 	"github.com/alpacahq/marketstore/v4/replication"
+	"github.com/alpacahq/marketstore/v4/replication/ledger"
 	"github.com/alpacahq/marketstore/v4/replication/replog"
 )
 
@@ -46,7 +47,13 @@ func newStreamHarness(t *testing.T, opts replog.Options) *streamHarness {
 // serveLog serves l over an in-memory gRPC connection.
 func serveLog(t *testing.T, l *replog.Log) *streamHarness {
 	t.Helper()
-	h := &streamHarness{log: l, server: replication.NewGRPCReplicationServer(l)}
+	return serveLogAndLedger(t, l, nil)
+}
+
+// serveLogAndLedger serves l, and lg's ChangesSince when lg is not nil.
+func serveLogAndLedger(t *testing.T, l *replog.Log, lg *ledger.Ledger) *streamHarness {
+	t.Helper()
+	h := &streamHarness{log: l, server: replication.NewGRPCReplicationServer(l, lg)}
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
 	pb.RegisterReplicationServer(srv, h.server)
