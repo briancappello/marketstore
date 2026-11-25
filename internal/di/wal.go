@@ -31,7 +31,7 @@ func (c *Container) GetInitWALFile() *executor.WALFileType {
 	walWG := &sync.WaitGroup{}
 
 	// initialize WAL File
-	walfile, err := executor.NewWALFile(c.GetAbsRootDir(), c.GetInitInstanceID(), c.GetReplicationSender(),
+	walfile, err := executor.NewWALFile(c.GetAbsRootDir(), c.GetInitInstanceID(), &executor.NopReplicationSender{},
 		c.mktsConfig.WALBypass, walWG, c.GetStartTriggerPluginDispatcher(), txnPipe,
 	)
 	if err != nil {

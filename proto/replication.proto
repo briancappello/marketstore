@@ -121,6 +121,11 @@ message GetWALStreamRequest {
     // First sequence to stream. 0 asks for the current tail (live entries
     // only), which is also what replicas built before sequencing send.
     uint64 start_seq = 1;
+    // Set by replicas that track sequences. Only they get gap notices; for
+    // older replicas (unset) the master skips a gap, as it used to drop.
+    // A resumable replica with no cursor yet sends start_seq 0 and adopts
+    // the first seq it receives.
+    bool resumable = 2;
 }
 
 // Gap tells a replica that the sequences it asked for are not in the master's

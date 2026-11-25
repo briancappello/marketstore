@@ -60,7 +60,7 @@ func (c *Container) GetReplicationServer() *replication.GRPCReplicationServer {
 	if c.replicationServer != nil {
 		return c.replicationServer
 	}
-	c.replicationServer = replication.NewGRPCReplicationServer()
+	c.replicationServer = replication.NewGRPCReplicationServer(c.GetReplicationLog())
 	return c.replicationServer
 }
 
@@ -75,18 +75,17 @@ func (c *Container) GetGRPCReplicationServer() *grpc.Server {
 	return c.grpcReplicationServer
 }
 
-func (c *Container) GetReplicationSender() executor.ReplicationSender {
-	if c.replicationSender != nil {
-		return c.replicationSender
+// StartReplicationServer serves the replication log to replicas when this
+// instance is a replication master (replication.enabled). It is a no-op
+// otherwise, and when called again.
+func (c *Container) StartReplicationServer() {
+	if !c.mktsConfig.Replication.Enabled || c.replicationServerStarted {
+		return
 	}
-
-	if !c.mktsConfig.Replication.Enabled {
-		return &executor.NopReplicationSender{}
-	}
+	c.replicationServerStarted = true
 
 	pb.RegisterReplicationServer(c.GetGRPCReplicationServer(), c.GetReplicationServer())
 
-	// start gRPC server for Replication
 	listenPort := c.mktsConfig.Replication.ListenPort
 	lis, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", listenPort))
 	if err != nil {
@@ -99,12 +98,7 @@ func (c *Container) GetReplicationSender() executor.ReplicationSender {
 			log.Error(fmt.Sprintf("failed to serve replication service:%v", err))
 		}
 	}()
-
-	replicationSender := replication.NewSender(c.GetReplicationServer())
 	log.Info("initialized replication master")
-
-	c.replicationSender = replicationSender
-	return replicationSender
 }
 
 type NopReplicationClient struct{}

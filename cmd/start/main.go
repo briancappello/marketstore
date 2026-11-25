@@ -127,8 +127,8 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 
 	// New gRPC stream server for replication.
 	c := di.NewContainer(config)
-	// initialize replication master or client
-	c.GetReplicationSender().Run(ctx)
+	// Serve the replication log when this instance is a replication master.
+	c.StartReplicationServer()
 	// start TriggerPluginDispatcher
 	c.GetStartTriggerPluginDispatcher()
 

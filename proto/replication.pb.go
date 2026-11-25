@@ -112,7 +112,12 @@ type GetWALStreamRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// First sequence to stream. 0 asks for the current tail (live entries
 	// only), which is also what replicas built before sequencing send.
-	StartSeq      uint64 `protobuf:"varint,1,opt,name=start_seq,json=startSeq,proto3" json:"start_seq,omitempty"`
+	StartSeq uint64 `protobuf:"varint,1,opt,name=start_seq,json=startSeq,proto3" json:"start_seq,omitempty"`
+	// Set by replicas that track sequences. Only they get gap notices; for
+	// older replicas (unset) the master skips a gap, as it used to drop.
+	// A resumable replica with no cursor yet sends start_seq 0 and adopts
+	// the first seq it receives.
+	Resumable     bool `protobuf:"varint,2,opt,name=resumable,proto3" json:"resumable,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -152,6 +157,13 @@ func (x *GetWALStreamRequest) GetStartSeq() uint64 {
 		return x.StartSeq
 	}
 	return 0
+}
+
+func (x *GetWALStreamRequest) GetResumable() bool {
+	if x != nil {
+		return x.Resumable
+	}
+	return false
 }
 
 // Gap tells a replica that the sequences it asked for are not in the master's
@@ -547,9 +559,10 @@ var File_replication_proto protoreflect.FileDescriptor
 const file_replication_proto_rawDesc = "" +
 	"\n" +
 	"\x11replication.proto\x12\x05proto\"\x0f\n" +
-	"\rWriteAheadLog\"2\n" +
+	"\rWriteAheadLog\"P\n" +
 	"\x13GetWALStreamRequest\x12\x1b\n" +
-	"\tstart_seq\x18\x01 \x01(\x04R\bstartSeq\"\xb8\x01\n" +
+	"\tstart_seq\x18\x01 \x01(\x04R\bstartSeq\x12\x1c\n" +
+	"\tresumable\x18\x02 \x01(\bR\tresumable\"\xb8\x01\n" +
 	"\x03Gap\x12\x1c\n" +
 	"\trequested\x18\x01 \x01(\x04R\trequested\x12'\n" +
 	"\x0ffirst_available\x18\x02 \x01(\x04R\x0efirstAvailable\x12)\n" +

@@ -66,6 +66,11 @@ Old replicas send no `start_seq` and ignore unknown fields, so they keep today's
 
 A new replica with no cursor also sends `start_seq = 0`. A new master stamps `seq` on tail entries too, so the replica adopts the first `seq` it receives as its cursor. No extra "what is your last sequence" call is needed.
 
+`GetWALStreamRequest` also carries `resumable bool`. New replicas always set it.
+- **Why it's needed.** `start_seq = 0` alone cannot tell an old replica from a new one with no cursor. An old replica must never receive a gap message: its receiver would hand the empty `transaction_group` to `ParseTGData`, which panics on empty input.
+- **Old replicas (flag unset).** The master skips a gap and counts the skipped entries in `replication_dropped_messages_total`, as before.
+- **Resumable streams.** A gap notice ends the stream. The replica heals and reconnects at `first_available`, so it never applies entries past a gap it has not healed.
+
 ### D4. Replica batches, with the cursor committed in the same transaction group (B)
 - **Reading and batching.** `Receiver` reads entries into a channel. A batcher closes a batch at `replay_batch_max` (1000), `replay_batch_bytes` (64 MiB) or `replay_batch_wait` (50 ms).
 - **Applying.** For each batch, the replica parses every transaction group in sequence order. It builds all their write commands, plus one write of the new cursor, through one collecting `Writer`, and then commits them with one WAL flush.

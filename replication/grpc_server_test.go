@@ -1,125 +1,184 @@
 package replication_test
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/alpacahq/marketstore/v4/proto"
+	pb "github.com/alpacahq/marketstore/v4/proto"
 	"github.com/alpacahq/marketstore/v4/replication"
-	"github.com/alpacahq/marketstore/v4/replication/mock"
+	"github.com/alpacahq/marketstore/v4/replication/replog"
 )
 
-func TestSendReplicationMessageIsNonBlockingAndRaceFree(t *testing.T) {
-	rs := replication.NewGRPCReplicationServer()
+// streamHarness runs a real replication gRPC server over an in-memory
+// listener, so stream flow control behaves as it does over TCP.
+type streamHarness struct {
+	log    *replog.Log
+	server *replication.GRPCReplicationServer
+	client pb.ReplicationClient
+}
 
-	// A registered-but-undrained replica (simulates a stalled replica).
-	slow := rs.Register("slow")
-	for i := 0; i < cap(slow); i++ {
-		slow <- []byte("fill")
+func newStreamHarness(t *testing.T, opts replog.Options) *streamHarness {
+	t.Helper()
+	l, err := replog.Open(t.TempDir(), opts)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+
+	h := &streamHarness{log: l, server: replication.NewGRPCReplicationServer(l)}
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	pb.RegisterReplicationServer(srv, h.server)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	h.client = pb.NewReplicationClient(conn)
+	return h
+}
+
+func (h *streamHarness) appendN(t *testing.T, from, n, size int) {
+	t.Helper()
+	for i := from; i < from+n; i++ {
+		data := make([]byte, size)
+		copy(data, fmt.Sprintf("tg-%08d", i))
+		_, err := h.log.Append(int64(i), data)
+		require.NoError(t, err)
 	}
+}
 
-	// Concurrent connect/disconnect churn through the real (guarded) code path
-	// to exercise the map guard under -race.
-	churned := make(chan struct{})
-	go func() {
-		for i := 0; i < 1000; i++ {
-			addr := fmt.Sprintf("churn-%d", i)
-			rs.Register(addr)
-			rs.Unregister(addr)
+func (h *streamHarness) open(t *testing.T, ctx context.Context, req *pb.GetWALStreamRequest,
+) pb.Replication_GetWALStreamClient {
+	t.Helper()
+	s, err := h.client.GetWALStream(ctx, req)
+	require.NoError(t, err)
+	return s
+}
+
+// recvSeqs receives n transaction groups and checks each carries its sequence.
+func recvSeqs(t *testing.T, s pb.Replication_GetWALStreamClient, n int) []uint64 {
+	t.Helper()
+	out := make([]uint64, 0, n)
+	for len(out) < n {
+		resp, err := s.Recv()
+		require.NoError(t, err)
+		require.NotNil(t, resp.GetTransactionGroup(), "unexpected %v", resp)
+		require.Equal(t, fmt.Sprintf("tg-%08d", resp.GetSeq()), string(resp.GetTransactionGroup()[:11]))
+		out = append(out, resp.GetSeq())
+	}
+	return out
+}
+
+func requireConsecutive(t *testing.T, seqs []uint64, first uint64) {
+	t.Helper()
+	for i, s := range seqs {
+		require.Equal(t, first+uint64(i), s)
+	}
+}
+
+// One replica that stops reading must not slow the master's appends or
+// another replica's stream.
+func TestStalledStreamDelaysNeitherMasterNorOtherStreams(t *testing.T) {
+	h := newStreamHarness(t, replog.Options{HotTailBytes: 1 << 20})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_ = h.open(t, ctx, &pb.GetWALStreamRequest{StartSeq: 1, Resumable: true}) // never read
+	healthy := h.open(t, ctx, &pb.GetWALStreamRequest{StartSeq: 1, Resumable: true})
+
+	const n = 20000
+	got := make(chan []uint64, 1)
+	go func() { got <- recvSeqs(t, healthy, n) }()
+
+	// 20k x 1 KiB is far beyond the stalled stream's flow-control window, so
+	// its server goroutine is blocked in Send for most of this burst.
+	start := time.Now()
+	var slowest time.Duration
+	for i := 1; i <= n; i++ {
+		t0 := time.Now()
+		data := make([]byte, 1024)
+		copy(data, fmt.Sprintf("tg-%08d", i))
+		_, err := h.log.Append(int64(i), data)
+		require.NoError(t, err)
+		if d := time.Since(t0); d > slowest {
+			slowest = d
 		}
-		close(churned)
-	}()
+	}
+	t.Logf("appended %d entries in %v, slowest append %v", n, time.Since(start), slowest)
+	require.Less(t, slowest, 250*time.Millisecond, "an append waited on a replica")
 
-	done := make(chan struct{})
+	select {
+	case seqs := <-got:
+		requireConsecutive(t, seqs, 1)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the healthy stream was held up by the stalled one")
+	}
+}
+
+// A replica built before sequencing sends an empty request and gets live
+// entries from the tail, as before.
+func TestLegacyStreamGetsTheTail(t *testing.T) {
+	h := newStreamHarness(t, replog.Options{})
+	h.appendN(t, 1, 10, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := h.open(t, ctx, &pb.GetWALStreamRequest{})
+
+	// The stream is registered once its first read has run; appends from
+	// then on are live. Appending in a loop until one arrives avoids racing
+	// the server goroutine's start.
+	first := make(chan uint64, 1)
 	go func() {
-		for i := 0; i < 1000; i++ {
-			rs.SendReplicationMessage([]byte("x")) // must not block even though `slow` is full
+		resp, err := s.Recv()
+		if err == nil {
+			first <- resp.GetSeq()
 		}
-		close(done)
 	}()
-
-	for _, ch := range []chan struct{}{done, churned} {
+	next := 11
+	var seq uint64
+	for seq == 0 {
+		h.appendN(t, next, 1, 32)
+		next++
 		select {
-		case <-ch:
-		case <-time.After(2 * time.Second):
-			t.Fatal("SendReplicationMessage blocked on a full replica channel")
+		case seq = <-first:
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
+	require.Greater(t, seq, uint64(10), "a tail stream must not replay old entries")
+	h.appendN(t, next, 5, 32)
+	requireConsecutive(t, recvSeqs(t, s, int(uint64(next+4)-seq)), seq+1)
 }
 
-// listen messages -> wait 500ms -> put a test message to a channel -> wait 100ms -> the message should be sent.
-func TestGRPCReplicationServer_GetWALStream_success(t *testing.T) {
-	// --- given ---
-	t.Parallel()
-	replServer := replication.NewGRPCReplicationServer()
-	testTGMessage := []byte{1, 2, 3}
+// A burst far bigger than the memory tail, read by a replica slower than the
+// master, arrives complete and in order.
+func TestNoEntryDroppedAcrossA100kBurst(t *testing.T) {
+	h := newStreamHarness(t, replog.Options{HotTailBytes: 256 << 10, SegmentBytes: 4 << 20})
+	const n = 100000
+	h.appendN(t, 1, n/2, 200)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := h.open(t, ctx, &pb.GetWALStreamRequest{StartSeq: 1, Resumable: true})
 
-	stream := &mock.WALStreamServer{
-		SendFunc: func(resp *proto.GetWALStreamResponse) error {
-			// test message should be sent
-			if !cmp.Equal(resp.GetTransactionGroup(), testTGMessage) {
-				t.Errorf("got: %v, want: %v", resp.GetTransactionGroup(), testTGMessage)
-			}
-			return nil
-		},
+	got := make(chan []uint64, 1)
+	go func() { got <- recvSeqs(t, s, n) }()
+	h.appendN(t, n/2+1, n/2, 200)
+
+	select {
+	case seqs := <-got:
+		requireConsecutive(t, seqs, 1)
+	case <-time.After(60 * time.Second):
+		t.Fatal("burst not delivered")
 	}
-
-	// --- when ---
-	// start to listen
-	go func() {
-		_ = replServer.GetWALStream(nil, stream)
-	}()
-	time.Sleep(500 * time.Millisecond)
-
-	replServer.SendReplicationMessage(testTGMessage)
-	time.Sleep(100 * time.Millisecond)
-
-	// --- then ---
-	// assertion is done in SendFunc
-}
-
-func TestGRPCReplicationServer_GetWALStream_error(t *testing.T) {
-	// --- given ---
-	t.Parallel()
-	replServer := replication.NewGRPCReplicationServer()
-	testTGMessage := []byte{1, 2, 3}
-
-	stream := &mock.ErrorWALStreamServer{}
-
-	// --- when ---
-
-	// start to listen, but Send function should return error and GetWALStream should return nil
-	go func() {
-		err := replServer.GetWALStream(nil, stream)
-		if err != nil {
-			t.Errorf("GetWALStream should return nil when Send failed")
-		}
-	}()
-	time.Sleep(500 * time.Millisecond)
-
-	// send a message to the channel
-	replServer.SendReplicationMessage(testTGMessage)
-	time.Sleep(100 * time.Millisecond)
-
-	// --- then ---
-	// assertion is done in the go func
-}
-
-func TestGRPCReplicationServer_GetWALStream_getClientAddr_error(t *testing.T) {
-	// --- given ---
-	t.Parallel()
-	replServer := replication.NewGRPCReplicationServer()
-	stream := &mock.GetClientAddrErrorWALStreamServer{}
-
-	// --- when ---
-	// getClientAddr fails and an error should be returned
-	err := replServer.GetWALStream(nil, stream)
-
-	// --- then ---
-	if err == nil {
-		t.Errorf("getClientAddr should fail")
-	}
+	require.Greater(t, h.log.DiskReads(), int64(0), "the burst should have outrun the memory tail")
 }

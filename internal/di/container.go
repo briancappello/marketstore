@@ -24,7 +24,6 @@ type Container struct {
 	absRootDir            string
 	instanceID            int64
 	gRPCServerOptions     []grpc.ServerOption
-	replicationSender     *replication.Sender
 	replicationClient     *replication.Retryer
 	writer                frontend.Writer
 	catalogDir            *catalog.Directory
@@ -41,6 +40,8 @@ type Container struct {
 	grpcReplicationServer *grpc.Server
 	replicationBackfill   *backfill.Driver
 	replicationLog        *replog.Log
+	// replicationServerStarted guards StartReplicationServer.
+	replicationServerStarted bool
 }
 
 func NewContainer(cfg *utils.MktsConfig) *Container {

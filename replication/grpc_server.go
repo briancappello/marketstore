@@ -1,123 +1,113 @@
 package replication
 
 import (
+	"errors"
 	"fmt"
-	"sync"
 
-	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
 
 	"github.com/alpacahq/marketstore/v4/metrics"
 	pb "github.com/alpacahq/marketstore/v4/proto"
+	"github.com/alpacahq/marketstore/v4/replication/replog"
 	"github.com/alpacahq/marketstore/v4/utils/log"
 )
 
 const (
-	defaultReplicationStreamChannelSize = 500
+	// One read from the log per this many entries or bytes, whichever first.
+	streamBatchEntries = 256
+	streamBatchBytes   = 4 << 20
 )
 
+// GRPCReplicationServer serves the master's replication log. Every stream
+// reads the log from its own cursor at its own pace: a slow or stalled replica
+// only blocks its own stream goroutine (in gRPC flow control), never the
+// master's write path or another replica.
 type GRPCReplicationServer struct {
 	pb.UnimplementedReplicationServer
 	CertFile    string
 	CertKeyFile string
-	mu          sync.Mutex // guards streamChannels
-	// Key: IPAddr (e.g. "192.125.18.1:25"), Value: channel for messages sent to each gRPC stream
-	streamChannels map[string]chan []byte
+
+	log *replog.Log
 }
 
-func NewGRPCReplicationServer() *GRPCReplicationServer {
-	return &GRPCReplicationServer{
-		streamChannels: map[string]chan []byte{},
+func NewGRPCReplicationServer(l *replog.Log) *GRPCReplicationServer {
+	return &GRPCReplicationServer{log: l}
+}
+
+func getClientAddr(stream grpc.ServerStream) string {
+	if pr, ok := peer.FromContext(stream.Context()); ok {
+		return pr.Addr.String()
 	}
+	return "unknown"
 }
 
-// Register creates and tracks the outbound buffer for one replica stream.
-func (rs *GRPCReplicationServer) Register(addr string) chan []byte {
-	ch := make(chan []byte, defaultReplicationStreamChannelSize)
-	rs.mu.Lock()
-	rs.streamChannels[addr] = ch
-	rs.mu.Unlock()
-	return ch
-}
-
-// Unregister stops tracking a replica stream. The channel is deliberately NOT
-// closed: SendReplicationMessage may hold a snapshot referencing it, and a
-// send on a closed channel panics. An untracked channel is simply GC'd.
-func (rs *GRPCReplicationServer) Unregister(addr string) {
-	rs.mu.Lock()
-	delete(rs.streamChannels, addr)
-	rs.mu.Unlock()
-}
-
-func getClientAddr(stream grpc.ServerStream) (string, error) {
-	ctx := stream.Context()
-
-	pr, ok := peer.FromContext(ctx)
-	if !ok {
-		return "", errors.New("failed to get client IP address")
-	}
-	return pr.Addr.String(), nil
-}
-
-func (rs *GRPCReplicationServer) GetWALStream(_ *pb.GetWALStreamRequest, stream pb.Replication_GetWALStreamServer,
+// GetWALStream streams log entries from req.start_seq, or from the current
+// tail when it is 0. A resumable replica is told about a gap (and the stream
+// ends, so it can heal and reconnect from the gap's end); an older replica
+// skips it, as it used to drop messages.
+func (rs *GRPCReplicationServer) GetWALStream(req *pb.GetWALStreamRequest, stream pb.Replication_GetWALStreamServer,
 ) error {
-	// prepare a channel to send messages
-	clientAddr, err := getClientAddr(stream)
-	if err != nil {
-		return errors.Wrap(err, "failed to get client IP address")
+	addr := getClientAddr(stream)
+	ctx := stream.Context()
+	next := req.GetStartSeq()
+	if next == 0 {
+		next = rs.log.NextSeq()
 	}
-	log.Info(fmt.Sprintf("new replica connection from:%s", clientAddr))
+	log.Info("replica %s connected: streaming from sequence %d (resumable=%v)", addr, next, req.GetResumable())
+	defer log.Info("[master] closed replication connection: %v", addr)
 
-	streamChannel := rs.Register(clientAddr)
-
-	// infinite loop
 	for {
-		log.Debug("[master] waiting for write requests...")
-		transactionGroup := <-streamChannel
-		if transactionGroup == nil {
-			log.Info("streamChannel for replication is closed.")
-			break
+		// Take the notification channel before reading, so an append that
+		// lands between the read and the wait still wakes us.
+		notify := rs.log.Notify()
+		entries, err := rs.log.Read(next, streamBatchEntries, streamBatchBytes)
+		var gap *replog.GapError
+		switch {
+		case errors.As(err, &gap):
+			if !req.GetResumable() {
+				metrics.ReplicationDroppedMessages.Add(float64(gap.Next - next))
+				log.Warn("replica %s: skipping sequences %d-%d (%s)", addr, next, gap.Next-1, gap.Reason)
+				next = gap.Next
+				continue
+			}
+			log.Warn("replica %s: sequences %d-%d unavailable (%s); sent a gap notice", addr, next, gap.Next-1, gap.Reason)
+			return stream.Send(&pb.GetWALStreamResponse{Body: &pb.GetWALStreamResponse_Gap{Gap: &pb.Gap{
+				Requested:      next,
+				FirstAvailable: gap.Next,
+				Reason:         gapReason(gap.Reason),
+			}}})
+		case err != nil:
+			return fmt.Errorf("read replication log at %d: %w", next, err)
 		}
 
-		err := stream.Send(&pb.GetWALStreamResponse{
-			Body: &pb.GetWALStreamResponse_TransactionGroup{TransactionGroup: transactionGroup},
-		})
-		if err != nil {
-			log.Error(fmt.Sprintf("an error occurred while sending replication message:%s", err))
-			break
+		for _, e := range entries {
+			if err := stream.Send(&pb.GetWALStreamResponse{
+				Seq:  e.Seq,
+				Body: &pb.GetWALStreamResponse_TransactionGroup{TransactionGroup: e.Data},
+			}); err != nil {
+				log.Info("replica %s: send failed: %v", addr, err)
+				return err
+			}
 		}
-		log.Debug("successfully sent a replication message")
+		if len(entries) > 0 {
+			next = entries[len(entries)-1].Seq + 1
+			continue
+		}
+		select {
+		case <-notify:
+		case <-ctx.Done():
+			return nil
+		}
 	}
-
-	// when an error occurred / client connection is closed, stop tracking the
-	// channel. It is deliberately NOT closed here: SendReplicationMessage may
-	// hold a snapshot referencing it, and a send on a closed channel panics.
-	rs.Unregister(clientAddr)
-	log.Info(fmt.Sprintf("[master] closed replication connection: %v", clientAddr))
-
-	return nil
 }
 
-func (rs *GRPCReplicationServer) SendReplicationMessage(transactionGroup []byte) {
-	// Snapshot under lock, deliver outside the lock so a slow replica never
-	// holds the map or blocks peers.
-	rs.mu.Lock()
-	targets := make(map[string]chan []byte, len(rs.streamChannels))
-	for ip, ch := range rs.streamChannels {
-		targets[ip] = ch
+func gapReason(r replog.GapReason) pb.Gap_Reason {
+	switch r {
+	case replog.GapRetention:
+		return pb.Gap_RETENTION
+	case replog.GapBroken:
+		return pb.Gap_LOG_BROKEN
 	}
-	rs.mu.Unlock()
-
-	for ip, channel := range targets {
-		select {
-		case channel <- transactionGroup:
-			log.Debug("sending a replication message to %s", ip)
-		default:
-			// Replica too slow: drop for this replica only. Its gap is healed
-			// by its backfill reconciler. Never block the master or peers.
-			metrics.ReplicationDroppedMessages.Inc()
-			log.Debug("replication stream buffer full for %s; dropped a transaction group", ip)
-		}
-	}
+	return pb.Gap_REASON_UNSPECIFIED
 }
