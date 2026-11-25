@@ -40,6 +40,12 @@ func newStreamHarness(t *testing.T, opts replog.Options) *streamHarness {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
 
+	return serveLog(t, l)
+}
+
+// serveLog serves l over an in-memory gRPC connection.
+func serveLog(t *testing.T, l *replog.Log) *streamHarness {
+	t.Helper()
 	h := &streamHarness{log: l, server: replication.NewGRPCReplicationServer(l)}
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()

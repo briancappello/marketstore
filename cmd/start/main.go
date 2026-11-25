@@ -153,11 +153,14 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 	// lock, so doing it here keeps that write on a single goroutine.
 	backfillDriver := c.GetReplicationBackfillDriver()
 
-	// init replication client
+	// init replication client. Resolved here, not in the goroutine, for the
+	// same reason: it records the replica applier on the container, which the
+	// shutdown handler reads.
+	replicationClient := c.GetReplicationClientWithRetry()
 	metrics.ReplicationStreamUp.Set(1)
 	go func() {
 		log.Info("initializing replication client")
-		err := c.GetReplicationClientWithRetry().Run(globalCtx)
+		err := replicationClient.Run(globalCtx)
 		if err == nil {
 			return
 		}
@@ -329,6 +332,9 @@ func executeStart(cmd *cobra.Command, _ []string) error {
 					// unblocked ListenAndServe(), so executeStart is now
 					// parked on shutdownDone waiting for this to finish.
 					log.Info("flushing WAL and draining triggers...")
+					// The replica applier commits what it already received
+					// once globalCtx is cancelled; let it finish first.
+					c.WaitReplicaApplier(30 * time.Second)
 					c.GetInitWALFile().Shutdown()
 					c.CloseReplicationLog()
 					log.Info("exiting...")

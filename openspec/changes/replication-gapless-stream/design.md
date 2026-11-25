@@ -77,7 +77,9 @@ A new replica with no cursor also sends `start_seq = 0`. A new master stamps `se
 - *Live-only replicas.* With no `master_query_host`, there is nothing to heal from: a gap is logged, counted in `replication_replica_unhealed_gaps_total`, and skipped.
 
 ### D4. Replica batches, with the cursor committed in the same transaction group (B)
-- **Reading and batching.** `Receiver` reads entries into a channel. A batcher closes a batch at `replay_batch_max` (1000), `replay_batch_bytes` (64 MiB) or `replay_batch_wait` (50 ms).
+- **Reading and batching.** `Receiver` reads entries into a channel. A batcher closes a batch at `replay_batch_max` (1000), `replay_batch_bytes` (64 MiB), `replay_batch_commands`, or `replay_batch_wait` (50 ms) after the batch's first entry.
+- **Wait measured from the first entry.** An idle timer would never fire at taichi's live rate (80+ TG/s), so batches would only close when full, about 12 s late.
+- **The cursor can be 0.** It means nothing has been applied yet, and resuming starts at sequence 1. Cursor-only writes (`SetCursor`) are therefore flagged explicitly, instead of being inferred from a sequence of 0, which on a data entry means an unsequenced master.
 - **Applying.** For each batch, the replica parses every transaction group in sequence order. It builds all their write commands, plus one write of the new cursor, through one collecting `Writer`, and then commits them with one WAL flush.
 - **Atomicity.** The batch and its cursor must land in a single WAL transaction group.
   - A collecting `Writer` (`executor.NewBatchWriter`) builds the write commands into its own slice instead of the shared write channel.

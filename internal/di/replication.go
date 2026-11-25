@@ -11,7 +11,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/pkg/errors"
 
 	"github.com/alpacahq/marketstore/v4/frontend"
@@ -148,11 +147,16 @@ func (c *Container) GetReplicationClientWithRetry() ReplicationClient {
 
 	cli := replication.NewGRPCReplicationClient(pb.NewReplicationClient(conn))
 
-	replayer := replication.NewReplayer(executor.ParseTGData, c.GetDefaultWriter().WriteCSM, c.GetAbsRootDir())
-	// The cursor lives in memory until batched replay persists it with the
-	// data; the backfill driver's startup deep pass covers a restart.
-	replicationReceiver := replication.NewReceiver(cli, replication.NewReplayApplier(replayer),
-		replication.UnhealedGaps{})
+	// Received transaction groups are applied in batches, each committed with
+	// the replica's cursor in one WAL transaction group.
+	applier, err := replication.NewBatchApplier(c.GetCatalogDir(), c.GetInitWALFile(), c.GetAbsRootDir(),
+		replication.BatchOptions{})
+	if err != nil {
+		panic(errors.Wrap(err, "failed to initialize the replication applier"))
+	}
+	c.replicaApplier = applier
+	c.replicaApplierDone = make(chan struct{})
+	replicationReceiver := replication.NewReceiver(cli, applier, replication.UnhealedGaps{})
 
 	// A sequenced stream resumes exactly where it stopped, so a reconnect
 	// loses nothing. Only a master that does not sequence its stream can drop
@@ -179,7 +183,39 @@ func (c *Container) GetReplicationClientWithRetry() ReplicationClient {
 		onDisconnect,
 	)
 
-	return c.replicationClient
+	return &replicaClient{retryer: c.replicationClient, applier: applier, done: c.replicaApplierDone}
+}
+
+// replicaClient runs the batch applier alongside the stream receiver.
+type replicaClient struct {
+	retryer *replication.Retryer
+	applier *replication.BatchApplier
+	done    chan struct{}
+}
+
+func (rc *replicaClient) Run(ctx context.Context) error {
+	go func() {
+		defer close(rc.done)
+		if err := rc.applier.Run(ctx); err != nil {
+			log.Error("replication applier stopped: %v", err)
+		}
+	}()
+	return rc.retryer.Run(ctx)
+}
+
+// WaitReplicaApplier blocks until the replica's batch applier has committed
+// its last batch, after the context passed to the replication client's Run
+// is cancelled. Call it before the final WAL flush: a batch committed after
+// the WAL has shut down would be lost. It returns at once on a non-replica.
+func (c *Container) WaitReplicaApplier(timeout time.Duration) {
+	if c.replicaApplierDone == nil {
+		return
+	}
+	select {
+	case <-c.replicaApplierDone:
+	case <-time.After(timeout):
+		log.Error("replication applier did not finish within %v", timeout)
+	}
 }
 
 // GetReplicationBackfillDriver builds the replica-side backfill reconciler.

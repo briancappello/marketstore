@@ -5,7 +5,7 @@ Makes the replica apply received transaction groups fast enough to drain master 
 ## ADDED Requirements
 
 ### Requirement: Received transaction groups are applied in batches
-The replica SHALL apply consecutive received transaction groups in batches, with one WAL flush per batch. A batch SHALL close when it reaches `replication.replay_batch_max` entries (default 1000), when it reaches `replication.replay_batch_bytes` (default 64 MiB), when it reaches `replication.replay_batch_commands` write commands (default 250,000), or when no new entry has arrived for `replication.replay_batch_wait` (default 50ms). Writes in a batch SHALL be applied in sequence order. A later write to the same bucket and epoch SHALL win.
+The replica SHALL apply consecutive received transaction groups in batches, with one WAL flush per batch. A batch SHALL close when it reaches `replication.replay_batch_max` entries (default 1000), when it reaches `replication.replay_batch_bytes` (default 64 MiB), when it reaches `replication.replay_batch_commands` write commands (default 250,000), or when `replication.replay_batch_wait` (default 50ms) has passed since the batch's first entry. The wait is measured from the first entry, not from the last arrival: a steady stream faster than one entry per wait would otherwise keep a batch open until it is full, which is seconds of staleness at taichi's live rate. Writes in a batch SHALL be applied in sequence order. A later write to the same bucket and epoch SHALL win.
 
 #### Scenario: Burst drained in batches
 - **WHEN** 5,000 transaction groups arrive back to back

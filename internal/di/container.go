@@ -42,6 +42,8 @@ type Container struct {
 	replicationLog        *replog.Log
 	// replicationServerStarted guards StartReplicationServer.
 	replicationServerStarted bool
+	replicaApplier           *replication.BatchApplier
+	replicaApplierDone       chan struct{}
 }
 
 func NewContainer(cfg *utils.MktsConfig) *Container {
