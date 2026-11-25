@@ -20,8 +20,10 @@ func NewGRPCReplicationClient(client pb.ReplicationClient) *GRPCReplicationClien
 	}
 }
 
-func (rc *GRPCReplicationClient) Connect(ctx context.Context) error {
-	stream, err := rc.Client.GetWALStream(ctx, &pb.GetWALStreamRequest{})
+// Connect opens the replication stream at startSeq (0: the master's current
+// tail). The request is marked resumable, so the master sends gap notices.
+func (rc *GRPCReplicationClient) Connect(ctx context.Context, startSeq uint64) error {
+	stream, err := rc.Client.GetWALStream(ctx, &pb.GetWALStreamRequest{StartSeq: startSeq, Resumable: true})
 	if err != nil {
 		return errors.Wrap(err, "failed to get wal message stream")
 	}
@@ -32,7 +34,7 @@ func (rc *GRPCReplicationClient) Connect(ctx context.Context) error {
 }
 
 // Recv blocks until it receives a response from gRPC stream connection.
-func (rc *GRPCReplicationClient) Recv() ([]byte, error) {
+func (rc *GRPCReplicationClient) Recv() (*pb.GetWALStreamResponse, error) {
 	if rc.streamClient == nil {
 		return nil, errors.New("no stream connection to master")
 	}
@@ -48,5 +50,5 @@ func (rc *GRPCReplicationClient) Recv() ([]byte, error) {
 	if resp == nil {
 		return nil, errors.New("nil message received from gRPC stream")
 	}
-	return resp.GetTransactionGroup(), nil
+	return resp, nil
 }

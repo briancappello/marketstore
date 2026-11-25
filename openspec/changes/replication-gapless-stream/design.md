@@ -71,6 +71,11 @@ A new replica with no cursor also sends `start_seq = 0`. A new master stamps `se
 - **Old replicas (flag unset).** The master skips a gap and counts the skipped entries in `replication_dropped_messages_total`, as before.
 - **Resumable streams.** A gap notice ends the stream. The replica heals and reconnects at `first_available`, so it never applies entries past a gap it has not healed.
 
+**Replica reconnects.**
+- *Deep heals.* A sequenced stream resumes exactly, so a reconnect no longer requests a deep heal pass (about 25 GB of writes on p1). The receiver asks for one (`ErrNeedsDeepHeal`) only after streaming from an unsequenced (old) master.
+- *Backoff.* `Retryer`'s backoff used to grow with every reconnect for the life of the process (`interval × coeff^n`). An attempt that made progress now resets it (`ErrMadeProgress`). Gap heals and sequence jumps reconnect routinely, so without the reset the delay would reach hours.
+- *Live-only replicas.* With no `master_query_host`, there is nothing to heal from: a gap is logged, counted in `replication_replica_unhealed_gaps_total`, and skipped.
+
 ### D4. Replica batches, with the cursor committed in the same transaction group (B)
 - **Reading and batching.** `Receiver` reads entries into a channel. A batcher closes a batch at `replay_batch_max` (1000), `replay_batch_bytes` (64 MiB) or `replay_batch_wait` (50 ms).
 - **Applying.** For each batch, the replica parses every transaction group in sequence order. It builds all their write commands, plus one write of the new cursor, through one collecting `Writer`, and then commits them with one WAL flush.

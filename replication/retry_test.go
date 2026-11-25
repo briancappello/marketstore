@@ -3,8 +3,11 @@ package replication_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/alpacahq/marketstore/v4/replication"
 )
@@ -35,7 +38,7 @@ func TestRetryerCallsOnRetryBeforeEachReconnect(t *testing.T) {
 	reconnects := 0
 
 	// backoffCoeff 1 keeps the retry interval flat so the test stays fast.
-	r := replication.NewRetryer(inner.try, time.Millisecond, 1, func() { reconnects++ })
+	r := replication.NewRetryer(inner.try, time.Millisecond, 1, func(error) { reconnects++ })
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -130,5 +133,36 @@ func TestRetryer_Run(t *testing.T) {
 				t.Errorf("Run() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// Backoff restarts from the base interval after an attempt that made
+// progress, however many reconnects came before it.
+func TestRetryerResetsBackoffAfterProgress(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	var gaps []time.Duration
+	last := time.Now()
+	try := func(_ context.Context) error {
+		now := time.Now()
+		if calls > 0 {
+			gaps = append(gaps, now.Sub(last))
+		}
+		last = now
+		calls++
+		switch {
+		case calls == 6:
+			return nil
+		case calls >= 3:
+			return fmt.Errorf("stream dropped: %w", errors.Join(replication.ErrRetryable, replication.ErrMadeProgress))
+		}
+		return replication.ErrRetryable
+	}
+	// coefficient 4: without the reset the 5th wait would be 4^4 = 256 intervals.
+	r := replication.NewRetryer(try, 5*time.Millisecond, 4, nil)
+	require.NoError(t, r.Run(context.Background()))
+	require.Len(t, gaps, 5)
+	for _, g := range gaps[3:] {
+		require.Less(t, g, 200*time.Millisecond)
 	}
 }

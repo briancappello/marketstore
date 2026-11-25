@@ -14,6 +14,12 @@ import (
 // ErrRetryable is a custom error to retry the logic when returned.
 var ErrRetryable = errors.New("retryable replication error")
 
+// ErrMadeProgress, wrapped into a retryable error, says the attempt got
+// somewhere before it failed (it applied entries, or healed a gap), so the
+// next retry starts again from the base interval. Without it the backoff grew
+// with every reconnect over the life of the process.
+var ErrMadeProgress = errors.New("replication attempt made progress")
+
 // func (re ErrRetryable) Is(err error) bool {
 // 	return errors.Is(err, ErrRetryable("")
 // }
@@ -22,13 +28,13 @@ type Retryer struct {
 	retryFunc    func(ctx context.Context) error
 	interval     time.Duration
 	backoffCoeff int
-	// onRetry, when non-nil, is called once per retryable failure, just before
-	// backing off to redial. May be nil (master, or live-only replica).
-	onRetry func()
+	// onRetry, when non-nil, is called with each retryable failure, just
+	// before backing off to redial. May be nil (master, or live-only replica).
+	onRetry func(err error)
 }
 
 func NewRetryer(retryFunc func(ctx context.Context) error, interval time.Duration, backoffCoeff int,
-	onRetry func(),
+	onRetry func(err error),
 ) *Retryer {
 	return &Retryer{
 		retryFunc:    retryFunc,
@@ -57,7 +63,10 @@ func (r *Retryer) Run(ctx context.Context) error {
 			if errors.Is(err, ErrRetryable) {
 				// retryable error. continue
 				if r.onRetry != nil {
-					r.onRetry()
+					r.onRetry(err)
+				}
+				if errors.Is(err, ErrMadeProgress) {
+					cnt = 0
 				}
 				interval := retryInterval(r.interval, r.backoffCoeff, cnt)
 				log.Warn("caught a retryable error. It will be retried after an interval:" +

@@ -18,7 +18,7 @@ func TestGRPCReplicationClient_Connect(t *testing.T) {
 	client := replication.NewGRPCReplicationClient(&mock.ReplicationClient{})
 
 	// --- when ---
-	err := client.Connect(context.Background())
+	err := client.Connect(context.Background(), 0)
 	// --- then ---
 	if err != nil {
 		t.Error("Connect should succeed")
@@ -31,7 +31,7 @@ func TestGRPCReplicationClient_Connect_Error(t *testing.T) {
 	client := replication.NewGRPCReplicationClient(&mock.ReplicationClient{Error: errors.New("an error")})
 
 	// --- when ---
-	err := client.Connect(context.Background())
+	err := client.Connect(context.Background(), 0)
 
 	// --- then ---
 	if err == nil {
@@ -43,7 +43,7 @@ func TestGRPCReplicationClient_Recv_streamNotInitialized(t *testing.T) {
 	// --- given ---
 	t.Parallel()
 	client := replication.NewGRPCReplicationClient(&mock.ReplicationClient{})
-	// _ = client.Connect(context.Background()) // Not Connected yet
+	// _ = client.Connect(context.Background(), 0) // Not Connected yet
 
 	// --- when & then ---
 	if _, err := client.Recv(); err == nil {
@@ -101,7 +101,7 @@ func TestGRPCReplicationClient_Recv(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// --- given ---
 			client := replication.NewGRPCReplicationClient(&mock.ReplicationClient{StreamClient: tt.mockStreamClient})
-			_ = client.Connect(context.Background())
+			_ = client.Connect(context.Background(), 0)
 
 			// --- when ---
 			got, err := client.Recv()
@@ -111,7 +111,7 @@ func TestGRPCReplicationClient_Recv(t *testing.T) {
 				t.Errorf("NewGRPCReplicationClient() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if !reflect.DeepEqual(got, tt.want) {
+			if !reflect.DeepEqual(got.GetTransactionGroup(), tt.want) {
 				t.Errorf("NewGRPCReplicationClient() got = %v, want %v", got, tt.want)
 			}
 		})

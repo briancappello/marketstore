@@ -22,7 +22,7 @@
 - [x] 3.1 Extend `proto/replication.proto` (`start_seq`, `seq`, the `gap` oneof, `ChangesSince`) and regenerate with `proto/Makefile`'s protoc command, run on `replication.proto` only. `make generate` runs only the go:generate directives (stringer, mockgen); it does not cover the protos, and on p1 it stops because `stringer` is not installed. Verify with a clean build and a wire-compatibility test (an old replica's view of a new response, and an old replica's empty request).
 - [x] 3.2 Replace `Sender`/fan-out with per-stream cursor readers over the log (D2). Keep the legacy path for `start_seq = 0`. Verify with tests: one stalled stream does not delay the master flush or another stream; legacy clients get the tail; no message is dropped across a 100k-entry burst.
 - [x] 3.3 Gap notice for cursors older than the first sequence, or inside a broken range. Verify with a test.
-- [ ] 3.4 Client: request `cursor+1`, check sequence continuity, reconnect on a jump, handle a gap notice by running the ledger heal (5.3), and fall back on a legacy master. Verify with tests for each scenario in `specs/replication/resumable-stream`.
+- [x] 3.4 Client: request `cursor+1`, check sequence continuity, reconnect on a jump, handle a gap notice by running the ledger heal (5.3), and fall back on a legacy master. Verify with tests for each scenario in `specs/replication/resumable-stream`. (Until 4.2, the replica's cursor is in memory only, behind the `Applier` interface; 5.3 supplies the ledger `GapHealer`.)
 - [ ] 3.5 Per-replica lag metrics (sequence and bytes) on the master. Verify with a test.
 
 ## 4. Batched replay with an atomic cursor (replica)
