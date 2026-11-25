@@ -54,15 +54,25 @@ func ReadCursor(catDir *catalog.Directory) (seq uint64, ok bool, err error) {
 	if err != nil {
 		return 0, false, fmt.Errorf("read replication cursor: %w", err)
 	}
+	return CursorFromCSM(csm)
+}
+
+// CursorQuery is the epoch range to query CursorKey over, for reading a
+// replica's cursor through its query API.
+func CursorQuery() (start, end int64) {
+	return cursorEpoch.Add(-time.Hour).Unix(), cursorEpoch.Add(time.Hour).Unix()
+}
+
+// CursorFromCSM extracts the cursor from a query result for CursorKey.
+func CursorFromCSM(csm io.ColumnSeriesMap) (seq uint64, ok bool, err error) {
 	for _, cs := range csm {
 		seqs, isU64 := cs.GetColumn("Seq").([]uint64)
 		if !isU64 {
 			return 0, false, fmt.Errorf("replication cursor: Seq column is %T", cs.GetColumn("Seq"))
 		}
-		if len(seqs) == 0 {
-			return 0, false, nil
+		if len(seqs) > 0 {
+			return seqs[len(seqs)-1], true, nil
 		}
-		return seqs[len(seqs)-1], true, nil
 	}
 	return 0, false, nil
 }

@@ -42,7 +42,7 @@
 ## 6. Config, tools, docs
 
 - [x] 6.1 Add the D6 keys to `utils/config.go` with validation and defaults, and to `mkts.yml.example` and `examples/replication/*.yml`. Verify with config tests.
-- [ ] 6.2 `marketstore tool replication set-cursor` and `marketstore tool replication status` (cursor, master sequence, lag). Verify with tests.
+- [x] 6.2 `marketstore tool replication set-cursor` and `marketstore tool replication status` (cursor, master sequence, lag). Verify with tests.
 - [ ] 6.3 Update `docs/design/logical_replication_design.md`: the correctness model, §3, and §9 (sequence-gap detection, old corrections, ticks). Verify by reading it back.
 
 ## 7. Integration

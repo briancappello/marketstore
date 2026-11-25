@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -104,4 +105,18 @@ func (h *LedgerHealer) HealGap(ctx context.Context, cursor, firstAvailable uint6
 	log.Info("replication: healed gap %d-%d from the change ledger: %d fixed ranges (%d rows written),"+
 		" %d tick ranges unrecoverable", cursor+1, firstAvailable-1, ranges, rows, tickRanges)
 	return nil
+}
+
+// MasterLastSeq asks a master for the newest sequence in its replication log,
+// through its change ledger.
+func MasterLastSeq(ctx context.Context, client pb.ReplicationClient) (uint64, error) {
+	stream, err := client.ChangesSince(ctx, &pb.ChangesSinceRequest{SinceSeq: math.MaxUint64})
+	if err != nil {
+		return 0, fmt.Errorf("ask the master for its last sequence: %w", err)
+	}
+	resp, err := stream.Recv()
+	if err != nil {
+		return 0, fmt.Errorf("ask the master for its last sequence: %w", err)
+	}
+	return resp.GetAsOfSeq(), nil
 }
