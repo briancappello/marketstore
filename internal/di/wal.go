@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/executor/wal"
 	"github.com/alpacahq/marketstore/v4/replication"
@@ -109,6 +111,9 @@ func (c *Container) GetReplicationLog() *replog.Log {
 		panic(fmt.Sprintf("unable to open the replication log: %v", err))
 	}
 	log.Info("replication log: sequences %d-%d, %d bytes", l.FirstSeq(), l.LastSeq(), l.Bytes())
+	if err := replication.RegisterLogMetrics(prometheus.DefaultRegisterer, l, nil); err != nil {
+		log.Error("replication log metrics: %v", err)
+	}
 	go l.Run(context.Background(), replicationLogSyncInterval, replicationLogRetainInterval)
 	c.replicationLog = l
 	return l
