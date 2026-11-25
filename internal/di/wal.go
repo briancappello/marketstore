@@ -87,13 +87,9 @@ func (c *Container) GetInitWALFile() *executor.WALFileType {
 }
 
 const (
-	replicationLogSyncInterval   = 100 * time.Millisecond
-	replicationLogRetainInterval = 10 * time.Second
-	defaultReplicationLogMaxSize = 20 << 30
-	defaultReplicationLogMaxAge  = 48 * time.Hour
-
+	replicationLogSyncInterval        = 100 * time.Millisecond
+	replicationLogRetainInterval      = 10 * time.Second
 	replicationLedgerSnapshotInterval = 10 * time.Minute
-	defaultReplicationLedgerMaxAge    = 30 * 24 * time.Hour
 )
 
 func (c *Container) ledgerSnapshotPath() string {
@@ -115,7 +111,7 @@ func (c *Container) GetMasterLog() *replication.MasterLog {
 	lg := replication.RebuildLedger(c.ledgerSnapshotPath(), rl, 0)
 	log.Info("replication ledger: history from sequence %d, up to %d", lg.HistoryStart(), lg.LastSeq())
 	go replication.RunLedger(context.Background(), lg, c.ledgerSnapshotPath(),
-		replicationLedgerSnapshotInterval, defaultReplicationLedgerMaxAge)
+		replicationLedgerSnapshotInterval, c.mktsConfig.Replication.LedgerMaxAge)
 	c.replicationLedger = lg
 	c.masterLog = replication.NewMasterLog(rl, lg)
 	return c.masterLog
@@ -131,9 +127,11 @@ func (c *Container) GetReplicationLog() *replog.Log {
 	if c.replicationLog != nil {
 		return c.replicationLog
 	}
+	rc := c.mktsConfig.Replication
 	l, err := replog.Open(filepath.Join(c.GetAbsRootDir(), "replication_log"), replog.Options{
-		MaxBytes: defaultReplicationLogMaxSize,
-		MaxAge:   defaultReplicationLogMaxAge,
+		MaxBytes:     rc.LogMaxBytes,
+		MaxAge:       rc.LogMaxAge,
+		HotTailBytes: rc.HotTailBytes,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("unable to open the replication log: %v", err))
@@ -154,7 +152,7 @@ func (c *Container) CloseReplicationLog() {
 		return
 	}
 	if c.replicationLedger != nil {
-		replication.SaveLedger(c.replicationLedger, c.ledgerSnapshotPath(), defaultReplicationLedgerMaxAge)
+		replication.SaveLedger(c.replicationLedger, c.ledgerSnapshotPath(), c.mktsConfig.Replication.LedgerMaxAge)
 	}
 	if err := c.replicationLog.Close(); err != nil {
 		log.Error("closing the replication log: %v", err)

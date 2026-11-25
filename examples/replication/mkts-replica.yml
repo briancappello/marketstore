@@ -58,6 +58,15 @@ replication:
   # tls_enabled: true
   # cert_file: /etc/marketstore/replication.crt
 
+  # Batched replay: received transaction groups are applied, with this
+  # replica's cursor, one batch per WAL flush. A batch closes at
+  # replay_batch_max entries, replay_batch_bytes, replay_batch_commands write
+  # commands, or replay_batch_wait after its first entry (the freshness bound).
+  replay_batch_max: 1000
+  replay_batch_bytes: 64MiB
+  replay_batch_commands: 250000
+  replay_batch_wait: 50ms
+
 # Triggers on a replica: a replica already receives the leader's trigger output
 # via replication, so write-generating triggers should run on the LEADER only.
 # The on-disk aggregation trigger (ondiskagg.so) is skipped automatically on a

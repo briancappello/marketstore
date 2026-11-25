@@ -56,6 +56,24 @@ type ReplicationSetting struct {
 	// ReconcileInterval reproduces the pre-fix behaviour (24h/5m = 288x, which
 	// cost ~7TB of writes per day on a ~11k-symbol replica).
 	DeepHealInterval time.Duration
+
+	// Replication log (master). The log keeps every committed transaction
+	// group until it exceeds LogMaxBytes or an entry is older than LogMaxAge;
+	// the newest HotTailBytes of it are also kept in memory.
+	LogMaxBytes  int64
+	LogMaxAge    time.Duration
+	HotTailBytes int64
+	// LedgerMaxAge is how long the master's change ledger remembers which
+	// bucket ranges changed, for replicas offline past the log's retention.
+	LedgerMaxAge time.Duration
+
+	// Batched replay (replica). A batch closes at ReplayBatchMax entries,
+	// ReplayBatchBytes, ReplayBatchCommands write commands, or ReplayBatchWait
+	// after its first entry.
+	ReplayBatchMax      int
+	ReplayBatchBytes    int64
+	ReplayBatchCommands int
+	ReplayBatchWait     time.Duration
 }
 
 type TriggerSetting struct {
@@ -175,6 +193,14 @@ func NewDefaultConfig(rootDir string) *MktsConfig {
 			BackfillParallelism: 8,
 			BackfillLookback:    24 * time.Hour,
 			DeepHealInterval:    24 * time.Hour,
+			LogMaxBytes:         20 << 30,
+			LogMaxAge:           48 * time.Hour,
+			HotTailBytes:        256 << 20,
+			LedgerMaxAge:        30 * 24 * time.Hour,
+			ReplayBatchMax:      1000,
+			ReplayBatchBytes:    64 << 20,
+			ReplayBatchCommands: 250000,
+			ReplayBatchWait:     50 * time.Millisecond,
 		},
 		Triggers:       nil,
 		BgWorkers:      nil,
@@ -217,6 +243,14 @@ type aux struct {
 		BackfillParallelism int           `yaml:"backfill_parallelism"`
 		BackfillLookback    time.Duration `yaml:"backfill_lookback"`
 		DeepHealInterval    time.Duration `yaml:"deep_heal_interval"`
+		LogMaxBytes         string        `yaml:"log_max_bytes"`
+		LogMaxAge           time.Duration `yaml:"log_max_age"`
+		HotTailBytes        string        `yaml:"hot_tail_bytes"`
+		LedgerMaxAge        time.Duration `yaml:"ledger_max_age"`
+		ReplayBatchMax      int           `yaml:"replay_batch_max"`
+		ReplayBatchBytes    string        `yaml:"replay_batch_bytes"`
+		ReplayBatchCommands int           `yaml:"replay_batch_commands"`
+		ReplayBatchWait     time.Duration `yaml:"replay_batch_wait"`
 	} `yaml:"replication"`
 	Triggers []struct {
 		Module        string                 `yaml:"module"`
@@ -378,6 +412,9 @@ func ParseConfig(data []byte) (*MktsConfig, error) {
 	if a.Replication.DeepHealInterval != 0 {
 		m.Replication.DeepHealInterval = a.Replication.DeepHealInterval
 	}
+	if err := parseReplicationLogSettings(&m.Replication, &a); err != nil {
+		return nil, err
+	}
 
 	m.ListenURL = fmt.Sprintf("%v:%v", a.ListenHost, a.ListenPort)
 	if a.GRPCListenPort != "" {
@@ -476,4 +513,97 @@ var validElementTypeNames = map[string]bool{
 // isValidElementTypeName checks if a type name is valid for column definitions.
 func isValidElementTypeName(name string) bool {
 	return validElementTypeNames[strings.ToLower(name)]
+}
+
+// parseReplicationLogSettings applies the replication log, ledger and batched
+// replay keys. Omitted (zero) keys keep their defaults; negative ones are
+// rejected.
+func parseReplicationLogSettings(r *ReplicationSetting, a *aux) error {
+	sizes := []struct {
+		key string
+		raw string
+		dst *int64
+	}{
+		{"log_max_bytes", a.Replication.LogMaxBytes, &r.LogMaxBytes},
+		{"hot_tail_bytes", a.Replication.HotTailBytes, &r.HotTailBytes},
+		{"replay_batch_bytes", a.Replication.ReplayBatchBytes, &r.ReplayBatchBytes},
+	}
+	for _, sz := range sizes {
+		if sz.raw == "" {
+			continue
+		}
+		n, err := ParseByteSize(sz.raw)
+		if err != nil {
+			return fmt.Errorf("replication.%s: %w", sz.key, err)
+		}
+		if n > 0 {
+			*sz.dst = n
+		}
+	}
+	durations := []struct {
+		key string
+		v   time.Duration
+		dst *time.Duration
+	}{
+		{"log_max_age", a.Replication.LogMaxAge, &r.LogMaxAge},
+		{"ledger_max_age", a.Replication.LedgerMaxAge, &r.LedgerMaxAge},
+		{"replay_batch_wait", a.Replication.ReplayBatchWait, &r.ReplayBatchWait},
+	}
+	for _, d := range durations {
+		if d.v < 0 {
+			return fmt.Errorf("replication.%s must not be negative, got %v", d.key, d.v)
+		}
+		if d.v > 0 {
+			*d.dst = d.v
+		}
+	}
+	counts := []struct {
+		key string
+		v   int
+		dst *int
+	}{
+		{"replay_batch_max", a.Replication.ReplayBatchMax, &r.ReplayBatchMax},
+		{"replay_batch_commands", a.Replication.ReplayBatchCommands, &r.ReplayBatchCommands},
+	}
+	for _, c := range counts {
+		if c.v < 0 {
+			return fmt.Errorf("replication.%s must not be negative, got %d", c.key, c.v)
+		}
+		if c.v > 0 {
+			*c.dst = c.v
+		}
+	}
+	if r.LedgerMaxAge < r.LogMaxAge {
+		return fmt.Errorf("replication.ledger_max_age (%v) must be at least log_max_age (%v): the ledger"+
+			" heals replicas that fell past the log", r.LedgerMaxAge, r.LogMaxAge)
+	}
+	return nil
+}
+
+// ParseByteSize parses a byte count: a plain integer, or a number with a
+// binary unit (KiB, MiB, GiB, TiB; "B" is optional), e.g. "20GiB", "256MiB".
+func ParseByteSize(s string) (int64, error) {
+	t := strings.TrimSpace(s)
+	units := []struct {
+		suffix string
+		mult   int64
+	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}, {"B", 1}}
+	mult := int64(1)
+	for _, u := range units {
+		if strings.HasSuffix(t, u.suffix) {
+			t, mult = strings.TrimSpace(strings.TrimSuffix(t, u.suffix)), u.mult
+			break
+		}
+	}
+	n, err := strconv.ParseInt(t, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid byte size %q (use bytes or KiB/MiB/GiB/TiB)", s)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("byte size %q must not be negative", s)
+	}
+	if n > (1<<63-1)/mult {
+		return 0, fmt.Errorf("byte size %q is too large", s)
+	}
+	return n * mult, nil
 }

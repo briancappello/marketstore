@@ -449,3 +449,78 @@ func TestParseConfig_WALSyncIntervalRejectsBadValues(t *testing.T) {
 		require.Error(t, err, "wal_sync_interval %q must be rejected", val)
 	}
 }
+
+func TestParseConfig_ReplicationLogAndReplayKeys(t *testing.T) {
+	t.Parallel()
+	cfg, err := ParseConfig([]byte(`
+root_directory: /tmp/x
+listen_port: 5993
+replication:
+  enabled: true
+  log_max_bytes: 8GiB
+  log_max_age: 36h
+  hot_tail_bytes: 128MiB
+  ledger_max_age: 168h
+  replay_batch_max: 500
+  replay_batch_bytes: "33554432"
+  replay_batch_commands: 100000
+  replay_batch_wait: 20ms
+`))
+	require.NoError(t, err)
+	r := cfg.Replication
+	assert.Equal(t, int64(8<<30), r.LogMaxBytes)
+	assert.Equal(t, 36*time.Hour, r.LogMaxAge)
+	assert.Equal(t, int64(128<<20), r.HotTailBytes)
+	assert.Equal(t, 168*time.Hour, r.LedgerMaxAge)
+	assert.Equal(t, 500, r.ReplayBatchMax)
+	assert.Equal(t, int64(32<<20), r.ReplayBatchBytes)
+	assert.Equal(t, 100000, r.ReplayBatchCommands)
+	assert.Equal(t, 20*time.Millisecond, r.ReplayBatchWait)
+}
+
+func TestParseConfig_ReplicationLogDefaultsWhenOmitted(t *testing.T) {
+	t.Parallel()
+	cfg, err := ParseConfig([]byte("root_directory: /tmp/x\nlisten_port: 5993\nreplication:\n  enabled: true\n"))
+	require.NoError(t, err)
+	r := cfg.Replication
+	assert.Equal(t, int64(20<<30), r.LogMaxBytes)
+	assert.Equal(t, 48*time.Hour, r.LogMaxAge)
+	assert.Equal(t, int64(256<<20), r.HotTailBytes)
+	assert.Equal(t, 720*time.Hour, r.LedgerMaxAge)
+	assert.Equal(t, 1000, r.ReplayBatchMax)
+	assert.Equal(t, int64(64<<20), r.ReplayBatchBytes)
+	assert.Equal(t, 250000, r.ReplayBatchCommands)
+	assert.Equal(t, 50*time.Millisecond, r.ReplayBatchWait)
+}
+
+func TestParseConfig_ReplicationLogRejectsBadValues(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{
+		"log_max_bytes: 20GB",
+		"log_max_bytes: -1",
+		"hot_tail_bytes: lots",
+		"log_max_age: -1h",
+		"replay_batch_max: -5",
+		"replay_batch_wait: -1s",
+		"ledger_max_age: 24h", // shorter than the 48h log
+	} {
+		_, err := ParseConfig([]byte("root_directory: /tmp/x\nlisten_port: 5993\nreplication:\n  " + bad + "\n"))
+		assert.ErrorContains(t, err, "replication.", bad)
+	}
+}
+
+func TestParseByteSize(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]int64{
+		"0": 0, "1024": 1024, "1KiB": 1 << 10, "256MiB": 256 << 20, "20GiB": 20 << 30,
+		"2TiB": 2 << 40, " 64 MiB ": 64 << 20, "512B": 512,
+	} {
+		got, err := ParseByteSize(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, in := range []string{"", "1.5GiB", "10GB", "-3", "9999999TiB"} {
+		_, err := ParseByteSize(in)
+		assert.Error(t, err, in)
+	}
+}

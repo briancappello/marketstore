@@ -213,3 +213,21 @@ bgworkers:
             UPDATE asset_data_vendor
             SET daily_newest = COALESCE(GREATEST(daily_newest, $2), $2)
             WHERE asset_id = $1 AND data_vendor_id = (SELECT id FROM data_vendor WHERE key = 'massive')
+
+# Replication (see docs/design/logical_replication_design.md and
+# examples/replication/). On a master:
+# replication:
+#   enabled: true
+#   listen_port: 5996
+#   log_max_bytes: 20GiB      # replication log retention, by size...
+#   log_max_age: 48h          # ...and by age
+#   hot_tail_bytes: 256MiB    # newest log entries kept in memory
+#   ledger_max_age: 720h      # change ledger history, for replicas past the log
+# On a replica:
+# replication:
+#   master_host: "MASTER_HOST:5996"
+#   master_query_host: "MASTER_HOST:5995"
+#   replay_batch_max: 1000
+#   replay_batch_bytes: 64MiB
+#   replay_batch_commands: 250000
+#   replay_batch_wait: 50ms

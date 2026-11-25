@@ -29,3 +29,16 @@ replication:
   # tls_enabled: true
   # cert_file: /etc/marketstore/replication.crt
   # key_file:  /etc/marketstore/replication.key
+
+  # Replication log: every committed transaction group, sequenced, so a
+  # replica resumes exactly where it stopped. Entries are deleted oldest first
+  # once the log exceeds log_max_bytes or an entry is older than log_max_age,
+  # whatever any replica's progress. Byte sizes take KiB/MiB/GiB/TiB.
+  log_max_bytes: 20GiB
+  log_max_age: 48h
+  # Newest part of the log kept in memory, so replicas that keep up never
+  # read the disk.
+  hot_tail_bytes: 256MiB
+  # How long the change ledger remembers which bucket ranges changed, for
+  # replicas offline longer than the log keeps. At least log_max_age.
+  ledger_max_age: 720h

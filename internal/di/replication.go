@@ -154,8 +154,14 @@ func (c *Container) GetReplicationClientWithRetry() ReplicationClient {
 
 	// Received transaction groups are applied in batches, each committed with
 	// the replica's cursor in one WAL transaction group.
+	rc := c.mktsConfig.Replication
 	applier, err := replication.NewBatchApplier(c.GetCatalogDir(), c.GetInitWALFile(), c.GetAbsRootDir(),
-		replication.BatchOptions{})
+		replication.BatchOptions{
+			MaxEntries:  rc.ReplayBatchMax,
+			MaxBytes:    rc.ReplayBatchBytes,
+			MaxCommands: rc.ReplayBatchCommands,
+			Wait:        rc.ReplayBatchWait,
+		})
 	if err != nil {
 		panic(errors.Wrap(err, "failed to initialize the replication applier"))
 	}
