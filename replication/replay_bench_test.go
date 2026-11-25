@@ -106,7 +106,7 @@ func TestReplayApplyThroughput(t *testing.T) {
 	cfg.BackgroundSync = true
 	cfg.WALSyncInterval = 2 * time.Second // p1's wal_sync_interval
 	c := di.NewContainer(cfg)
-	metadata := executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
+	metadata := ownInstance(c.GetCatalogDir(), c.GetInitWALFile())
 	t.Cleanup(metadata.WALFile.Shutdown)
 	writer, err := executor.NewWriter(c.GetCatalogDir(), metadata.WALFile)
 	require.NoError(t, err)

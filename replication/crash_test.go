@@ -45,7 +45,7 @@ func restart(t *testing.T, root string) *replica {
 	cfg := utils.NewDefaultConfig(root)
 	cfg.BackgroundSync = false
 	c := di.NewContainer(cfg)
-	return &replica{root: root, md: executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())}
+	return &replica{root: root, md: ownInstance(c.GetCatalogDir(), c.GetInitWALFile())}
 }
 
 // reference applies entries one at a time on a fresh replica.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/alpacahq/marketstore/v4/catalog"
 	"github.com/alpacahq/marketstore/v4/executor"
 	"github.com/alpacahq/marketstore/v4/internal/di"
 	"github.com/alpacahq/marketstore/v4/planner"
@@ -33,7 +34,7 @@ func newMasterFixture(t *testing.T) *masterFixture {
 	cfg := utils.NewDefaultConfig(f.root)
 	cfg.BackgroundSync = false
 	c := di.NewContainer(cfg)
-	f.metadata = executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
+	f.metadata = ownInstance(c.GetCatalogDir(), c.GetInitWALFile())
 	var err error
 	f.writer, err = executor.NewWriter(c.GetCatalogDir(), f.metadata.WALFile)
 	require.NoError(t, err)
@@ -219,4 +220,13 @@ func (f *masterFixture) readOpensRange(t *testing.T, key string, epoch0 int64, n
 		return cs.GetColumn("Open").([]float32)
 	}
 	return nil
+}
+
+// ownInstance is executor.NewInstanceSetup without the aliasing: that returns
+// the package-global ThisInstance, so every instance a test creates would be
+// the last one created. Tests that run a master and replicas side by side
+// need one InstanceMetadata each.
+func ownInstance(catDir *catalog.Directory, wal *executor.WALFileType) *executor.InstanceMetadata {
+	executor.NewInstanceSetup(catDir, wal)
+	return &executor.InstanceMetadata{CatalogDir: catDir, WALFile: wal}
 }

@@ -35,7 +35,7 @@ func TestCursorRoundTrip(t *testing.T) {
 	cfg := utils.NewDefaultConfig(root)
 	cfg.BackgroundSync = false
 	c := di.NewContainer(cfg)
-	md := executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
+	md := ownInstance(c.GetCatalogDir(), c.GetInitWALFile())
 
 	_, ok, err := replication.ReadCursor(md.CatalogDir)
 	require.NoError(t, err)
@@ -62,7 +62,7 @@ func TestCommittedBatchAndCursorShareOneTransactionGroup(t *testing.T) {
 	cfg.BackgroundSync = true
 	cfg.WALSyncInterval = time.Millisecond
 	c := di.NewContainer(cfg)
-	md := executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
+	md := ownInstance(c.GetCatalogDir(), c.GetInitWALFile())
 	t.Cleanup(md.WALFile.Shutdown)
 
 	var stop atomic.Bool
@@ -132,7 +132,7 @@ func TestBatchLargerThanFreeChannelCapacityCommits(t *testing.T) {
 	wf, err := executor.NewWALFile(root, 7, &executor.NopReplicationSender{}, false, &sync.WaitGroup{},
 		executor.StartNewTriggerPluginDispatcher(nil), executor.NewTransactionPipeWithDepth(depth))
 	require.NoError(t, err)
-	md := executor.NewInstanceSetup(catDir, wf)
+	md := ownInstance(catDir, wf)
 
 	w, err := executor.NewWriter(catDir, md.WALFile)
 	require.NoError(t, err)

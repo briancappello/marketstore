@@ -30,7 +30,7 @@ func newReplica(t *testing.T) *replica {
 	cfg := utils.NewDefaultConfig(r.root)
 	cfg.BackgroundSync = false
 	c := di.NewContainer(cfg)
-	r.md = executor.NewInstanceSetup(c.GetCatalogDir(), c.GetInitWALFile())
+	r.md = ownInstance(c.GetCatalogDir(), c.GetInitWALFile())
 	return r
 }
 
