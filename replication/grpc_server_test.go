@@ -4,14 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/alpacahq/marketstore/v4/metrics"
 	pb "github.com/alpacahq/marketstore/v4/proto"
 	"github.com/alpacahq/marketstore/v4/replication"
 	"github.com/alpacahq/marketstore/v4/replication/replog"
@@ -181,4 +185,71 @@ func TestNoEntryDroppedAcrossA100kBurst(t *testing.T) {
 		t.Fatal("burst not delivered")
 	}
 	require.Greater(t, h.log.DiskReads(), int64(0), "the burst should have outrun the memory tail")
+}
+
+func recvGap(t *testing.T, s pb.Replication_GetWALStreamClient) *pb.Gap {
+	t.Helper()
+	resp, err := s.Recv()
+	require.NoError(t, err)
+	gap := resp.GetGap()
+	require.NotNil(t, gap, "expected a gap notice, got %v", resp)
+	_, err = s.Recv()
+	require.Error(t, err, "the stream ends after a gap notice")
+	return gap
+}
+
+func TestGapNoticeForCursorBeforeRetention(t *testing.T) {
+	h := newStreamHarness(t, replog.Options{SegmentBytes: 400, MaxBytes: 800})
+	h.appendN(t, 1, 100, 16)
+	require.NoError(t, h.log.Sync())
+	h.log.EnforceRetention()
+	first := h.log.FirstSeq()
+	require.Greater(t, first, uint64(1))
+
+	s := h.open(t, context.Background(), &pb.GetWALStreamRequest{StartSeq: 2, Resumable: true})
+	gap := recvGap(t, s)
+	require.Equal(t, pb.Gap_RETENTION, gap.GetReason())
+	require.Equal(t, uint64(2), gap.GetRequested())
+	require.Equal(t, first, gap.GetFirstAvailable())
+
+	// Reconnecting at first_available streams from there.
+	s = h.open(t, context.Background(), &pb.GetWALStreamRequest{StartSeq: first, Resumable: true})
+	requireConsecutive(t, recvSeqs(t, s, int(100-first+1)), first)
+}
+
+func TestGapNoticeInsideBrokenRange(t *testing.T) {
+	full := false
+	h := newStreamHarness(t, replog.Options{WriteAt: func(f *os.File, b []byte, off int64) (int, error) {
+		if full {
+			return 0, syscall.ENOSPC
+		}
+		return f.WriteAt(b, off)
+	}})
+	h.appendN(t, 1, 5, 16)
+	full = true
+	for i := 0; i < 3; i++ {
+		_, err := h.log.Append(int64(100+i), []byte("lost"))
+		require.Error(t, err)
+	}
+	full = false
+	h.appendN(t, 9, 2, 16)
+
+	s := h.open(t, context.Background(), &pb.GetWALStreamRequest{StartSeq: 6, Resumable: true})
+	gap := recvGap(t, s)
+	require.Equal(t, pb.Gap_LOG_BROKEN, gap.GetReason())
+	require.Equal(t, uint64(9), gap.GetFirstAvailable())
+}
+
+// An old replica cannot parse a gap notice, so its stream skips the gap.
+func TestLegacyStreamSkipsGaps(t *testing.T) {
+	h := newStreamHarness(t, replog.Options{SegmentBytes: 400, MaxBytes: 800})
+	h.appendN(t, 1, 100, 16)
+	require.NoError(t, h.log.Sync())
+	h.log.EnforceRetention()
+	first := h.log.FirstSeq()
+
+	dropped := testutil.ToFloat64(metrics.ReplicationDroppedMessages)
+	s := h.open(t, context.Background(), &pb.GetWALStreamRequest{StartSeq: 2})
+	requireConsecutive(t, recvSeqs(t, s, int(100-first+1)), first)
+	require.Equal(t, dropped+float64(first-2), testutil.ToFloat64(metrics.ReplicationDroppedMessages))
 }
