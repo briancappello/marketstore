@@ -138,3 +138,24 @@ The same commands as 0.1.
 - `1D` bars dated January 1 are unreadable (see "Findings outside this change").
 - `executor/cache.go` is not gofmt-clean. It was left untouched, so the diff stays clean.
 - `executor.NewInstanceSetup` returns a shared global, so tests elsewhere that build several instances may compare one instance with itself. It is worked around in `replication` tests with `ownInstance`.
+
+## 8.1 Rollout (2026-11-25, approved by the user, after 23:48 ET with taichi idle)
+
+1. **taichi.** `4725cbde` deployed with `./deploy.sh --no-restart` (the config was identical to production), then `systemctl --user restart marketstore` at 21:50 MST.
+   - The log opened at sequence 0. It took a startup burst of about 670 MB / 29,140 entries in the first minute (about 3.9 MB/s), then went idle.
+   - No drops; the log is not broken.
+2. **p1 was already down,** since 12:01 MST, before this session started.
+   - Its log stops with no shutdown message and a crash WAL was left behind. No OOM or kill entry was found; the cause is unknown.
+   - The crash WAL was replayed with `set-cursor`, the new build, before the tick copy, so its tick writes could not land in the copied files.
+3. **Ticks.** p1's old `AAPL/1Sec/{TRADE,QUOTE}` (79 MB) were moved to `~/.local/share/marketstore/ticks-old-20261125`. taichi's copies (6.7 GB, last written 09-21) were rsynced over and verified with SHA-256: identical.
+4. **Cursor set to 0,** so p1 streams taichi's whole log from sequence 1, not `--master-tail`.
+5. **Bug found at the first p1 start.** p1 requested the tail instead of sequence 1: its cursor was unreadable.
+   - *Cause.* The cursor row at 2000-01-02 00:00 UTC is January 1 in `America/New_York`, which is p1's time zone. `1D` rows on January 1 are unreadable, and the server's own cursor writes landed in the bucket header. Every test had run in UTC.
+   - *Response.* p1 was stopped cleanly after about 70 s, and the fix was committed (`f248b920`, with a 25-pair time-zone test). The `__replication__` bucket was deleted and recreated with `set-cursor --seq 0`, and p1 was restarted.
+6. **Result.** p1 requested sequence 1 and drained all 29,140 entries in about 75 s (41 batches, about 390 TG/s).
+   - `tool replication status`: cursor 29140 = master 29140, lag 0.
+   - Master `replica_lag_seq`/`replica_lag_bytes`: 0. `replication_dropped_messages_total`: 0. Gaps 0, unrecoverable tick gaps 0.
+   - The startup deep pass compared 14,157,258 rows: all identical, 0 missing, 0 revised. 551 local-only rows are old, and taichi no longer has them.
+7. **Spot check (SHA-256 of year files).**
+   - `AAPL/1D/OHLCV`, `AAPL/1D/SESSIONS` and `MSFT/1D/OHLCV` are identical.
+   - `AAPL/1Min`, `NVDA/1Min` and `SPY/1Sec` differ, but only in records from 2026-09-08/09/18/23. That is history from before this change and outside the deep pass's window. October and November are identical.

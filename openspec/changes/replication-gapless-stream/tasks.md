@@ -53,7 +53,7 @@
 
 ## 8. Rollout and verification
 
-- [ ] 8.1 Deploy taichi per the Migration Plan, then the p1 tick-history copy, `set-cursor` and the p1 deploy. Verify that `tool replication status` shows lag near zero.
+- [x] 8.1 Deploy taichi per the Migration Plan, then the p1 tick-history copy, `set-cursor` and the p1 deploy. Verify that `tool replication status` shows lag near zero.
 - [ ] 8.2 Over one trading day, including the overnight backfill, check:
   - `replication_dropped_messages_total` stays at 0;
   - after the overnight backfill, a bit-exact comparison of 1Min/1D/SESSIONS for the last 5 trading days between taichi and p1 finds no differences;
