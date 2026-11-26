@@ -20,8 +20,9 @@ import (
 
 // Builds the command hierarchy and parses statements.
 func main() {
-	// Errors are already handled by the framework.
+	// cobra has already printed the error; the exit status must still say so,
+	// or scripts and systemd's Restart=on-failure see every failure as success.
 	if err := cmd.Execute(); err != nil {
-		os.Exit(0)
+		os.Exit(1)
 	}
 }
