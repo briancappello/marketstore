@@ -17,10 +17,20 @@ import (
 // hidden from symbol listings.
 const CursorKey = "__replication__/1D/CURSOR"
 
-// cursorEpoch is the one row's constant timestamp. Not January 1: a 1D
-// bucket indexes days from 0 (io.TimeToIndex), and index 0 reads as an empty
-// slot, so a 1D row on January 1 is written but never read back.
-var cursorEpoch = time.Date(2000, 1, 2, 0, 0, 0, 0, time.UTC)
+// cursorEpoch is the one row's constant timestamp: mid-year, at noon UTC.
+//
+// A 1D bucket stores days in the instance's configured timezone, so the day a
+// timestamp lands on, and the epoch it reads back as (that day's local
+// midnight), depend on the timezone. Noon UTC on July 1 is June 30 or July 1
+// in every timezone, which keeps it away from January 1 (a 1D row on January
+// 1 is written but never read back: io.TimeToIndex is 0-based for 1D, and
+// index 0 reads as an empty slot) and from the year boundary.
+var cursorEpoch = time.Date(2000, 7, 1, 12, 0, 0, 0, time.UTC)
+
+// cursorRange covers every epoch the cursor row can read back as, under any
+// timezone.
+var cursorRangeStart, cursorRangeEnd = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Add(-24 * time.Hour),
+	time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC).Add(24 * time.Hour)
 
 // CursorCSM is the write that sets the cursor to seq.
 func CursorCSM(seq uint64) io.ColumnSeriesMap {
@@ -41,7 +51,7 @@ func ReadCursor(catDir *catalog.Directory) (seq uint64, ok bool, err error) {
 	}
 	q := planner.NewQuery(catDir)
 	q.AddTargetKey(tbk)
-	q.SetRange(cursorEpoch.Add(-time.Hour), cursorEpoch.Add(time.Hour))
+	q.SetRange(cursorRangeStart, cursorRangeEnd)
 	parsed, err := q.Parse()
 	if err != nil {
 		return 0, false, fmt.Errorf("query replication cursor: %w", err)
@@ -60,7 +70,7 @@ func ReadCursor(catDir *catalog.Directory) (seq uint64, ok bool, err error) {
 // CursorQuery is the epoch range to query CursorKey over, for reading a
 // replica's cursor through its query API.
 func CursorQuery() (start, end int64) {
-	return cursorEpoch.Add(-time.Hour).Unix(), cursorEpoch.Add(time.Hour).Unix()
+	return cursorRangeStart.Unix(), cursorRangeEnd.Unix()
 }
 
 // CursorFromCSM extracts the cursor from a query result for CursorKey.

@@ -67,6 +67,9 @@ Use --seq N to set it to N, or --master-tail to ask the master (master_host in
 		if err != nil {
 			return err
 		}
+		// Buckets index days in the configured timezone: write as the
+		// server will read.
+		utils.InstanceConfig.Timezone = cfg.Timezone
 		if err := SetCursor(cfg.RootDirectory, seq); err != nil {
 			return err
 		}

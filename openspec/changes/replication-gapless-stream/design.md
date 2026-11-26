@@ -87,7 +87,10 @@ A new replica with no cursor also sends `start_seq = 0`. A new master stamps `se
   - A ticker flush cannot split the batch, because the batch is never in the channel.
   - *Rejected: `WithFlushHeld(fn)`, holding `fileMu` while `fn` queues into the channel.* The channel holds 1M commands, and the flusher that drains it needs `fileMu`. A batch, or a concurrent backfill write, that fills the channel while the lock is held deadlocks the replica. A large bootstrap bucket alone is one command per bar. It would also hold `fileMu` through parsing and catalog work, and a `RequestFlush` inside `fn` would self-deadlock on the non-reentrant mutex.
 - **Replay idempotency.** The cursor alone does not stop duplicate ticks after a crash, because WAL replay re-applies transaction groups whose primary writes already ran (see Context). D7 makes WAL replay idempotent for variable records on every instance. The replica therefore needs no replay rule of its own.
-- **Cursor storage.** The cursor is a fixed bucket, `__replication__/1D/CURSOR`: one row at a constant epoch, with column `Seq uint64`. WAL replay therefore restores the cursor together with the data, and a crash leaves both or neither (spec).
+- **Cursor storage.** The cursor is a fixed bucket, `__replication__/1D/CURSOR`: one row at a constant epoch, with column `Seq uint64`.
+  - *The epoch is 2000-07-01 12:00 UTC.* A `1D` bucket stores days in the instance's configured time zone, so the day a timestamp lands on depends on it. Noon UTC on July 1 is June 30 or July 1 in every time zone. That keeps the row away from January 1, which is unreadable for `1D`, and from the year boundary.
+  - *Reads* cover the whole year 2000, and `set-cursor` writes in the configured time zone.
+  - *Found during rollout.* The first choice, 2000-01-02 00:00 UTC, is January 1 in New York (p1's time zone), and the server could not read the cursor. WAL replay therefore restores the cursor together with the data, and a crash leaves both or neither (spec).
   - Watchlist, listing and symbol-enumeration code skip symbols that start with `__`. This is a small shared helper used by `ListSymbols` and the watchlist universe.
   - Replicas never forward to other replicas, and the bucket is never sent to the master.
 - *Alternatives considered:*
