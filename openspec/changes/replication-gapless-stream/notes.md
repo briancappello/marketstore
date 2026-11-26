@@ -159,3 +159,22 @@ The same commands as 0.1.
 7. **Spot check (SHA-256 of year files).**
    - `AAPL/1D/OHLCV`, `AAPL/1D/SESSIONS` and `MSFT/1D/OHLCV` are identical.
    - `AAPL/1Min`, `NVDA/1Min` and `SPY/1Sec` differ, but only in records from 2026-09-08/09/18/23. That is history from before this change and outside the deep pass's window. October and November are identical.
+
+## 1.2 Replication volume on taichi (partial, 2026-11-26)
+
+Sampled from taichi's WAL size every 5 s, from 11-25 15:37 ET to 11-26 09:10 ET (17.6 h, 1,145 MiB).
+
+| Window (ET) | Bytes |
+|---|---|
+| 11-25 15:37–16:00 (last 23 min of the regular session) | 396 MiB, about 290 KB/s |
+| 11-25 16:00–20:00 (after-hours) | 17–42 MiB per hour |
+| 11-25 23:50 (taichi restart burst, see 8.1) | 639 MiB in about a minute; 5 s peak 36 MiB/s |
+| 11-26 00:00–09:10 (Thanksgiving) | about 0: one transaction group, no overnight backfill |
+
+**Estimate for one trading day:** about 7 GB. That is 6.5 h × about 1 GB/h in the regular session, plus about 0.3 GB of extended hours. It does not yet include an overnight backfill, which a holiday night did not produce, or restart bursts.
+
+**Rollout values: the defaults stay,** `log_max_bytes: 20GiB` and `log_max_age: 48h`.
+- *What they cover.* About 2–2.5 trading days, so size and age bind at about the same point.
+- *Why not larger.* taichi ingests no live ticks: its only tick buckets were last written 09-21. Fixed buckets past retention heal from the change ledger, so a larger log would mostly cost disk on a 91%-full volume.
+
+**Still open:** the per-burst volume of a real overnight backfill. The first chance is the night after Friday 11-27 or Monday 11-30. The WAL sampler was stopped on 11-26: the replication log's own `replication_log_bytes` and entry wallclocks now measure the volume exactly.
