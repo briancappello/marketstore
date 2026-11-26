@@ -178,3 +178,27 @@ Sampled from taichi's WAL size every 5 s, from 11-25 15:37 ET to 11-26 09:10 ET 
 - *Why not larger.* taichi ingests no live ticks: its only tick buckets were last written 09-21. Fixed buckets past retention heal from the change ledger, so a larger log would mostly cost disk on a 91%-full volume.
 
 **Still open:** the per-burst volume of a real overnight backfill. The first chance is the night after Friday 11-27 or Monday 11-30. The WAL sampler was stopped on 11-26: the replication log's own `replication_log_bytes` and entry wallclocks now measure the volume exactly.
+
+## 8.2/8.3 monitoring (from 2026-11-26)
+
+`scripts/replication-monitor.sh` runs on p1, started by hand (`start`/`stop`/`status`/`once`), as p1 has no systemd units. It needs p1 → taichi access only: taichi cannot reach p1. State and reports live in `~/.local/share/marketstore/monitor/`.
+
+- **Every 15 min:** health, plus taichi's log size for 1.2.
+- **Trading days:**
+  - 06:00 and 20:30: `tool replication compare --days 5` (1Min/OHLCV, 1D/OHLCV, 1D/SESSIONS, row by row).
+  - 20:30: SHA-256 of every tick file on both hosts.
+  - Open ± 5 min and close ± 5 min (the calendar's close, 13:00 on half days): watchlist snapshots from both servers.
+- **21:00:** a daily report.
+- **`READY-8.2-<day>`** is written once a trading day had no alerts, its evening parity and tick hashes passed, and the next trading day's 06:00 parity passed.
+- **Alerts** go to `notify-send` and `alerts.log`.
+
+**First run, 2026-11-26 (Thanksgiving, quiet):**
+- Parity: 35,380 buckets, 9,810,481 rows identical, 0 missing / differing / replica-only (11/19–11/26). 127 buckets exist only on p1: its own extra symbols. The 11/24 `1D/SESSIONS` rows that 13.2 recorded as lagging are now equal to taichi's.
+- Tick files: identical.
+
+**Finding for 8.3, not replication: p1's watchlists differ from taichi's.**
+- *Size of the difference.* None of the 8 lists is identical. `INDUSTRY_AGGREGATE` has 130 entries on p1 against 138 on taichi, and the sector names differ. Per-symbol `prior_close` differs: SOXL is 30.61 on p1 against 32.02 on taichi.
+- *Taichi is right.* 32.02 is SOXL's 11/25 `1D` close.
+- *The data is not the cause.* p1's `1D/OHLCV` and `1D/SESSIONS` files are byte-identical to taichi's, and both run watchlist plugin `b91e04d` with the same watchlist config.
+- *Hypothesis, unverified.* p1 seeded its watchlists (11,860 symbols, against taichi's 11,794) and then applied taichi's 29,140-entry startup burst through its triggers, as if it were live.
+- *Effect on 8.3.* Its "live session-boundary rankings" check fails until this is understood.
