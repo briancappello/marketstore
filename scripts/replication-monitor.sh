@@ -299,8 +299,13 @@ run() {
 	log "monitor started (pid $$, master $MASTER_GRPC, replica $REPLICA_GRPC)"
 	trap 'log "monitor stopped"; rm -f "$PIDFILE"; exit 0' INT TERM
 	while true; do
-		tick
-		sleep $(( 60 - 10#$(date +%S) ))
+		# Jobs must not inherit the lock (fd 9): one still running after the
+		# monitor stopped would keep a new monitor from starting.
+		tick 9>&-
+		# Sleep in the background: a foreground sleep would hold off the
+		# TERM trap until it ends.
+		sleep $(( 60 - 10#$(date +%S) )) 9>&- &
+		wait $!
 	done
 }
 
@@ -315,7 +320,14 @@ case "${1:-}" in
 		echo "monitor started (pid $(cat "$PIDFILE" 2>/dev/null)); state in $STATE_DIR"
 		;;
 	stop)
-		if [[ -f "$PIDFILE" ]]; then kill "$(cat "$PIDFILE")" && echo "stopped"; else echo "not running"; fi
+		if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+			pid="$(cat "$PIDFILE")"; kill "$pid"
+			for _ in $(seq 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+			if kill -0 "$pid" 2>/dev/null; then echo "pid $pid did not stop" >&2; exit 1; fi
+			echo "stopped"
+		else
+			echo "not running"
+		fi
 		;;
 	status)
 		if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then echo "running (pid $(cat "$PIDFILE"))"; else echo "not running"; fi
