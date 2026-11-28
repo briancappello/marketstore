@@ -317,3 +317,19 @@ func TestRegularIsStrictSubsetOfExtended(t *testing.T) {
 	assert.Equal(t, 960, extended, "extended session is 960 minutes (04:00-20:00)")
 	assert.Equal(t, 570, extendedOnly, "570 extended-only minutes previously polluted daily bars")
 }
+
+func TestMarketClose(t *testing.T) {
+	t.Parallel()
+	// An ordinary trading day is not listed in the calendar, and still closes at 16:00.
+	got := Nasdaq.MarketClose(time.Date(2026, 11, 30, 11, 0, 0, 0, NY))
+	if assert.NotNil(t, got) {
+		assert.Equal(t, time.Date(2026, 11, 30, 16, 0, 0, 0, NY), *got)
+	}
+	got = Nasdaq.MarketClose(time.Date(2026, 11, 27, 11, 0, 0, 0, NY)) // early close
+	if assert.NotNil(t, got) {
+		assert.Equal(t, time.Date(2026, 11, 27, 13, 0, 0, 0, NY), *got)
+	}
+	assert.Nil(t, Nasdaq.MarketClose(time.Date(2026, 11, 26, 11, 0, 0, 0, NY))) // holiday
+	assert.Nil(t, Nasdaq.MarketClose(time.Date(2026, 11, 28, 11, 0, 0, 0, NY))) // weekend
+	assert.NotNil(t, Nasdaq.EpochMarketClose(time.Date(2026, 11, 30, 11, 0, 0, 0, NY).Unix()))
+}

@@ -178,33 +178,20 @@ func (calendar *Calendar) EpochMarketClose(epoch int64) *time.Time {
 
 // MarketClose determines the market close time of the day that the
 // supplied timestamp occurs on. Returns nil if it is not a market day.
+//
+// Only holidays and early closes are listed in the calendar; every other
+// weekday closes at the normal close time.
 func (calendar *Calendar) MarketClose(t time.Time) *time.Time {
-	var mktClose *time.Time
-	if state, ok := calendar.days[julianDate(t)]; ok {
-		switch state {
-		case EarlyClose:
-			earlyClose := time.Date(
-				t.Year(), t.Month(), t.Day(),
-				calendar.earlyCloseTime.hour,
-				calendar.earlyCloseTime.minute,
-				calendar.earlyCloseTime.second,
-				0, calendar.tz)
-
-			mktClose = &earlyClose
-		case Closed:
-			return mktClose
-		default:
-			normalClose := time.Date(
-				t.Year(), t.Month(), t.Day(),
-				calendar.closeTime.hour,
-				calendar.closeTime.minute,
-				calendar.closeTime.second,
-				0, calendar.tz)
-
-			mktClose = &normalClose
-		}
+	if !calendar.IsMarketDay(t) {
+		return nil
 	}
-	return mktClose
+	closeAt := calendar.closeTime
+	if state, ok := calendar.days[julianDate(t)]; ok && state == EarlyClose {
+		closeAt = calendar.earlyCloseTime
+	}
+	mktClose := time.Date(t.Year(), t.Month(), t.Day(),
+		closeAt.hour, closeAt.minute, closeAt.second, 0, calendar.tz)
+	return &mktClose
 }
 
 func (calendar *Calendar) Tz() *time.Location {

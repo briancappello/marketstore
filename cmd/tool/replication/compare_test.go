@@ -83,3 +83,22 @@ func TestTradingDaysStartSkipsHolidaysAndWeekends(t *testing.T) {
 	got = tool.TradingDaysStart(time.Date(2026, 11, 30, 21, 0, 0, 0, ny), 2)
 	require.Equal(t, time.Date(2026, 11, 27, 0, 0, 0, 0, ny), got)
 }
+
+func TestMarketDayReportsTheRegularClose(t *testing.T) {
+	for _, tc := range []struct {
+		date, want string
+		trading    bool
+	}{
+		{"2026-11-30", "2026-11-30 is a trading day; regular close 16:00 EST", true}, // an ordinary day
+		{"2026-11-27", "2026-11-27 is a trading day; regular close 13:00 EST", true}, // early close
+		{"2026-11-26", "2026-11-26 is not a trading day", false},                     // holiday
+		{"2026-11-28", "2026-11-28 is not a trading day", false},                     // weekend
+	} {
+		var out bytes.Buffer
+		tool.Cmd.SetOut(&out)
+		tool.Cmd.SetArgs([]string{"market-day", "--date", tc.date})
+		err := tool.Cmd.Execute()
+		require.Equal(t, tc.trading, err == nil, tc.date)
+		require.Equal(t, tc.want+"\n", out.String())
+	}
+}
