@@ -102,3 +102,10 @@ func TestMarketDayReportsTheRegularClose(t *testing.T) {
 		require.Equal(t, tc.want+"\n", out.String())
 	}
 }
+
+func TestCompareRejectsABadSinceDate(t *testing.T) {
+	tool.Cmd.SetArgs([]string{"compare", "--master", "127.0.0.1:1", "--replica", "127.0.0.1:1", "--since", "2025-13-01"})
+	err := tool.Cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--since")
+}

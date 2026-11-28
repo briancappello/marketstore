@@ -26,6 +26,7 @@ type compareOptions struct {
 	cutoff          time.Duration
 	examples        int
 	timeout         time.Duration
+	since           string
 }
 
 var cmpOpts compareOptions
@@ -37,7 +38,7 @@ var compareCmd = &cobra.Command{
 and compare them row by row (both servers' gRPC query API; read-only).
 
 The window starts at midnight (America/New_York) of the oldest of the last
---days trading days, and ends --cutoff before now, so bars still being written
+--days trading days (or at --since), and ends --cutoff before now, so bars still being written
 are left out. Exits 1 when the replica is missing rows, holds different values,
 or a bucket cannot be compared; rows only the replica holds are reported but
 do not fail the comparison.`,
@@ -55,11 +56,17 @@ do not fail the comparison.`,
 			return err
 		}
 		defer rc.Close()
+		start := TradingDaysStart(time.Now(), cmpOpts.days)
+		if cmpOpts.since != "" {
+			if start, err = time.ParseInLocation("2006-01-02", cmpOpts.since, calendar.Nasdaq.Tz()); err != nil {
+				return fmt.Errorf("--since: %w", err)
+			}
+		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), cmpOpts.timeout)
 		defer cancel()
 		res, err := Compare(ctx, backfill.NewGRPCClient(mc), backfill.NewGRPCClient(rc), CompareSpec{
 			Suffixes: splitList(cmpOpts.buckets),
-			Start:    TradingDaysStart(time.Now(), cmpOpts.days),
+			Start:    start,
 			End:      time.Now().Add(-cmpOpts.cutoff),
 			Parallel: cmpOpts.parallel,
 			Examples: cmpOpts.examples,
@@ -109,6 +116,7 @@ func init() {
 	f.StringVar(&cmpOpts.master, "master", "", "the master's main gRPC address (required)")
 	f.StringVar(&cmpOpts.replica, "replica", "localhost:5995", "the replica's main gRPC address")
 	f.IntVar(&cmpOpts.days, "days", 5, "how many of the most recent trading days to compare")
+	f.StringVar(&cmpOpts.since, "since", "", "compare from this date (YYYY-MM-DD, America/New_York) instead of --days")
 	f.StringVar(&cmpOpts.buckets, "buckets", "1Min/OHLCV,1D/OHLCV,1D/SESSIONS",
 		"comma-separated Timeframe/AttributeGroup suffixes to compare")
 	f.IntVar(&cmpOpts.parallel, "parallel", 8, "buckets compared concurrently")
