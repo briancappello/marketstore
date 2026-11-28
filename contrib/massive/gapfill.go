@@ -247,8 +247,13 @@ func (mf *MassiveFetcher) fillOutage(o outage) {
 // runBackfillRequest is the backfillRunner's run function.
 func (mf *MassiveFetcher) runBackfillRequest(req backfillRequest) {
 	if req.full {
-		if err := mf.runBackfill(); err != nil && !errors.Is(err, context.Canceled) {
-			log.Warn("[massive] backfill failed: %v", err)
+		started := time.Now()
+		if err := mf.runBackfill(); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Warn("[massive] backfill failed: %v", err)
+			}
+		} else {
+			mf.backfilledAt.Store(started.UnixNano())
 		}
 	}
 	if req.gap != nil && mf.ctx.Err() == nil {

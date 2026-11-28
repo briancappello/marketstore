@@ -172,6 +172,10 @@ type MassiveFetcher struct {
 	// lastDataAt is the wall-clock time (UnixNano) the last data message was
 	// received on any connection; it marks where a stream outage began.
 	lastDataAt atomic.Int64
+	// backfilledAt is when (UnixNano) the last successful full backfill
+	// started: everything before it is on disk, so a reconnect only needs to
+	// fill from there.
+	backfilledAt atomic.Int64
 }
 
 // NewBgWorker returns a new instance of MassiveFetcher.
@@ -461,9 +465,10 @@ type streamState struct {
 //
 // How it waits depends on whether a session is live. Inside extended hours it
 // reconnects immediately, with a small bounded backoff so a refusing endpoint
-// is not spun against; outside them it sleeps until the next pre-market open
-// (3:58 AM ET). On a successful reconnect it also triggers a backfill to cover
-// the gap the outage left.
+// is not spun against; outside them it runs the overnight backfill at 3:00 AM
+// ET and reconnects at the next pre-market open (3:58 AM ET). On a successful
+// reconnect it also triggers a backfill to cover the gap the outage left; after
+// a successful 3:00 backfill that is only the hour since it started.
 //
 // state.client, if set, is the pre-connected client used for the first
 // iteration (skipping the connect step, since startStreaming already did it).
@@ -501,9 +506,23 @@ func (mf *MassiveFetcher) streamWithRestart(feed ws.Feed, topics []streamTopic, 
 		wait, untilPreMarket := reconnectWait(time.Now(), err, backoff)
 		if untilPreMarket {
 			wakeTime := nextPreMarketOpen(time.Now())
-			wait = time.Until(wakeTime)
+			backfillAt := overnightBackfillTime(wakeTime)
 			log.Error("[massive] stream failed outside market hours (%v), next reconnect attempt at %s",
 				err, wakeTime.Format(time.RFC3339))
+			// Fill the outage an hour before the pre-market opens, so the
+			// historical writes are done before live bars stream in. The
+			// reconnect then only fills from when this backfill started.
+			if backfillAt.After(time.Now()) && !utils.InstanceConfig.NoBackfill {
+				log.Info("[massive] overnight backfill scheduled for %s", backfillAt.Format(time.RFC3339))
+				select {
+				case <-mf.ctx.Done():
+					return
+				case <-time.After(time.Until(backfillAt)):
+				}
+				log.Info("[massive] starting the overnight backfill before the pre-market open")
+				mf.backfills.submit(mf.planGapFill(time.Now()))
+			}
+			wait = time.Until(wakeTime)
 		} else {
 			backoff = nextBackoff(backoff)
 			// Connection-limit rejections are named separately because they
@@ -649,19 +668,35 @@ func (mf *MassiveFetcher) drainOutput(out <-chan json.RawMessage, router *messag
 	}
 }
 
-// requestGapFill queues the backfill a reconnect at reconnectedAt needs.
-func (mf *MassiveFetcher) requestGapFill(reconnectedAt time.Time) {
-	var lastData time.Time
-	if ns := mf.lastDataAt.Load(); ns != 0 {
-		lastData = time.Unix(0, ns)
-	}
-	req := planReconnectBackfill(lastData, reconnectedAt)
+// planGapFill returns the backfill needed to cover everything up to now: from
+// the last data message, or from the last successful full backfill if that
+// started later.
+func (mf *MassiveFetcher) planGapFill(now time.Time) backfillRequest {
+	lastData := coveredThrough(mf.lastDataAt.Load(), mf.backfilledAt.Load())
+	req := planReconnectBackfill(lastData, now)
 	if req.full && len(mf.config.QueryStart) == 0 {
 		req.full = false
 	}
 	if req.gap != nil && len(mf.streamedBarTimeframes()) == 0 {
 		req.gap = nil
 	}
+	return req
+}
+
+// coveredThrough is the later of two UnixNano marks (zero when neither is
+// set): the time up to which data is known to be on disk.
+func coveredThrough(lastDataAt, backfilledAt int64) time.Time {
+	ns := max(lastDataAt, backfilledAt)
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// requestGapFill queues the backfill a reconnect at reconnectedAt needs.
+func (mf *MassiveFetcher) requestGapFill(reconnectedAt time.Time) {
+	lastData := coveredThrough(mf.lastDataAt.Load(), mf.backfilledAt.Load())
+	req := mf.planGapFill(reconnectedAt)
 	switch {
 	case req.full:
 		log.Info("[massive] reconnected after a long or overnight outage (last data %v); queuing full backfill", lastData.Format(time.RFC3339))
@@ -937,6 +972,18 @@ func nextBackoff(cur time.Duration) time.Duration {
 		return reconnectBackoffMin
 	}
 	return min(cur*2, reconnectBackoffMax)
+}
+
+// overnightBackfillHour is when (ET) the overnight backfill runs on the
+// morning of wake: an hour before the 4:00 AM pre-market open.
+const overnightBackfillHour = 3
+
+// overnightBackfillTime returns 3:00 AM ET on the day of wake, the
+// pre-market reconnect time nextPreMarketOpen returned.
+func overnightBackfillTime(wake time.Time) time.Time {
+	tz := calendar.Nasdaq.Tz()
+	w := wake.In(tz)
+	return time.Date(w.Year(), w.Month(), w.Day(), overnightBackfillHour, 0, 0, 0, tz)
 }
 
 // nextPreMarketOpen returns 3:58 AM ET on the next applicable trading day.

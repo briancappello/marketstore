@@ -819,3 +819,37 @@ func TestNextBackoff(t *testing.T) {
 	}
 	assert.Less(t, total, 5*time.Minute, "ten attempts must not consume a meaningful part of a session")
 }
+
+func TestOvernightBackfillRunsAnHourBeforePreMarket(t *testing.T) {
+	t.Parallel()
+	ny := calendar.Nasdaq.Tz()
+	// Friday 11/27 (early close) disconnects at 20:21 ET; the next wake is
+	// Monday 11/30 at 3:58, and the backfill runs at 3:00 that morning.
+	wake := nextPreMarketOpen(time.Date(2026, 11, 27, 20, 21, 0, 0, ny))
+	assert.Equal(t, time.Date(2026, 11, 30, 3, 58, 0, 0, ny), wake)
+	assert.Equal(t, time.Date(2026, 11, 30, 3, 0, 0, 0, ny), overnightBackfillTime(wake))
+}
+
+func TestReconnectAfterOvernightBackfillOnlyFillsSinceIt(t *testing.T) {
+	t.Parallel()
+	ny := calendar.Nasdaq.Tz()
+	lastData := time.Date(2026, 11, 27, 20, 21, 0, 0, ny)
+	backfilled := time.Date(2026, 11, 30, 3, 0, 0, 0, ny)
+	reconnect := time.Date(2026, 11, 30, 3, 58, 0, 0, ny)
+
+	// Without the 3:00 backfill, the reconnect needs the full backfill.
+	req := planReconnectBackfill(coveredThrough(lastData.UnixNano(), 0), reconnect)
+	assert.True(t, req.full)
+
+	// After it, only the hour since it started, as a windowed fill.
+	req = planReconnectBackfill(coveredThrough(lastData.UnixNano(), backfilled.UnixNano()), reconnect)
+	assert.False(t, req.full)
+	if assert.NotNil(t, req.gap) {
+		assert.True(t, backfilled.Add(-gapFillLead).Equal(req.gap.from), "gap from %v", req.gap.from)
+	}
+
+	// A stream that delivered data after the backfill wins.
+	later := time.Date(2026, 11, 30, 3, 30, 0, 0, ny)
+	assert.Equal(t, later.Unix(), coveredThrough(later.UnixNano(), backfilled.UnixNano()).Unix())
+	assert.True(t, coveredThrough(0, 0).IsZero())
+}
