@@ -46,9 +46,10 @@ func (c *Container) GetGRPCServer() *grpc.Server {
 	if c.grpcServer != nil {
 		return c.grpcServer
 	}
-	c.grpcServer = grpc.NewServer(
+	opts := append([]grpc.ServerOption{
 		grpc.MaxSendMsgSize(c.mktsConfig.GRPCMaxSendMsgSize),
 		grpc.MaxRecvMsgSize(c.mktsConfig.GRPCMaxRecvMsgSize),
-	)
+	}, serverKeepalive()...) // replicas' backfill clients ping it (keepalive.go)
+	c.grpcServer = grpc.NewServer(opts...)
 	return c.grpcServer
 }

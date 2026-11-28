@@ -1,6 +1,7 @@
 package replication
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -171,7 +172,12 @@ func (rs *GRPCReplicationServer) GetWALStream(req *pb.GetWALStreamRequest, strea
 		next = rs.log.NextSeq()
 	}
 	log.Info("replica %s connected: streaming from sequence %d (resumable=%v)", addr, next, req.GetResumable())
-	defer log.Info("[master] closed replication connection: %v", addr)
+	defer func() {
+		// The cause names a transport failure (e.g. a keepalive timeout);
+		// without it a dropped replica is indistinguishable from one that
+		// disconnected on purpose.
+		log.Info("[master] closed replication connection: %v (%v)", addr, context.Cause(ctx))
+	}()
 	id, state := rs.register(addr, next)
 	defer rs.unregister(id)
 
