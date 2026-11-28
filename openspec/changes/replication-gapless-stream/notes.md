@@ -447,4 +447,10 @@ The startup deep pass then read their full history: "missing=175054 revised=11 w
 - *The first run* had 1,778 query errors: the tool's client kept gRPC's 4 MiB response cap.
 - *Where the differences are.* All of 2025 is identical. The differences fall on 16 dates from 2026-08-19 to 2026-11-12. 09-08 (1.40M), 09-18 (269k), 09-09 and 09-23 hold 99.8% of them. The others are 08-19 (70), 08-27 (41), 09-01 (1,328), 09-16 (1,071), 09-17 (1,234), 09-22 (2), 09-30 (295), 10-08 (1,362), 10-15 (40) and 11-12 (1,294). Only-on-p1 rows: 08-25 (182) and 08-26 (37).
 - *What they are.* p1 holds bars captured while still forming. AAPL 09-08: median volume 89% of taichi's, with closes off. These are pre-rollout drops of the later revisions, behind p1's watermarks.
-- *State.* Not healed yet: this needs approval.
+- *Healed (approved), 2026-11-28 08:45 ET.*
+  - Stopped p1 cleanly, backed up the watermarks to `replication_watermarks.json.bak-20261128-1min`, removed all 11,793 `1Min/OHLCV` watermarks, and restarted p1.
+  - The startup deep pass took 7 min: "compared=659095322 missing=4811 revised=1682803 written=1687614". That is exactly what the compare found.
+- *Verified* with `compare --since 2025-01-01 --buckets 1Min/OHLCV`: 652,764,389 rows identical, 0 missing, 0 differing, verdict OK.
+  - *Left over.* 219 rows only on p1 (08-25: 182, 08-26: 37), and 61 buckets only on p1. Backfill writes cannot delete rows.
+  - *Afterwards.* Replication lag 0, gaps 0, no monitor alerts.
+- *Not checked.* `1Sec/OHLCV` history, and tick history other than AAPL.
