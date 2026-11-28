@@ -454,3 +454,52 @@ The startup deep pass then read their full history: "missing=175054 revised=11 w
   - *Left over.* 219 rows only on p1 (08-25: 182, 08-26: 37), and 61 buckets only on p1. Backfill writes cannot delete rows.
   - *Afterwards.* Replication lag 0, gaps 0, no monitor alerts.
 - *Not checked.* `1Sec/OHLCV` history, and tick history other than AAPL.
+
+## Sector and industry classification: decision and rollout (2026-11-28)
+
+**Decisions (user).**
+- The master owns its Postgres, and replicas read it.
+- Yahoo's scheme is the source of truth, filled where Yahoo has no answer.
+
+**How the sources were compared.** On 5,679 active operating companies, weighted by 20-day dollar volume:
+
+| | Nasdaq screener | Yahoo (yfinance) | Massive (SEC SIC) |
+|---|---|---|---|
+| Coverage | 99.4% | ~98% fresh. The 67% in p1's snapshot was failed fetches: 142 of 150 resolved on retry. | 92.6%. Foreign private issuers have none. |
+| History | current only | current only | point in time (`date=`) |
+
+- *Merging.* Translating a finer key into Yahoo's sector is reliable enough: SIC code to Yahoo sector is right for 87% of stocks (93% of dollar volume), Nasdaq industry for 82%. Sector to sector is only 72%.
+- *Massive.* Its knowledge base confirms it has no GICS field.
+
+**Implementation in `fin`.** On branch `chore/fin-stack-build`: `6ec9af4` and `fc9a904`.
+- `fin sync-classification` classifies every active equity in this order:
+  1. Yahoo.
+  2. Otherwise, a sector inferred from the SIC code, or from the Nasdaq industry. The translations are learned from the run's own Yahoo answers.
+- Each equity records `classification_source`, `classified_at` and `sic_code` (new migration `a3c5e7f9b1d2`).
+- Delisted equities lose their pre-Yahoo classification. Unused sectors and industries are removed.
+- *Yahoo fetching.*
+  - One shared pacer and cooldown when throttled.
+  - Dash share classes (`BRK-B`).
+  - Outcomes are told apart: found, unclassified, not found, failed.
+  - Answers are checkpointed to `~/.fin/yahoo-info.jsonl`, so an interrupted run resumes.
+  - The run aborts without writing when more than 5% of requests fail.
+
+**Implementation in the plugin.** `marketstore-watchlists` `43dd0a1`: the sector and industry mappings load in the background, retry with backoff, and reload hourly.
+
+**Rehearsal.** On a restored copy of taichi's database on p1:
+- *Yahoo.* 5,967 classified, 234 known without a sector, 6 unknown, 0 failed, at about 4 requests/s with no throttle pauses.
+- *Inferred.* 114 from SIC, 53 from Nasdaq industry; 73 unclassified.
+- *Resume.* A rerun took 70 s from the checkpoint.
+
+**taichi, 2026-11-28 10:30–10:48 MST.**
+1. Backed up to `~/backups/fa_techan-taichi-20261128-pre-classification.dump`.
+2. Migrated with `uv run db upgrade heads`: taichi's `.venv/bin/alembic` is plain alembic, not fa-techan's wrapper.
+3. Classified: 6,610 equities written. Six Nasdaq sectors and 140 industries removed.
+4. *Result.* 11 sectors, 145 industries all with a sector, and 0 equities whose industry has another sector (845 before).
+5. Deployed `7c7f5b87` and plugin `43dd0a1`. The server loaded 6,134 sector and 5,967 industry mappings.
+
+**p1.** Pending the root-only setup on taichi (`scripts/taichi-sector-reader.sh`: a read-only role, LAN listener, `pg_hba` and firewalld rules for p1 only). Then p1's two DSNs point at taichi.
+
+**Found, not fixed.**
+- *Stale symbols.* taichi's database marks 203 equities active that Massive no longer lists, because `fin sync-symbols` has not run there.
+- *Virtualenv.* taichi's fa-techan virtualenv lost its `alembic` wrapper script.
