@@ -179,6 +179,31 @@ Sampled from taichi's WAL size every 5 s, from 11-25 15:37 ET to 11-26 09:10 ET 
 
 **Still open:** the per-burst volume of a real overnight backfill. The first chance is the night after Friday 11-27 or Monday 11-30. The WAL sampler was stopped on 11-26: the replication log's own `replication_log_bytes` and entry wallclocks now measure the volume exactly.
 
+### 1.2 update: Friday 2026-11-27, a half day (measured 2026-11-28)
+
+Source: the monitor's `health.csv`, every 15 min. Bytes are the growth of taichi's `replication_log_bytes`. That is exact, because no retention deletion happened on 11-27 (`first_seq` stayed 1).
+
+**When the overnight backfill runs.** taichi's "overnight backfill" is the massive feed's reconnect at 03:58 ET on the *next trading day*. It fills the previous trading day. So no backfill ran on Friday night. The one for Friday's session is due on Mon 11-30 at 03:58 ET, before the 06:00 parity.
+
+| Window (ET, 11-27) | Entries | Bytes |
+|---|---|---|
+| 03:58 backfill of Wed 11-25 (14 s, inside 03:45–04:00) | 53 | 421 MiB (about 8 MB per entry) |
+| premarket 04:00–09:30 | 311,026 | 106 MiB |
+| regular 09:30–13:00 (3.5 h) | 1,107,186 | 1,828 MiB (about 520 MiB/h) |
+| after-hours 13:00–17:00 | 243,216 | 75 MiB |
+| 17:00–24:00 | 84 | 10 MiB |
+| **day total** | **1,661,566** | **2,439 MiB** |
+
+- **Busiest 15 minutes.** By bytes, 03:45–04:00: the backfill, 421 MiB in 53 entries. By entries, 10:00–10:15: 98,373 entries, 140 MiB.
+- **Retention at work.** At 11-28 00:00 ET, `first_seq` moved from 1 to 24,085 and the log shrank from 3.23 GB to 2.73 GB. The oldest retained entry is then about 54 h old, over the 48 h `log_max_age`. That is by design: a 256 MiB segment is deleted only once the *next* segment starts past the cutoff. Here the segment from seq 24,085 spans 11-25 23:5x to 11-27 morning.
+- **The monitor's report was wrong here.** It estimated bytes as entries × the retained log's average entry size, and reported 3,025 MiB and a 179 MiB busiest window. It is fixed in `234933d8` (see "Monitor fixes, 2026-11-28").
+
+**Do the rollout values still fit? Yes.** No config change was made.
+- *A full trading day.* Scaling the regular session to 6.5 h gives about 3.4 GiB, plus about 0.2 GiB of extended hours and about 0.4 GiB of backfill, so about 4 GiB. The 11-26 WAL estimate was 7 GB, and 11-25 was busier at the close. Take 4–7 GiB per trading day.
+- *What fills 48 h.* At most 2 trading days, so 8–14 GiB. That is under `log_max_bytes: 20GiB`, so `log_max_age: 48h` binds first, and the size cap stays a safety margin.
+- *Disk.* taichi's `/home` is now 67% used, with 455 GiB free, not the 91% recorded above. 20 GiB is about 4% of the free space.
+- *Still to confirm.* The first full trading day is Mon 11-30, with its backfill on Tue 12-01 at 03:58 ET. Until then 1.2 stays open.
+
 ## 8.2/8.3 monitoring (from 2026-11-26)
 
 `scripts/replication-monitor.sh` runs on p1, started by hand (`start`/`stop`/`status`/`once`), as p1 has no systemd units. It needs p1 → taichi access only: taichi cannot reach p1. State and reports live in `~/.local/share/marketstore/monitor/`.
@@ -202,3 +227,91 @@ Sampled from taichi's WAL size every 5 s, from 11-25 15:37 ET to 11-26 09:10 ET 
 - *The data is not the cause.* p1's `1D/OHLCV` and `1D/SESSIONS` files are byte-identical to taichi's, and both run watchlist plugin `b91e04d` with the same watchlist config.
 - *Hypothesis, unverified.* p1 seeded its watchlists (11,860 symbols, against taichi's 11,794) and then applied taichi's 29,140-entry startup burst through its triggers, as if it were live.
 - *Effect on 8.3.* Its "live session-boundary rankings" check fails until this is understood.
+
+## 8.2 monitoring: Friday 2026-11-27, a half day (checked 2026-11-28 06:20 ET)
+
+Friday closed at 13:00 ET, so it is a **half-day data point, not the 8.2 trading day**. 8.2 needs a full trading day and the next trading day's 06:00 parity. The first full-day verdict is for Mon 11-30, written on Tue 12-01 after 06:05 ET.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Monitor running | pass | pid 484926 since 11-26; restarted 11-28 06:23 ET (under 1 s) to load the fixes below |
+| `health.csv` every 15 min | pass | 179 rows from 11-26 09:45 to 11-28 06:15, no missing slot (only 1 s jitter) |
+| Alerts | pass | `alerts.log` does not exist: no alert was ever raised |
+| Parity 06:00 / 20:30 | pass | 7,890,281 / 8,956,216 rows identical; 0 missing, 0 differing, 0 replica-only; 127 buckets only on p1 (known) |
+| Tick SHA-256 at 20:30 | pass | `AAPL/1Sec/{TRADE,QUOTE}/2026.bin` identical. These are the only tick files on taichi. |
+| Watchlist snapshots | ran, differ | 09:25, 09:35, 12:55, 13:05 all ran at the half-day times (see "8.3: why p1's watchlists differ") |
+| `tool replication status` | pass | cursor 1,690,708 = master 1,690,708, lag 0 |
+| taichi metrics | pass | dropped 0, log_broken 0, first seq 24,085, last 1,690,708, 2.73 GB, oldest entry 54.5 h (per-segment retention, see 1.2) |
+| p1 metrics | pass | replica_gaps 0, unrecoverable_tick_gaps 0, full_resync_required 0 |
+| Max lag in a 15-min sample | pass | 75 entries during the regular session |
+| Parity, run by hand 11-28 06:20 ET | pass | 8,956,216 rows identical, 0 missing / differing / replica-only, 127 p1-only buckets; tick files identical |
+
+**Server logs since 11-27.**
+- *taichi.* One error: the massive websocket was force-disconnected at 20:21 ET (close 1012, outside market hours). It reconnects on Mon 11-30 at 03:58 ET. No panic.
+- *p1.* At 21:06 ET, taichi closed the replication stream. p1 reconnected 10 s later, "requesting sequence 1690708", and resumed with no gap. That is the resumable stream working. The nightly deep pass (22:00 MST) warns about 10 `*/1Sec/OHLCV` buckets holding old local-only rows from 2026-08-26 (known history). No panic.
+
+**Pre-rollout split rows that were missing on p1.**
+- *What was healed.* The 11-27 deep pass wrote 3 missing rows: `GMEX`, `SPRC` and `YAAS` `1D/SPLITS`, all effective 2026-11-27.
+- *Why they were missing.* taichi's split sync wrote them on 11-24 at 07:15 MST, before the rollout, through the old lossy stream. The deep pass only reads periods up to now, so a future-dated row is healed only once its date arrives.
+- *What is still missing.* A SHA-256 of every `*/1D/SPLITS/2026.bin`: 767 files are identical, and p1 lacks one bucket, `RC/1D/SPLITS`. That is a 1:10 reverse split effective **2026-12-08**, written on taichi on 11-24.
+- *Effect.* By the 11-27 pattern, p1 heals it at the 12-08 deep pass (22:00 MST), so p1 serves unadjusted RC during the 12-08 session.
+- *Not fixed here.* Copying it needs approval. The 8.2 parity does not cover `1D/SPLITS`.
+
+## Monitor fixes, 2026-11-28
+
+1. **`tool replication market-day` panicked on every ordinary trading day** (`58b32128`).
+   - *Cause.* `calendar.MarketClose` returned nil for any day not listed in the calendar, and only holidays and early closes are listed.
+   - *Effect.* The monitor reads a non-zero exit as "not a trading day". On Mon 11-30 it would have skipped every parity, tick and snapshot job. It only worked so far because 11-26 was a holiday and 11-27 an early close.
+   - *Fix.* `MarketClose` returns the normal close on ordinary trading days, as its doc says.
+   - *Check.* `TestMarketClose` (calendar) and `TestMarketDayReportsTheRegularClose` (the CLI) both failed before the fix.
+   - *Scope.* `streamtrigger`'s 1D `nasdaq` shelf deadline had the same nil. Neither host configures it (`stream.so` runs only on `*/1Sec/QUOTE|TRADE`, with no filter).
+   - *Deployed.* `./marketstore` and `watchlist.so` were rebuilt on p1 (they must match), and the monitor was restarted. The running p1 server is unchanged. Backups are in `/tmp/opencode/*.bak-20261126`.
+2. **The report's byte volume was estimated, not measured** (`234933d8`). It now uses `log_bytes` growth per interval, and names the intervals where retention deleted a segment.
+3. **A half day would have been written as `READY-8.2-<day>`** (`234933d8`). Friday would have got one on Monday at 06:05 ET. An early close now gets `HALFDAY-8.2-<day>`.
+
+Checks for 2 and 3: `scripts/replication-monitor_test.sh`, with fixtures and a fake binary. It passes 7/7. Against the old report and verdict logic it fails 6 of 7.
+
+## 8.3: why p1's watchlists differ from taichi's (investigated 2026-11-28)
+
+The 11-26 hypothesis does not hold. Replicated writes do reach p1's triggers, and that is correct: live volumes and prices match exactly. The difference has two independent causes.
+
+### Cause 1: baselines are a one-time snapshot taken while their inputs were changing (both hosts)
+
+**How baselines are loaded.**
+- The worker loads a trading day's baselines once: at startup, or one hour after afterhours ends (`refreshBaselines` → `loadBaselines`).
+- The baselines are:
+  - the traditional `PriorClose`, the previous date's `1D/OHLCV` close;
+  - `PrevAfterhoursClose`;
+  - the per-session volume medians, from `1D/SESSIONS`.
+- `refreshBaselines` returns early while the same day is loaded, so a later rewrite of those inputs is never picked up.
+
+**On 11-25 both hosts loaded the 11-27 baselines while those inputs were being rewritten.**
+- *taichi* loaded at 21:50:47 MST, between its REST current-day backfill of 1Min (21:50:25–48) and of 1D (21:50:48–51:06). Its traditional `prior_close` is therefore the ondiskagg 1D close, which is the 15:59 1Min close. That holds for 357 of the 365 traditional symbols at 09:35; the other 8 have no 15:59 bar. Only 71 of 365 equal the final, official 1D close. SOXL's 32.02 matched only because its 15:59 close equals its official close. BNAI shows 8.13 against an official 8.15.
+- *p1* loaded at 21:59:46 MST, while it was replaying taichi's 29,140-entry log from seq 1 (about 21:59:26 to 22:00:41). Its `1D` and `1D/SESSIONS` rows were still in intermediate states, so it captured transient values: SOXL 30.6101 and BNAI 8.635. Neither is an 11-25 close. Only 21 of 371 equal the final 1D close.
+
+**What follows.**
+- *By session and basis.* On 11-27, every session-basis `prior_close` matched (premarket, regular, afterhours: 0 differences). Every `*_TRADITIONAL` list differed in the regular session. `volume_multiple` and `momentum_score` differ because the medians come from the same snapshot (CLIP: median 1,820 on taichi, 1,859 on p1, same volume).
+- *In steady state, with no restart.* The 18:00/21:00 ET load for the next day comes before the 03:58 ET overnight backfill, which rewrites the previous day's 1D with the official close. Both hosts then hold the ondiskagg close, which is the same on both but not the official close the spec asks for. On p1 the load also races replication lag.
+
+### Cause 2: sectors and industries come from each host's own postgres
+
+**The source.** `SECTOR_AGGREGATE` and `INDUSTRY_AGGREGATE` read `fa_techan` at `127.0.0.1:5432` on each host. The query is the same, but the databases are not:
+
+| | taichi | p1 |
+|---|---|---|
+| sectors | 12, Nasdaq-style ("Finance", "Health Care", "Consumer Discretionary", "Telecommunications", "Miscellaneous") | 11, Yahoo-style ("Financial Services", "Healthcare", "Consumer Cyclical", "Communication Services") |
+| equities with a sector | 6,372 (5,949 mappings loaded at start) | 4,184 |
+
+**Consequences.**
+- *The aggregates can never match.* This is why `SECTOR_AGGREGATE` (12 vs 11) and `INDUSTRY_AGGREGATE` (138 vs 130) differ.
+- *No shared source today.* taichi's postgres listens on localhost only, and p1 gets "no route to host" on 5432.
+
+### Hypothesis (c), p1's extra symbols: not a cause
+
+- *Seeding.* Both hosts seeded the same 10,911 symbols from 11-25 bars. p1's 66 extra symbols have no current bars, and `view` drops a symbol whose `LiveDay` is not the ranked day.
+- *Lists.* At 11-28 06:30 ET (quiet), `PCT_CHANGE_UP/DOWN` and `VOLUME_UP/DOWN` are byte-identical on both hosts. Only the two aggregates and the median-based `MOMENTUM` / `RELATIVE_VOLUME` differ.
+
+### Friday's snapshots: the difference persisted and did not converge
+
+- *Persisted.* 09:25 and 13:05 have 4 of 8 lists identical, and 09:35 and 12:55 have 0 of 20. The traditional baselines were set at the 11-27 day roll from the 11-25 snapshot, and nothing reloaded them.
+- *Monday.* The 11-30 baselines were loaded on Friday at 16:00:03 (taichi) and 16:00:16 MST (p1), with p1 at lag 0. Monday may therefore match on traditional `prior_close`. Both hosts will still be wrong against the official close once the 03:58 ET backfill rewrites 11-27.
