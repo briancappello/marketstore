@@ -219,6 +219,10 @@ func newRewinder(medianWindow int, strategyConfig map[string]map[string]interfac
 	if Facts != nil {
 		Facts.OnChange(r.invalidate)
 	}
+	// Facts change notices come only from the leader's own facts job; 1D
+	// writes (official closes, a replica applying its master's rows) arrive
+	// through the trigger.
+	onBaselineInputChange(r.invalidateFrom)
 	return r
 }
 
@@ -408,6 +412,12 @@ func (r *rewinder) invalidate(changed []sessionfacts.Entry) {
 			earliest = d
 		}
 	}
+	r.invalidateFrom(earliest)
+}
+
+// invalidateFrom drops cached results for trading dates >= earliest (unix
+// seconds of midnight New York).
+func (r *rewinder) invalidateFrom(earliest int64) {
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
 	for key, el := range r.cache {

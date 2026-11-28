@@ -286,6 +286,16 @@ triggers:
     # No config: watchlists and curation are configured on the watchlist
     # bgworker below. Every watchlist the plugin registers runs.
 
+  # Baseline inputs: when a settled date's 1D close or session facts are
+  # rewritten (the overnight backfill's official close, late facts, a replica
+  # applying its master's rows), the bgworker reloads the baselines that use
+  # them on its next ranking tick. Without these, baselines keep the rows as
+  # they were when first loaded. Keep them on replicas too.
+  - module: watchlist.so
+    on: "*/1D/OHLCV"
+  - module: watchlist.so
+    on: "*/1D/SESSIONS"
+
   # Aggregation chain
   - module: ondiskagg.so
     on: "*/1Sec/OHLCV"

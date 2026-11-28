@@ -71,6 +71,13 @@ func (t *WatchlistTrigger) Fire(keyPath string, records []trigger.Record) {
 		return
 	}
 
+	// 1D/OHLCV and 1D/SESSIONS are not ticks: they are the inputs baselines
+	// are derived from (see baseline_inputs.go).
+	if isBaselineInput(timeframe, attrGroup) {
+		noteBaselineInputs(symbol, int16(year), records)
+		return
+	}
+
 	// Resolve the cached TBK for this (symbol, timeframe, attrGroup) tuple.
 	// Falls back to allocating one if not yet cached.
 	tbk := tbkCache.Get(symbol, timeframe, attrGroup)

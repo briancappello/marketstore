@@ -28,6 +28,9 @@ type WatchlistWorker struct {
 
 	// baselineDate is the trading day whose baselines were last loaded.
 	baselineDate time.Time
+	// baselineMu serializes baseline loads, so a full load that read older
+	// rows can never finish after, and overwrite, a reload of newer ones.
+	baselineMu sync.Mutex
 
 	// rewind serves rankings for windows other than the live one.
 	rewindOnce sync.Once
@@ -142,6 +145,7 @@ func (w *WatchlistWorker) Run() {
 		case <-timer.C:
 			w.TriggerRanking()
 			w.baselineDate = w.refreshBaselines(w.baselineDate, nil)
+			w.reloadChangedBaselines()
 		case <-w.ctx.Done():
 			timer.Stop()
 			log.Info("[watchlist] worker shutting down")
@@ -167,8 +171,37 @@ func (w *WatchlistWorker) refreshBaselines(loaded time.Time, symbols []string) t
 		symbols = DiscoverSymbols(catDir)
 	}
 	mgr, facts, at, window := Manager, Facts, now(), w.config.MedianWindow
-	go loadBaselines(mgr, facts, catDir, symbols, day, window, at)
+	go func() {
+		w.baselineMu.Lock()
+		defer w.baselineMu.Unlock()
+		loadBaselines(mgr, facts, catDir, symbols, day, window, at)
+	}()
 	return day.Date
+}
+
+// reloadChangedBaselines reloads, in the background, the baselines of every
+// symbol whose 1D inputs changed since the last reload. If a load is still
+// running, the symbols wait for the next tick.
+func (w *WatchlistWorker) reloadChangedBaselines() {
+	if Facts == nil {
+		return
+	}
+	symbols := drainChangedInputs()
+	if len(symbols) == 0 {
+		return
+	}
+	if !w.baselineMu.TryLock() {
+		requeueChangedInputs(symbols)
+		return
+	}
+	mgr, facts, date, window := Manager, Facts, w.baselineDate, w.config.MedianWindow
+	go func() {
+		defer w.baselineMu.Unlock()
+		start := time.Now()
+		reloadBaselines(mgr, facts, symbols, date, window, now())
+		log.Info("[watchlist] reloaded baselines of %d symbols whose 1D inputs changed in %v",
+			len(symbols), time.Since(start).Round(time.Millisecond))
+	}()
 }
 
 // startSessionFacts creates the session facts service and, on the leader,
