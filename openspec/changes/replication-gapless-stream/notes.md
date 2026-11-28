@@ -433,3 +433,18 @@ The startup deep pass then read their full history: "missing=175054 revised=11 w
 **Verified.**
 - *Files.* All 12,665 `*/1D/SESSIONS/*.bin` year files are byte-identical on both hosts, with none missing.
 - *Rows.* `compare --since 2025-01-01 --buckets 1D/SESSIONS` (new flag, `9508e330`): 1,317,153 rows identical, 0 missing, 0 differing.
+
+**1Min history check (2026-11-28, `compare --since 2025-01-01 --buckets 1Min/OHLCV`, 6 min; fixes in `7a9cfdbd`):**
+
+| | Rows |
+|---|---|
+| identical | 651,076,775 |
+| missing on p1 | 4,811 |
+| differing | 1,682,803 (in 8,729 buckets) |
+| only on p1 | 219 |
+| query errors | 0 |
+
+- *The first run* had 1,778 query errors: the tool's client kept gRPC's 4 MiB response cap.
+- *Where the differences are.* All of 2025 is identical. The differences fall on 16 dates from 2026-08-19 to 2026-11-12. 09-08 (1.40M), 09-18 (269k), 09-09 and 09-23 hold 99.8% of them. The others are 08-19 (70), 08-27 (41), 09-01 (1,328), 09-16 (1,071), 09-17 (1,234), 09-22 (2), 09-30 (295), 10-08 (1,362), 10-15 (40) and 11-12 (1,294). Only-on-p1 rows: 08-25 (182) and 08-26 (37).
+- *What they are.* p1 holds bars captured while still forming. AAPL 09-08: median volume 89% of taichi's, with closes off. These are pre-rollout drops of the later revisions, behind p1's watermarks.
+- *State.* Not healed yet: this needs approval.
