@@ -498,8 +498,32 @@ The startup deep pass then read their full history: "missing=175054 revised=11 w
 4. *Result.* 11 sectors, 145 industries all with a sector, and 0 equities whose industry has another sector (845 before).
 5. Deployed `7c7f5b87` and plugin `43dd0a1`. The server loaded 6,134 sector and 5,967 industry mappings.
 
-**p1.** Pending the root-only setup on taichi (`scripts/taichi-sector-reader.sh`: a read-only role, LAN listener, `pg_hba` and firewalld rules for p1 only). Then p1's two DSNs point at taichi.
+**p1.** Pending the network design (the user is designing it on the OpenWrt router). The address-pinned root script was withdrawn: p1 has no static IP. What a replica needs is in `docs/replication/replica-postgres.md` (`c92be4f7`).
 
 **Found, not fixed.**
 - *Stale symbols.* taichi's database marks 203 equities active that Massive no longer lists, because `fin sync-symbols` has not run there.
 - *Virtualenv.* taichi's fa-techan virtualenv lost its `alembic` wrapper script.
+
+## `fin sync`: one symbol-management command (2026-11-28)
+
+`fin` `b9455e2` replaces `fin init`, `fin sync-symbols` and `fin sync-classification`. It also initialises an empty database.
+
+**The universe.** Every symbol Massive lists and Alpaca can trade, which is exactly what the master's massive bgworker ingests: `asset WHERE is_active AND delisted IS NULL`.
+- *Delisted.* A symbol both vendors dropped, as before. Guarded at 2% of the active universe.
+- *Deactivated.* A symbol out of the universe for any other reason. It is reactivated when it returns. Same guard.
+
+**Classification.** The Yahoo-scheme classification runs as a phase.
+
+**Fixes on the way.**
+- Alpaca's response is read as raw JSON. alpaca-py's exchange enum rejected the Texas Stock Exchange (`TXSE`), which failed every sync on both hosts. TXSE listings (13) are now added.
+- Wikipedia fetches retry when throttled (`5de60db`).
+
+**Verified.** Both runs end with the active universe equal to Massive ∩ tradable-on-Alpaca: 12,016 symbols, no difference either way.
+- *Empty database.* 12,016 created.
+- *Copy of taichi.* First run: +632, 60 deactivated, 1 reactivated, and 351 delistings refused by the guard. Second run with `--force-delist`: 351 delisted.
+
+**taichi.** Dry run only, which writes nothing. It shows the same plan. Applying it needs approval.
+
+**Not done.**
+- *Universe changes need a restart.* marketstore reads the universe once, at startup (massive `NewBgWorker`), so a sync that changes it takes effect at the next restart. Reloading it live would be a marketstore change.
+- *DJI components.* Wikipedia no longer lists them with tickers, so that index sync fails with a clear error. The other four indexes sync.
