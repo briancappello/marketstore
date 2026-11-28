@@ -372,3 +372,37 @@ The 11-26 hypothesis does not hold. Replicated writes do reach p1's triggers, an
 - *What.* taichi reset p1's idle replication stream twice, 9.6 h apart (11-27 19:06 and 11-28 04:41 MST). Both times p1 resumed at the exact next sequence.
 - *Likely cause.* Neither side sets a gRPC keepalive, so an idle-connection reset is plausible.
 - *Effect.* Harmless with the resumable stream.
+
+## Replication keepalive (`9c13cd19`, deployed 2026-11-28 07:57 ET)
+
+**What the two resets were.**
+- At 04:41:26, taichi logged "closed replication connection" and p1 logged "connection reset by peer" within 3 ms of each other.
+- At 19:05:34, taichi closed the stream first, and p1 noticed 26 s later.
+- Neither log gave a reason. Neither host logged a network event. p1 reaches taichi over Wi-Fi (`wlp9s0f0`, -60 dBm, 0% loss in a 100-ping test), and taichi is on Ethernet.
+- **The cause is still unknown.**
+
+**The change.**
+- *Pings.* Replica and master ping every 30 s, with a 20 s ack timeout. This covers the replication stream and the backfill's query connection.
+- *Server policy.* Both gRPC servers accept pings as often as every 10 s. With gRPC's default policy (5 min), a pinging client is closed with `too_many_pings`.
+- *Logging.* The master now logs the context cause when a stream ends, so the next reset will say why.
+
+**Proof.**
+- `TestIdleConnectionSurvivesKeepalivePings`: under the default server policy the idle connection is closed with `ENHANCE_YOUR_CALM "too_many_pings"` within 40 s. Under `serverKeepalive` it survives 80 s.
+- *Live.* After both hosts restarted, there were no GOAWAY messages, and the stream was up with lag 0.
+
+## Sector and industry data: where it comes from (investigated 2026-11-28)
+
+`SECTOR_AGGREGATE` and `INDUSTRY_AGGREGATE` read `fa_techan` on each host. That is the dashboard's database. The `fin` database, the home `fin-stack` D3 intends for symbol data, has the schema on both hosts but no rows.
+
+**Two writers, two taxonomies.** Both are in `~/dev/fin`:
+- *`fin init`.* It reads the Nasdaq screener API (`api.nasdaq.com/api/screener/stocks`) for AMEX, NYSE and NASDAQ GS/GM/CM, and gets the **Nasdaq taxonomy**: 12 sectors, including "Finance", "Health Care", "Telecommunications" and "Miscellaneous".
+- *`fin sync-symbols`.* It reads Massive, Alpaca and Nasdaq submarkets, and classifies only equities with `sector_id IS NULL`, through yfinance: the **Yahoo taxonomy**, 11 sectors.
+- *What decides.* The first command to classify an equity wins permanently, because nothing reclassifies it.
+
+**Which host got which.**
+- *taichi* was seeded by `fin init`. Its asset ids run in init's exchange order: AMEX 1–274, NYSE, GS, GM, CM. It has 0 Yahoo sector names. It has no shell history for these commands, so why later `sync-symbols` runs added no Yahoo names is unverified.
+- *p1* was built by `reset_db.sh` and then `uv run fin sync-symbols`, several times, per its shell history. It was never initialised with `fin init`. Its ids are interleaved: 3,788 runs of exchanges.
+
+**Also found (fin, Tier 4).**
+- *Mixed parents.* `fin init` links each industry to the first sector it meets. On taichi, 845 equities have an industry whose parent sector is not their own sector.
+- *Mixed taxonomies to come.* Any future yfinance enrichment would put Yahoo names into taichi's Nasdaq table.
