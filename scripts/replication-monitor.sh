@@ -7,6 +7,8 @@
 #   scripts/replication-monitor.sh stop     stop the background monitor
 #   scripts/replication-monitor.sh status   latest health line, alerts, reports
 #   scripts/replication-monitor.sh once     run every check now, in the foreground
+#   scripts/replication-monitor.sh report [DAY]           (re)write DAY's report
+#   scripts/replication-monitor.sh ready-check DAY NEXT   the 8.2 verdict for DAY
 #
 # Schedule (America/New_York):
 #   every 15 min        health: drops, broken log, lag, gaps, p1 up; taichi log volume
@@ -72,9 +74,11 @@ metric() {
 
 trading_day() { "$BIN" tool replication market-day ${1:+--date "$1"} >/dev/null 2>&1; }
 
-# close_hhmm prints the regular close (HHMM, New York) of today, e.g. 1600 or 1300.
+# close_hhmm [DAY] prints the regular close (HHMM, New York) of DAY (default
+# today), e.g. 1600 or 1300.
 close_hhmm() {
-	"$BIN" tool replication market-day 2>/dev/null | sed -n 's/.*regular close \([0-9][0-9]\):\([0-9][0-9]\).*/\1\2/p'
+	"$BIN" tool replication market-day ${1:+--date "$1"} 2>/dev/null |
+		sed -n 's/.*regular close \([0-9][0-9]\):\([0-9][0-9]\).*/\1\2/p'
 }
 
 state_get() { cat "$STATE_DIR/$1" 2>/dev/null || echo "${2:-}"; }
@@ -200,8 +204,9 @@ report() {
 import csv, os, sys, glob
 state, day = sys.argv[1], sys.argv[2]
 d = os.path.join(state, "reports", day)
-rows = [r for r in csv.DictReader(open(os.path.join(state, "health.csv"))) if r["time_ny"].startswith(day)] \
+allrows = list(csv.DictReader(open(os.path.join(state, "health.csv")))) \
     if os.path.exists(os.path.join(state, "health.csv")) else []
+rows = [r for r in allrows if r["time_ny"].startswith(day)]
 def num(r, k):
     try: return int(r[k])
     except Exception: return None
@@ -214,17 +219,33 @@ if rows:
     lags = [num(r, "lag") for r in rows if num(r, "lag") is not None]
     drops = [num(r, "dropped") for r in rows if num(r, "dropped") is not None]
     print(f"max lag: {max(lags) if lags else 'NA'} entries; dropped at end: {drops[-1] if drops else 'NA'}")
-    seqs = [(num(r, "master_last_seq"), num(r, "master_first_seq"), num(r, "log_bytes")) for r in rows]
-    seqs = [s for s in seqs if None not in s]
-    if len(seqs) >= 2:
-        n = seqs[-1][0] - seqs[0][0]
-        last, first, b = seqs[-1]
-        avg = b / max(1, last - first + 1)
-        print(f"replication volume (1.2): {n} entries, about {n*avg/2**20:.0f} MiB (avg {avg/1024:.1f} KiB/entry)")
-        peak = 0
-        for (a, _, _), (c, _, _) in zip(seqs, seqs[1:]):
-            peak = max(peak, c - a)
-        print(f"  busiest 15 min: {peak} entries, about {peak*avg/2**20:.0f} MiB")
+    # Each interval runs from the previous check (the day's first starts at the
+    # last check of the day before). Bytes are the growth of log_bytes, exact
+    # unless retention deleted a segment in between (first_seq moved): entry
+    # sizes range from bytes to megabytes, so they are never estimated.
+    start = allrows.index(rows[0])
+    span = allrows[max(0, start - 1):start + len(rows)]
+    ivs = []
+    for a, b in zip(span, span[1:]):
+        la, fa, ba = num(a, "master_last_seq"), num(a, "master_first_seq"), num(a, "log_bytes")
+        lb, fb, bb = num(b, "master_last_seq"), num(b, "master_first_seq"), num(b, "log_bytes")
+        if None in (la, lb):
+            continue
+        nbytes = bb - ba if None not in (fa, fb, ba, bb) and fa == fb else None
+        ivs.append((b["time_ny"][11:16], lb - la, nbytes))
+    if ivs:
+        n = sum(e for _, e, _ in ivs)
+        known = [(t, e, b) for t, e, b in ivs if b is not None]
+        unknown = [(t, e) for t, e, b in ivs if b is None]
+        print(f"replication volume (1.2): {n} entries, {sum(b for *_, b in known)/2**20:.0f} MiB appended")
+        if unknown:
+            print(f"  bytes not counted: {len(unknown)} interval(s) with a retention deletion, "
+                  f"{sum(e for _, e in unknown)} entries ({', '.join(t for t, _ in unknown)})")
+        t, e, b = max(ivs, key=lambda iv: iv[1])
+        print(f"  busiest 15 min by entries: {e} entries to {t}" + (f", {b/2**20:.0f} MiB" if b is not None else ""))
+        if known:
+            t, e, b = max(known, key=lambda iv: iv[2])
+            print(f"  busiest 15 min by bytes: {b/2**20:.0f} MiB to {t}, {e} entries")
 for f in sorted(glob.glob(os.path.join(d, "parity-*.txt")) + glob.glob(os.path.join(d, "ticks.txt"))):
     lines = open(f).read().strip().splitlines()
     print(f"\n{os.path.basename(f)}:")
@@ -237,10 +258,15 @@ EOF
 
 # ready_check DAY: 8.2 for trading day DAY passes when its health stayed clean,
 # its evening parity and tick hashes passed, and the next morning's parity passed.
+# 8.2 asks for a full trading day: an early close passes as HALFDAY-8.2-DAY,
+# a data point that does not satisfy 8.2.
 ready_check() {
-	local day="$1" next="$2" d n
+	local day="$1" next="$2" d n marker=READY close
 	d="$STATE_DIR/reports/$day"; n="$STATE_DIR/reports/$next"
-	[[ -f "$STATE_DIR/READY-8.2-$day" ]] && return
+	[[ -f "$STATE_DIR/READY-8.2-$day" || -f "$STATE_DIR/HALFDAY-8.2-$day" ]] && return
+	close="$(close_hhmm "$day")"
+	[[ -n "$close" ]] || return # cannot tell the session length: decide later
+	[[ "$close" == 1600 ]] || marker=HALFDAY
 	grep -q '^exit=0' "$d/parity-evening.txt" 2>/dev/null || return
 	grep -q '^exit=0' "$d/ticks.txt" 2>/dev/null || return
 	grep -q '^exit=0' "$n/parity-morning.txt" 2>/dev/null || return
@@ -248,12 +274,16 @@ ready_check() {
 		return
 	fi
 	{
-		echo "8.2 passed for trading day $day:"
+		if [[ "$marker" == READY ]]; then
+			echo "8.2 passed for trading day $day:"
+		else
+			echo "Half day $day (regular close ${close:0:2}:${close:2:2}) passed; it does not satisfy 8.2, which needs a full trading day:"
+		fi
 		echo "- no alerts from $day through the next morning's parity on $next"
 		echo "- evening parity, tick hashes and the next morning's parity all exit 0"
 		echo "Reports: $d and $n. 8.3 also needs the watchlist checks reviewed (rankings-*.txt)."
-	} > "$STATE_DIR/READY-8.2-$day"
-	notify "8.2 passed for $day; see $STATE_DIR/READY-8.2-$day"
+	} > "$STATE_DIR/$marker-8.2-$day"
+	notify "$(head -1 "$STATE_DIR/$marker-8.2-$day") See $STATE_DIR/$marker-8.2-$day"
 }
 
 # once_per KEY CMD...: run CMD at most once per key (e.g. date + job).
@@ -337,13 +367,19 @@ case "${1:-}" in
 		else
 			echo "alerts: 0"
 		fi
-		ls -1 "$STATE_DIR"/READY-* 2>/dev/null
+		ls -1 "$STATE_DIR"/READY-* "$STATE_DIR"/HALFDAY-* 2>/dev/null
 		ls -1d "$STATE_DIR"/reports/* 2>/dev/null | tail -3
+		;;
+	report)
+		day="${2:-$(today)}"; report "$day"; cat "$(reportdir "$day")/REPORT.md"
+		;;
+	ready-check)
+		ready_check "$2" "$3"; ls -1 "$STATE_DIR"/READY-* "$STATE_DIR"/HALFDAY-* 2>/dev/null
 		;;
 	once)
 		health; parity manual; ticks; rankings manual; report "$(today)"
 		cat "$(reportdir)/REPORT.md"
 		;;
 	run) run ;;
-	*) sed -n '2,22p' "$0"; exit 2 ;;
+	*) sed -n '2,23p' "$0"; exit 2 ;;
 esac
