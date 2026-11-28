@@ -25,7 +25,9 @@ func HealRange(ctx context.Context, api MasterAPI, readLocal ReadFunc, write Wri
 	if err != nil {
 		return 0, err
 	}
-	if cutoff, ok := lastClosedBarEpoch(tbk, now); ok {
+	// Events (corporate actions) are complete when written, and are often
+	// dated in the future: only bars wait for their period to close.
+	if cutoff, ok := lastClosedBarEpoch(tbk, now); ok && !isEventBucket(tbk) {
 		closed := func(e int64) bool { return e <= cutoff }
 		csm = FilterCSM(csm, closed)
 	}

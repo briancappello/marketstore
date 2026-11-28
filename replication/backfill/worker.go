@@ -53,6 +53,9 @@ func BackfillBucket(
 	ctx context.Context, api MasterAPI, readLocal ReadFunc, write WriteFunc, wm *Watermarks,
 	tbk string, now int64, lookback time.Duration, isVariable bool,
 ) (rows int, advanced bool, err error) {
+	if isEventBucket(tbk) && !isVariable {
+		return backfillEvents(ctx, api, readLocal, write, wm, tbk, now)
+	}
 	prev := wm.Get(tbk)
 	start := prev + 1 - int64(lookback.Seconds())
 	if start < 1 {
