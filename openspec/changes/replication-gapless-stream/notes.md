@@ -255,7 +255,7 @@ Friday closed at 13:00 ET, so it is a **half-day data point, not the 8.2 trading
 - *Why they were missing.* taichi's split sync wrote them on 11-24 at 07:15 MST, before the rollout, through the old lossy stream. The deep pass only reads periods up to now, so a future-dated row is healed only once its date arrives.
 - *What is still missing.* A SHA-256 of every `*/1D/SPLITS/2026.bin`: 767 files are identical, and p1 lacks one bucket, `RC/1D/SPLITS`. That is a 1:10 reverse split effective **2026-12-08**, written on taichi on 11-24.
 - *Effect.* By the 11-27 pattern, p1 heals it at the 12-08 deep pass (22:00 MST), so p1 serves unadjusted RC during the 12-08 session.
-- *Not fixed here.* Copying it needs approval. The 8.2 parity does not cover `1D/SPLITS`.
+- *Fixed in the design, not by copying* (see "Fixes deployed 2026-11-28"). The 8.2 parity does not cover `1D/SPLITS`.
 
 ## Monitor fixes, 2026-11-28
 
@@ -315,3 +315,60 @@ The 11-26 hypothesis does not hold. Replicated writes do reach p1's triggers, an
 
 - *Persisted.* 09:25 and 13:05 have 4 of 8 lists identical, and 09:35 and 12:55 have 0 of 20. The traditional baselines were set at the 11-27 day roll from the 11-25 snapshot, and nothing reloaded them.
 - *Monday.* The 11-30 baselines were loaded on Friday at 16:00:03 (taichi) and 16:00:16 MST (p1), with p1 at lag 0. Monday may therefore match on traditional `prior_close`. Both hosts will still be wrong against the official close once the 03:58 ET backfill rewrites 11-27.
+
+## Fixes deployed 2026-11-28 (approved; markets closed)
+
+### 1. The overnight backfill runs at 03:00 ET (`eec0056d`)
+
+- *Before.* The backfill for an overnight outage started with the 03:58 reconnect, so its historical writes (421 MiB on 11-27) raced the first live bars at 04:00.
+- *After.* The sleeping retry loop queues it at 03:00 ET and still reconnects at 03:58. A successful full backfill records when it started, so the 03:58 reconnect fills only the 59 minutes since.
+- *On failure.* If the 03:00 backfill fails, the reconnect runs the full backfill as before.
+- *Why not just move the reconnect to 03:00.* Outside 04:00–20:00, a disconnect sleeps until the *next trading day's* wake time. A vendor drop between 03:00 and 04:00 would then leave the stream down for the whole day.
+- *Tests.* `TestOvernightBackfillRunsAnHourBeforePreMarket` and `TestReconnectAfterOvernightBackfillOnlyFillsSinceIt`.
+- *First live run.* Mon 11-30 at 03:00 ET, filling Friday.
+
+### 2. Future-dated corporate actions now replicate (`652f8394`)
+
+**Why `RC/1D/SPLITS` never reached p1.** RC is a 1:10 reverse split effective 12-08.
+1. *The write was lost.* taichi's split sync wrote it on 11-24 at 07:15:57 MST, 4 s after taichi restarted. p1's legacy stream was disconnected from 07:14:49 to 07:16:09, and that protocol resumes at the tail.
+2. *The backfill could not repair it.* `BackfillBucket` reads `[watermark, now]` and keeps closed bars only; `HealRange` (the change-ledger heal) keeps closed bars only too. An event dated in the future is outside both. The deep pass reaches it only once its 1D "bar" has closed, which is the *end* of the effective day. GMEX, SPRC and YAAS (effective 11-27) were healed at 00:00 ET on 11-28 that way.
+
+**This was a design gap, not only a pre-rollout leftover.** Under the gapless design, a split write lost past log retention would be dropped by the ledger heal, and never retried.
+
+**The fix.**
+- Buckets whose attribute group is a `corpaction` kind are events, not bars.
+- Every backfill pass compares their whole range, future dates included, with the local rows and writes the rows that differ. The watermark stays at or below now.
+- `HealRange` keeps future-dated events. Bars keep the closed-bar rule.
+
+**Tests and proof.**
+- *Tests.* `TestBackfillCopiesFutureDatedSplits` (shallow and deep pass) and `TestHealRangeKeepsFutureDatedSplits`. Both failed before the fix.
+- *Live.* p1's first pass after the restart (04:51:48 MST) wrote `RC/1D/SPLITS`. Its SHA-256 equals taichi's (`c4af6ecd…`).
+
+### 3. Watchlist baselines reload when their 1D inputs change (`727670ca`)
+
+**The mechanism.**
+- *Triggers.* The watchlist trigger is now also bound to `*/1D/OHLCV` and `*/1D/SESSIONS`. These entries are in `mkts.yml` on both hosts, with backups at `mkts.yml.bak-20261128`.
+- *Which writes count.* A write to a date whose afterhours has ended marks the symbol. A date's own 1D bar, rewritten every minute while it forms, is ignored until then.
+- *The reload.* On the next ranking tick, the worker reloads the marked symbols' baselines for their live day and for the loaded next day. Full loads and reloads are serialized, so an older full load cannot overwrite a newer reload.
+- *The rewind cache.* The same signal drops the rewind cache from the changed date. On a replica that cache was never invalidated, because `OnChange` fires only for the leader's own facts writes.
+
+**Tests.** The `baseline_inputs_test.go` tests replay the 11-25 sequence: the baselines load with the ondiskagg close 8.13, and the official close 8.15 is written afterwards.
+- *With the fix.* The traditional `prior_close` is 8.15.
+- *With the trigger path disabled.* It stays at 8.13, and all three tests fail.
+
+**Deploy.**
+- *taichi.* `727670ca` via `deploy.sh`, restarted at 06:49 ET. The startup sequence reproduced the incident and corrected itself:
+  - 04:49:39 MST: baselines loaded;
+  - 04:49:58: the REST 1D backfill complete;
+  - 04:50:40: "reloaded baselines of 11326 symbols whose 1D inputs changed in 1.807s".
+- *p1.* Built at `727670ca` (binary and `watchlist.so`), shut down cleanly ("exiting..."), and started with `start.sh` at 06:51 ET. It resumed at sequence 1712526 with lag 0 and gaps 0, and seeded 10,544 symbols, the same as taichi.
+
+**Result at a quiet time (11-28 06:53 ET).**
+- *Live lists.* 6 of 8 are byte-identical, `MOMENTUM` and `RELATIVE_VOLUME` included (it was 4 of 8 before).
+- *Rewound 11-27 regular session, as of 12:55.* 16 of 20 are identical, every `*_TRADITIONAL` list included. BNAI's traditional `prior_close` is 8.15, the official close, on both hosts.
+- *What still differs.* Only `SECTOR_AGGREGATE*` and `INDUSTRY_AGGREGATE*`: cause 2, the host-local postgres. No decision on that yet.
+
+**Observed, not fixed (Tier 4).**
+- *What.* taichi reset p1's idle replication stream twice, 9.6 h apart (11-27 19:06 and 11-28 04:41 MST). Both times p1 resumed at the exact next sequence.
+- *Likely cause.* Neither side sets a gRPC keepalive, so an idle-connection reset is plausible.
+- *Effect.* Harmless with the resumable stream.
