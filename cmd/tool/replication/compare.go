@@ -182,8 +182,11 @@ type CompareResult struct {
 	BucketsWithDiffs            int
 	OnlyOnReplica, OnlyOnMaster int
 	Examples                    []Diff
-	examplesLimit               int
-	mu                          sync.Mutex
+	// ByDay counts the rows that differ per New York date and kind (missing,
+	// differing, replica-only), so a pattern shows even past the examples.
+	ByDay         map[string]map[string]int
+	examplesLimit int
+	mu            sync.Mutex
 }
 
 // OK is true when the replica holds every master row, with the same values.
@@ -201,6 +204,18 @@ func (r *CompareResult) Write(w goio.Writer) {
 	fmt.Fprintf(w, "rows only on the replica: %d\nbuckets with differences: %d\n", r.ReplicaOnly, r.BucketsWithDiffs)
 	fmt.Fprintf(w, "schema issues: %d\nquery errors: %d\n", r.SchemaIssues, r.QueryErrors)
 	fmt.Fprintf(w, "buckets only on the master: %d\nbuckets only on the replica: %d\n", r.OnlyOnMaster, r.OnlyOnReplica)
+	if len(r.ByDay) > 0 {
+		days := make([]string, 0, len(r.ByDay))
+		for d := range r.ByDay {
+			days = append(days, d)
+		}
+		sort.Strings(days)
+		fmt.Fprintln(w, "rows that differ, by date: missing / differing / replica-only")
+		for _, d := range days {
+			c := r.ByDay[d]
+			fmt.Fprintf(w, "  %s %d / %d / %d\n", d, c["missing"], c["differing"], c["replica-only"])
+		}
+	}
 	for _, d := range r.Examples {
 		when := ""
 		if d.Epoch != 0 {
@@ -216,6 +231,16 @@ func (r *CompareResult) Write(w goio.Writer) {
 }
 
 func (r *CompareResult) note(d Diff) {
+	if d.Epoch != 0 {
+		day := time.Unix(d.Epoch, 0).In(calendar.Nasdaq.Tz()).Format("2006-01-02")
+		if r.ByDay == nil {
+			r.ByDay = map[string]map[string]int{}
+		}
+		if r.ByDay[day] == nil {
+			r.ByDay[day] = map[string]int{}
+		}
+		r.ByDay[day][d.Kind]++
+	}
 	if len(r.Examples) < r.examplesLimit {
 		r.Examples = append(r.Examples, d)
 	}

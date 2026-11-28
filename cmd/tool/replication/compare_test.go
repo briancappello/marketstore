@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	tool "github.com/alpacahq/marketstore/v4/cmd/tool/replication"
+	"github.com/alpacahq/marketstore/v4/contrib/calendar"
 	"github.com/alpacahq/marketstore/v4/utils/io"
 )
 
@@ -68,9 +69,12 @@ func TestCompareFindsMissingDifferingAndExtraRows(t *testing.T) {
 	require.Equal(t, 1, res.Identical)
 	require.Equal(t, 2, res.Missing, "A at e+120, and all of B")
 	require.Equal(t, 1, res.Differing)
+	day := time.Unix(e, 0).In(calendar.Nasdaq.Tz()).Format("2006-01-02")
+	require.Equal(t, map[string]map[string]int{day: {"missing": 2, "differing": 1, "replica-only": 1}}, res.ByDay)
 	var out bytes.Buffer
 	res.Write(&out)
 	require.Contains(t, out.String(), "DIFFERENT")
+	require.Contains(t, out.String(), day+" 2 / 1 / 1")
 }
 
 func TestTradingDaysStartSkipsHolidaysAndWeekends(t *testing.T) {

@@ -175,8 +175,14 @@ func targetSeq(ctx context.Context, o options, cfg *utils.MktsConfig) (uint64, e
 	return 0, errors.New("set --seq or --master-tail")
 }
 
+const maxRecvMsgSize = 1 << 30
+
 func dial(addr string) (*grpc.ClientConn, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// A bucket's whole window comes back in one response: a year of 1Min bars
+	// for a liquid symbol exceeds gRPC's 4 MiB default. Match the server's
+	// default send cap (1 GiB).
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsgSize)))
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", addr, err)
 	}
