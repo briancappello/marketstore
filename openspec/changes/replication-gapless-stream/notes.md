@@ -159,6 +159,7 @@ The same commands as 0.1.
 7. **Spot check (SHA-256 of year files).**
    - `AAPL/1D/OHLCV`, `AAPL/1D/SESSIONS` and `MSFT/1D/OHLCV` are identical.
    - `AAPL/1Min`, `NVDA/1Min` and `SPY/1Sec` differ, but only in records from 2026-09-08/09/18/23. That is history from before this change and outside the deep pass's window. October and November are identical.
+   - **Correction (2026-11-28):** this spot check generalised from a few files and was wrong for `1D/SESSIONS`. p1 was missing 175,054 session-fact rows from 2025 through July 2026. See "Pre-rollout history holes".
 
 ## 1.2 Replication volume on taichi (partial, 2026-11-26)
 
@@ -406,3 +407,29 @@ The 11-26 hypothesis does not hold. Replicated writes do reach p1's triggers, an
 **Also found (fin, Tier 4).**
 - *Mixed parents.* `fin init` links each industry to the first sector it meets. On taichi, 845 equities have an industry whose parent sector is not their own sector.
 - *Mixed taxonomies to come.* Any future yfinance enrichment would put Yahoo names into taichi's Nasdaq table.
+
+## Pre-rollout history holes (found and healed 2026-11-28)
+
+**How it was found.** A file-by-file comparison of every `*/1D/*` year file (93,584 common files) found the following on p1:
+- `1D/SESSIONS`: the 2025 file was missing for 872 symbols, and 691 files for 2026 differed. The 2026 rows that were only on taichi date from January to mid-July 2026, plus 11 August/September values that differ.
+- `1D/OHLCV`: identical, except 62 old rows that exist only on p1.
+
+`compare --days 400` (from 2025-10-24) confirmed 101,696 rows missing on p1.
+
+**Why the backfill never filled it.**
+- The rows were lost through the old, lossy stream before the rollout.
+- All 916 affected buckets had a p1 watermark of 2026-11-27. `BackfillBucket` reads `[watermark, now]` plus a 24 h deep lookback, so a row dated before the watermark is never fetched again; its own comment says so.
+- The 5-day parity window cannot see it.
+- Since the rollout, writes go through the retained log and the ledger heal reaches any date. So this is a one-time pre-rollout hole, not an ongoing leak, but nothing re-checks old history.
+
+**The heal (approved).**
+1. Stopped p1 cleanly at 08:24 ET.
+2. Backed up `replication_watermarks.json` to `replication_watermarks.json.bak-20261128`.
+3. Removed the watermarks of the 916 `1D/SESSIONS` buckets.
+4. Restarted p1.
+
+The startup deep pass then read their full history: "missing=175054 revised=11 written=175065", in 29 s.
+
+**Verified.**
+- *Files.* All 12,665 `*/1D/SESSIONS/*.bin` year files are byte-identical on both hosts, with none missing.
+- *Rows.* `compare --since 2025-01-01 --buckets 1D/SESSIONS` (new flag, `9508e330`): 1,317,153 rows identical, 0 missing, 0 differing.
