@@ -138,6 +138,7 @@ A replica is a normal MarketStore instance started with `master_host` set.
   - the watermark store;
   - the worker pool;
   - the driver.
+- Reference data (sector and industry) is not replicated: a replica's watchlists read it from the master's Postgres. See [replica-postgres.md](../replication/replica-postgres.md).
 - `marketstore tool replication set-cursor | status` — set a stopped replica's cursor (`--seq N` or `--master-tail`), or show a running one's cursor, its master's last sequence and the lag.
 
 ## 5. Data flow

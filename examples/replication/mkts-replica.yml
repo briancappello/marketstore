@@ -82,3 +82,30 @@ replication:
 #   - module: some-other.so
 #     on: "*/1Min/OHLCV"
 #     skip_on_replica: true        # explicit opt-out for anything else
+
+# Reference data from the master's Postgres: the watchlist plugin's
+# SECTOR_AGGREGATE and INDUSTRY_AGGREGATE read sector/industry from the
+# MASTER's database (read-only role, the master's stable hostname), never from
+# a database of this replica's own. The replica runs no massive bgworker, so it
+# needs no symbols_dsn. See docs/replication/replica-postgres.md.
+#
+# bgworkers:
+#   - module: /path/to/marketstore-watchlists/watchlist.so
+#     name: WatchlistBaselines
+#     config:
+#       strategy_config:
+#         SECTOR_AGGREGATE:
+#           dsn: "postgres://sector_reader:PASSWORD@MASTER_DB_HOST:5432/fa_techan?sslmode=require"
+#           refresh: "1h"
+#           query: >
+#             SELECT a.ticker, s.name AS sector FROM equity e JOIN asset a ON a.id = e.id
+#             LEFT JOIN sector s ON s.id = e.sector_id
+#             WHERE a.is_active = TRUE AND a.delisted IS NULL
+#         INDUSTRY_AGGREGATE:
+#           dsn: "postgres://sector_reader:PASSWORD@MASTER_DB_HOST:5432/fa_techan?sslmode=require"
+#           refresh: "1h"
+#           query: >
+#             SELECT a.ticker, i.name AS industry, s.name AS sector FROM equity e
+#             JOIN asset a ON a.id = e.id LEFT JOIN industry i ON i.id = e.industry_id
+#             LEFT JOIN sector s ON s.id = e.sector_id
+#             WHERE a.is_active = TRUE AND a.delisted IS NULL
